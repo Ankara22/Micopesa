@@ -12,6 +12,7 @@ const auditLogRoutes = require("./routes/auditLogRoutes");
 const adminUserRoutes = require("./routes/adminUserRoutes");
 const systemSettingsRoutes = require("./routes/systemSettingsRoutes");
 const notificationRoutes = require("./routes/notificationRoutes");
+const workerNotificationRoutes = require("./routes/workerNotificationRoutes");
 const activityRoutes = require("./routes/activityRoutes");
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -31,6 +32,7 @@ app.use("/api/audit-logs", auditLogRoutes);
 app.use("/api/admin/users", adminUserRoutes);
 app.use("/api/admin/settings", systemSettingsRoutes);
 app.use("/api/admin/notifications", notificationRoutes);
+app.use("/api/notifications", workerNotificationRoutes);
 app.use("/api/admin/activity", activityRoutes);
 
 app.get("/", (req, res) => {

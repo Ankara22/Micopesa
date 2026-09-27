@@ -81,4 +81,29 @@ async function listNotifications(req, res) {
     }
 }
 
-module.exports = { createNotification, listNotifications };
+/**
+ * GET /api/notifications/my
+ * Returns only notifications addressed to the authenticated user.
+ */
+async function getMyNotifications(req, res) {
+    try {
+        const result = await pool.query(
+            `SELECT notification_id, notification_type, message, delivery_status,
+                    created_at, sent_at
+             FROM notifications
+             WHERE user_id = $1
+             ORDER BY created_at DESC`,
+            [req.user.userId]
+        );
+
+        return res.status(200).json({ status: "success", data: result.rows });
+    } catch (error) {
+        console.error("Failed to fetch worker notifications:", error);
+        return res.status(500).json({
+            status: "error",
+            message: "Failed to fetch notifications due to a server error",
+        });
+    }
+}
+
+module.exports = { createNotification, listNotifications, getMyNotifications };

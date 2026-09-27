@@ -4,6 +4,15 @@ const { generateToken } = require("../utils/token");
 
 const SALT_ROUNDS = 10;
 const MIN_PASSWORD_LENGTH = 8;
+const VALID_OCCUPATIONS = [
+    "BODA_BODA_OPERATOR",
+    "MARKET_VENDOR",
+    "JUA_KALI_ARTISAN",
+    "DOMESTIC_WORKER",
+    "CASUAL_LABOURER",
+    "SMALL_SCALE_FARMER",
+    "OTHER_INFORMAL_WORKER",
+];
 
 // Roles a user could theoretically hold, per the users.role CHECK constraint
 // in database/schema.sql. Public registration is NOT allowed to assign any
@@ -13,7 +22,7 @@ const PUBLIC_REGISTRATION_ROLE = "WORKER";
 
 /**
  * POST /api/auth/register
- * Body: { full_name, phone, password, occupation? }
+ * Body: { full_name, phone, password, occupation }
  *
  * SECURITY: any "role" field sent in the request body is deliberately
  * ignored. Public registration always creates a WORKER. Elevated roles
@@ -38,6 +47,14 @@ async function register(req, res) {
         });
     }
 
+    if (!VALID_OCCUPATIONS.includes(occupation)) {
+        return res.status(400).json({
+            status: "error",
+            message: `occupation must be one of: ${VALID_OCCUPATIONS.join(", ")}`,
+        });
+    }
+
+    let client;
     try {
         const existing = await pool.query(
             "SELECT user_id FROM users WHERE phone = $1",
@@ -53,14 +70,25 @@ async function register(req, res) {
 
         const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
 
-        const result = await pool.query(
+        client = await pool.connect();
+        await client.query("BEGIN");
+
+        const result = await client.query(
             `INSERT INTO users (full_name, phone, password_hash, role, occupation)
              VALUES ($1, $2, $3, $4, $5)
              RETURNING user_id, full_name, phone, role, occupation, account_status, created_at`,
-            [full_name, phone, passwordHash, PUBLIC_REGISTRATION_ROLE, occupation || null]
+            [full_name, phone, passwordHash, PUBLIC_REGISTRATION_ROLE, occupation]
         );
 
         const user = result.rows[0];
+        await client.query(
+            `INSERT INTO pension_accounts (user_id, current_balance, retirement_age)
+             VALUES ($1, 0.00, 60)
+             ON CONFLICT (user_id) DO NOTHING`,
+            [user.user_id]
+        );
+        await client.query("COMMIT");
+
         const token = generateToken({ userId: user.user_id, role: user.role });
 
         return res.status(201).json({
@@ -69,11 +97,22 @@ async function register(req, res) {
             data: { user, token },
         });
     } catch (error) {
+        if (client) {
+            await client.query("ROLLBACK").catch(() => {});
+        }
+        if (error.code === "23505") {
+            return res.status(409).json({
+                status: "error",
+                message: "A user with this phone number already exists",
+            });
+        }
         console.error("Registration failed:", error);
         return res.status(500).json({
             status: "error",
             message: "Registration failed due to a server error",
         });
+    } finally {
+        client?.release();
     }
 }
 

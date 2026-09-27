@@ -78,10 +78,10 @@ export function AuthProvider({ children }) {
         }
     }, []);
 
-    const register = useCallback(async (full_name, phone, password) => {
+    const register = useCallback(async (full_name, phone, password, occupation) => {
         setError(null);
         try {
-            const response = await api.post("/api/auth/register", { full_name, phone, password });
+            const response = await api.post("/api/auth/register", { full_name, phone, password, occupation });
             const { token: newToken, user: newUser } = response.data.data;
             sessionVersionRef.current += 1;
             localStorage.setItem(TOKEN_KEY, newToken);

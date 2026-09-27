@@ -39,7 +39,8 @@
   color: var(--text-h);
 }
 
-.auth-card input {
+.auth-card input,
+.auth-card select {
   font: inherit;
   padding: 10px 12px;
   border-radius: 8px;
@@ -49,7 +50,8 @@
   box-sizing: border-box;
 }
 
-.auth-card input:focus-visible {
+.auth-card input:focus-visible,
+.auth-card select:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }

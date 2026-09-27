@@ -12,6 +12,7 @@ function Register() {
 
     const [fullName, setFullName] = useState("");
     const [phone, setPhone] = useState("");
+    const [occupation, setOccupation] = useState("");
     const [password, setPassword] = useState("");
     const [confirmPassword, setConfirmPassword] = useState("");
     const [isSubmitting, setIsSubmitting] = useState(false);
@@ -21,7 +22,7 @@ function Register() {
         event.preventDefault();
         setFormError("");
 
-        if (!fullName || !phone || !password || !confirmPassword) {
+        if (!fullName || !phone || !occupation || !password || !confirmPassword) {
             setFormError("All fields are required.");
             return;
         }
@@ -37,7 +38,7 @@ function Register() {
         }
 
         setIsSubmitting(true);
-        const result = await register(fullName.trim(), phone.trim(), password);
+        const result = await register(fullName.trim(), phone.trim(), password, occupation);
         setIsSubmitting(false);
 
         if (!result.success) {
@@ -85,6 +86,25 @@ function Register() {
                     disabled={isSubmitting}
                     required
                 />
+
+                <label htmlFor="occupation">Occupation</label>
+                <select
+                    id="occupation"
+                    name="occupation"
+                    value={occupation}
+                    onChange={(e) => setOccupation(e.target.value)}
+                    disabled={isSubmitting}
+                    required
+                >
+                    <option value="">Select your occupation</option>
+                    <option value="BODA_BODA_OPERATOR">Boda boda operator</option>
+                    <option value="MARKET_VENDOR">Market vendor</option>
+                    <option value="JUA_KALI_ARTISAN">Jua kali artisan</option>
+                    <option value="DOMESTIC_WORKER">Domestic worker</option>
+                    <option value="CASUAL_LABOURER">Casual labourer</option>
+                    <option value="SMALL_SCALE_FARMER">Small-scale farmer</option>
+                    <option value="OTHER_INFORMAL_WORKER">Other informal worker</option>
+                </select>
 
                 <label htmlFor="password">Password</label>
                 <input
