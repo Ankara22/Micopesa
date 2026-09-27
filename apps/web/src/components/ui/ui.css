@@ -1,0 +1,371 @@
+/* Shared styles for reusable UI primitives (components/ui/*). Reuses the
+   design tokens already defined in src/index.css for visual consistency
+   with the rest of the app (auth pages, etc.). */
+
+/* --- Buttons --- */
+.btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    font: inherit;
+    font-weight: 600;
+    padding: 8px 16px;
+    border-radius: 8px;
+    border: 2px solid transparent;
+    cursor: pointer;
+    transition: border-color 0.2s, opacity 0.2s;
+    white-space: nowrap;
+}
+
+.btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+}
+
+.btn-sm {
+    padding: 5px 10px;
+    font-size: 13px;
+}
+
+.btn-primary {
+    color: var(--accent);
+    background: var(--accent-bg);
+}
+.btn-primary:hover:not(:disabled) {
+    border-color: var(--accent-border);
+}
+
+.btn-secondary {
+    color: var(--text-h);
+    background: transparent;
+    border-color: var(--border);
+}
+.btn-secondary:hover:not(:disabled) {
+    border-color: var(--text-h);
+}
+
+.btn-danger {
+    color: #dc2626;
+    background: rgba(220, 38, 38, 0.1);
+}
+.btn-danger:hover:not(:disabled) {
+    border-color: rgba(220, 38, 38, 0.5);
+}
+
+.btn-spinner {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 2px solid currentColor;
+    border-top-color: transparent;
+    animation: btn-spin 0.7s linear infinite;
+}
+@keyframes btn-spin {
+    to { transform: rotate(360deg); }
+}
+
+/* --- Cards --- */
+.card {
+    padding: 20px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--bg);
+}
+
+.card-title {
+    margin: 0 0 12px;
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-h);
+}
+
+.stat-card {
+    padding: 18px 20px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.stat-card-label {
+    font-size: 13px;
+    color: var(--text);
+}
+
+.stat-card-value {
+    font-size: 26px;
+    font-weight: 700;
+    color: var(--text-h);
+}
+
+.stat-card-hint {
+    font-size: 12px;
+    color: var(--text);
+}
+
+.stat-card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 16px;
+    margin-bottom: 24px;
+}
+
+/* --- Data table --- */
+.table-wrapper {
+    overflow-x: auto;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+}
+
+.data-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+}
+
+.data-table th {
+    text-align: left;
+    padding: 10px 14px;
+    background: var(--code-bg);
+    color: var(--text-h);
+    font-weight: 600;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+}
+
+.data-table td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-h);
+}
+
+.data-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+.data-table tbody tr:hover {
+    background: var(--accent-bg);
+}
+
+/* --- Status badge --- */
+.badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+}
+.badge-green { color: #15803d; background: rgba(21, 128, 61, 0.12); }
+.badge-yellow { color: #a16207; background: rgba(161, 98, 7, 0.12); }
+.badge-red { color: #dc2626; background: rgba(220, 38, 38, 0.12); }
+.badge-blue { color: #1d4ed8; background: rgba(29, 78, 216, 0.12); }
+.badge-gray { color: var(--text); background: var(--code-bg); }
+
+/* --- Modal --- */
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    z-index: 100;
+}
+
+.modal {
+    width: 100%;
+    max-width: 420px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: var(--shadow);
+    padding: 20px;
+    text-align: left;
+}
+
+.modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+}
+
+.modal-header h2 {
+    margin: 0;
+    font-size: 18px;
+}
+
+.modal-close {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 18px;
+    color: var(--text);
+    line-height: 1;
+}
+
+.modal-body {
+    margin-bottom: 16px;
+}
+
+.modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+/* --- Loading / error / empty states --- */
+.state-block {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 40px 20px;
+    text-align: center;
+    color: var(--text);
+}
+
+.spinner {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    animation: btn-spin 0.8s linear infinite;
+}
+
+.state-block .state-title {
+    font-weight: 600;
+    color: var(--text-h);
+}
+
+/* --- Forms --- */
+.form-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.form-field label {
+    display: block;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-h);
+    margin-bottom: 4px;
+}
+
+.form-field input,
+.form-field select,
+.form-field textarea {
+    width: 100%;
+    font: inherit;
+    padding: 9px 11px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text-h);
+    box-sizing: border-box;
+}
+
+.form-field input:focus-visible,
+.form-field select:focus-visible,
+.form-field textarea:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+}
+
+.form-field-hint {
+    font-size: 12px;
+    color: var(--text);
+    margin-top: 4px;
+}
+
+.form-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+}
+
+.form-error {
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: rgba(220, 38, 38, 0.1);
+    border: 1px solid rgba(220, 38, 38, 0.4);
+    color: #dc2626;
+    font-size: 14px;
+}
+
+.form-success {
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: rgba(21, 128, 61, 0.1);
+    border: 1px solid rgba(21, 128, 61, 0.4);
+    color: #15803d;
+    font-size: 14px;
+}
+
+/* --- Profile --- */
+.profile-list {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 8px 16px;
+    margin: 0;
+}
+.profile-list dt {
+    color: var(--text);
+    font-size: 13px;
+}
+.profile-list dd {
+    margin: 0;
+    font-weight: 600;
+    color: var(--text-h);
+}
+
+/* --- Unauthorized page --- */
+.unauthorized-page {
+    min-height: 100svh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    text-align: center;
+    padding: 24px;
+}
+.unauthorized-page a {
+    color: var(--accent);
+    font-weight: 600;
+}
+
+/* --- Page shell --- */
+.page-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 20px;
+}
+
+.page-title {
+    margin: 0;
+    font-size: 22px;
+}
+
+.page-subtitle {
+    margin: 4px 0 0;
+    color: var(--text);
+    font-size: 14px;
+}
+
+.section {
+    margin-bottom: 28px;
+}
