@@ -78,10 +78,15 @@ export function AuthProvider({ children }) {
         }
     }, []);
 
-    const register = useCallback(async (full_name, phone, password, occupation) => {
+    // `role` is optional and only meaningful when the backend's local-dev-only
+    // ALLOW_PRIVILEGED_SIGNUP flag is enabled; the backend ignores it entirely
+    // otherwise and always creates a WORKER.
+    const register = useCallback(async (full_name, phone, password, occupation, role) => {
         setError(null);
         try {
-            const response = await api.post("/api/auth/register", { full_name, phone, password, occupation });
+            const payload = { full_name, phone, password, occupation };
+            if (role) payload.role = role;
+            const response = await api.post("/api/auth/register", payload);
             const { token: newToken, user: newUser } = response.data.data;
             sessionVersionRef.current += 1;
             localStorage.setItem(TOKEN_KEY, newToken);

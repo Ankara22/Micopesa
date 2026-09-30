@@ -21,17 +21,34 @@ const VALID_ROLES = ["WORKER", "FUND_MANAGER", "REGULATOR", "ADMIN"];
 const PUBLIC_REGISTRATION_ROLE = "WORKER";
 
 /**
- * POST /api/auth/register
- * Body: { full_name, phone, password, occupation }
+ * LOCAL DEVELOPMENT ONLY. When ALLOW_PRIVILEGED_SIGNUP=true, the register
+ * endpoint additionally accepts a client-supplied `role` (validated against
+ * the exact VALID_ROLES allowlist) so a developer without working
+ * ADMIN/FUND_MANAGER/REGULATOR credentials can create test accounts for
+ * every role. Read fresh on every call (not cached at module load) so it
+ * can be toggled without restarting the server during local testing.
  *
- * SECURITY: any "role" field sent in the request body is deliberately
- * ignored. Public registration always creates a WORKER. Elevated roles
- * (FUND_MANAGER, REGULATOR, ADMIN) must be provisioned through a separate,
- * privileged workflow (e.g. an ADMIN-only user-management endpoint), not
- * through this public endpoint.
+ * Default (absent/false): public registration always forces WORKER,
+ * exactly as before. This flag must NEVER be enabled in production.
+ */
+function isPrivilegedSignupAllowed() {
+    return process.env.ALLOW_PRIVILEGED_SIGNUP === "true";
+}
+
+/**
+ * POST /api/auth/register
+ * Body: { full_name, phone, password, occupation, role? }
+ *
+ * SECURITY: by default, any "role" field sent in the request body is
+ * ignored and public registration always creates a WORKER. Elevated roles
+ * (FUND_MANAGER, REGULATOR, ADMIN) must normally be provisioned through a
+ * separate, privileged workflow (e.g. an ADMIN-only user-management
+ * endpoint), not through this public endpoint - unless the local-dev-only
+ * ALLOW_PRIVILEGED_SIGNUP flag is enabled (see isPrivilegedSignupAllowed).
  */
 async function register(req, res) {
     const { full_name, phone, password, occupation } = req.body;
+    const privilegedSignupAllowed = isPrivilegedSignupAllowed();
 
     if (!full_name || !phone || !password) {
         return res.status(400).json({
@@ -47,7 +64,30 @@ async function register(req, res) {
         });
     }
 
-    if (!VALID_OCCUPATIONS.includes(occupation)) {
+    let role = PUBLIC_REGISTRATION_ROLE;
+    if (privilegedSignupAllowed && req.body.role !== undefined) {
+        if (!VALID_ROLES.includes(req.body.role)) {
+            return res.status(400).json({
+                status: "error",
+                message: `role must be one of: ${VALID_ROLES.join(", ")}`,
+            });
+        }
+        role = req.body.role;
+    }
+
+    // WORKER accounts always require a valid occupation (they also get a
+    // pension account below). Privileged roles (FUND_MANAGER/REGULATOR/
+    // ADMIN) never receive a pension account, so occupation is optional for
+    // them, but if one is supplied it must still be a valid value.
+    if (role === "WORKER") {
+        if (!VALID_OCCUPATIONS.includes(occupation)) {
+            return res.status(400).json({
+                status: "error",
+                message: `occupation must be one of: ${VALID_OCCUPATIONS.join(", ")}`,
+            });
+        }
+    } else if (occupation !== undefined && occupation !== null && occupation !== "" &&
+        !VALID_OCCUPATIONS.includes(occupation)) {
         return res.status(400).json({
             status: "error",
             message: `occupation must be one of: ${VALID_OCCUPATIONS.join(", ")}`,
@@ -77,16 +117,18 @@ async function register(req, res) {
             `INSERT INTO users (full_name, phone, password_hash, role, occupation)
              VALUES ($1, $2, $3, $4, $5)
              RETURNING user_id, full_name, phone, role, occupation, account_status, created_at`,
-            [full_name, phone, passwordHash, PUBLIC_REGISTRATION_ROLE, occupation]
+            [full_name, phone, passwordHash, role, occupation || null]
         );
 
         const user = result.rows[0];
-        await client.query(
-            `INSERT INTO pension_accounts (user_id, current_balance, retirement_age)
-             VALUES ($1, 0.00, 60)
-             ON CONFLICT (user_id) DO NOTHING`,
-            [user.user_id]
-        );
+        if (user.role === "WORKER") {
+            await client.query(
+                `INSERT INTO pension_accounts (user_id, current_balance, retirement_age)
+                 VALUES ($1, 0.00, 60)
+                 ON CONFLICT (user_id) DO NOTHING`,
+                [user.user_id]
+            );
+        }
         await client.query("COMMIT");
 
         const token = generateToken({ userId: user.user_id, role: user.role });

@@ -6,6 +6,11 @@ import "./auth.css";
 
 const MIN_PASSWORD_LENGTH = 8;
 
+// LOCAL DEVELOPMENT ONLY. Must match the backend's ALLOW_PRIVILEGED_SIGNUP
+// flag. Never true in a production build.
+const PRIVILEGED_SIGNUP_ENABLED = import.meta.env.VITE_ALLOW_PRIVILEGED_SIGNUP === "true";
+const PRIVILEGED_ROLES = ["WORKER", "FUND_MANAGER", "REGULATOR", "ADMIN"];
+
 function Register() {
     const { register } = useAuth();
     const navigate = useNavigate();
@@ -13,17 +18,28 @@ function Register() {
     const [fullName, setFullName] = useState("");
     const [phone, setPhone] = useState("");
     const [occupation, setOccupation] = useState("");
+    const [role, setRole] = useState("WORKER");
     const [password, setPassword] = useState("");
     const [confirmPassword, setConfirmPassword] = useState("");
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [formError, setFormError] = useState("");
 
+    // Occupation is only required for WORKER accounts (they're the only
+    // role that gets a pension account). In privileged dev-only signup
+    // mode, a non-WORKER role makes occupation optional.
+    const occupationRequired = !PRIVILEGED_SIGNUP_ENABLED || role === "WORKER";
+
     async function handleSubmit(event) {
         event.preventDefault();
         setFormError("");
 
-        if (!fullName || !phone || !occupation || !password || !confirmPassword) {
-            setFormError("All fields are required.");
+        if (!fullName || !phone || !password || !confirmPassword) {
+            setFormError("Full name, phone number, and password are required.");
+            return;
+        }
+
+        if (occupationRequired && !occupation) {
+            setFormError("Occupation is required.");
             return;
         }
 
@@ -38,7 +54,13 @@ function Register() {
         }
 
         setIsSubmitting(true);
-        const result = await register(fullName.trim(), phone.trim(), password, occupation);
+        const result = await register(
+            fullName.trim(),
+            phone.trim(),
+            password,
+            occupation,
+            PRIVILEGED_SIGNUP_ENABLED ? role : undefined
+        );
         setIsSubmitting(false);
 
         if (!result.success) {
@@ -87,14 +109,37 @@ function Register() {
                     required
                 />
 
-                <label htmlFor="occupation">Occupation</label>
+                {PRIVILEGED_SIGNUP_ENABLED && (
+                    <>
+                        <label htmlFor="role">
+                            Role <span className="auth-dev-badge">Local dev only</span>
+                        </label>
+                        <select
+                            id="role"
+                            name="role"
+                            value={role}
+                            onChange={(e) => setRole(e.target.value)}
+                            disabled={isSubmitting}
+                        >
+                            {PRIVILEGED_ROLES.map((r) => (
+                                <option key={r} value={r}>
+                                    {r}
+                                </option>
+                            ))}
+                        </select>
+                    </>
+                )}
+
+                <label htmlFor="occupation">
+                    Occupation{!occupationRequired && " (optional)"}
+                </label>
                 <select
                     id="occupation"
                     name="occupation"
                     value={occupation}
                     onChange={(e) => setOccupation(e.target.value)}
                     disabled={isSubmitting}
-                    required
+                    required={occupationRequired}
                 >
                     <option value="">Select your occupation</option>
                     <option value="BODA_BODA_OPERATOR">Boda boda operator</option>
