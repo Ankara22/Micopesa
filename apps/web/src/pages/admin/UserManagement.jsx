@@ -21,21 +21,32 @@ function UserManagement() {
     const [status, setStatus] = useState("ACTIVE");
     const [submitting, setSubmitting] = useState(false);
     const [formError, setFormError] = useState("");
+    const [successMessage, setSuccessMessage] = useState("");
 
     function openModal(user) {
         setEditingUser(user);
         setStatus(user.account_status);
         setFormError("");
+        setSuccessMessage("");
     }
 
     async function handleSubmit(e) {
         e.preventDefault();
         setFormError("");
+        setSuccessMessage("");
         setSubmitting(true);
         try {
-            await updateUserStatus(editingUser.user_id, status);
+            // The backend only responds with success when the UPDATE actually
+            // persisted - and the response body carries the row's real,
+            // just-written account_status (via RETURNING), not an echo of
+            // what we asked for. Refetch the full list from that same
+            // source of truth so the table never shows an assumed value.
+            const updatedUser = await updateUserStatus(editingUser.user_id, status);
+            await usersApi.refetch();
             setEditingUser(null);
-            usersApi.refetch();
+            setSuccessMessage(
+                `${updatedUser.full_name}'s account status is now ${updatedUser.account_status}.`
+            );
         } catch (err) {
             setFormError(err.message || "Failed to update user status.");
         } finally {
@@ -73,6 +84,8 @@ function UserManagement() {
                     <p className="page-subtitle">View all users and manage their account status.</p>
                 </div>
             </div>
+
+            {successMessage && <div className="form-success" style={{ marginBottom: 12 }}>{successMessage}</div>}
 
             <DataTable
                 columns={columns}

@@ -84,6 +84,12 @@ async function updateUserRole(req, res) {
 /**
  * PATCH /api/admin/users/:userId/status
  * ADMIN only. Body: { account_status }
+ *
+ * The database is the source of truth: this handler only ever returns a
+ * success response when the UPDATE actually affected a row, and always
+ * returns the row's real, just-persisted account_status (via RETURNING)
+ * rather than echoing back the client's requested value.
+ *
  * Guards against an admin accidentally deactivating/suspending themselves
  * (self-lockout prevention).
  */
@@ -91,6 +97,13 @@ async function updateUserStatus(req, res) {
     const { userId: actingAdminId } = req.user;
     const { userId } = req.params;
     const { account_status } = req.body;
+
+    if (!userId || typeof userId !== "string") {
+        return res.status(400).json({
+            status: "error",
+            message: "A valid userId is required",
+        });
+    }
 
     if (!account_status || !VALID_STATUSES.includes(account_status)) {
         return res.status(400).json({
@@ -122,6 +135,17 @@ async function updateUserStatus(req, res) {
             data: { user: result.rows[0] },
         });
     } catch (error) {
+        // 23514 = Postgres check_violation. VALID_STATUSES above mirrors the
+        // users.account_status CHECK constraint exactly, so this should be
+        // unreachable in practice, but surfacing it as a 400 (rather than a
+        // generic 500) keeps the database's own constraint as the final
+        // source of truth without ever implying a write silently "succeeded".
+        if (error.code === "23514") {
+            return res.status(400).json({
+                status: "error",
+                message: `account_status must be one of: ${VALID_STATUSES.join(", ")}`,
+            });
+        }
         console.error("Failed to update user status:", error);
         return res.status(500).json({
             status: "error",
