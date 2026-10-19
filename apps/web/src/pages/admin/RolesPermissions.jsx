@@ -33,9 +33,11 @@ function RolesPermissions() {
         setFormError("");
         setSubmitting(true);
         try {
-            await updateUserRole(editingUser.user_id, role);
+            const updatedUser = await updateUserRole(editingUser.user_id, role);
+            usersApi.setData((users) =>
+                (users || []).map((user) => user.user_id === updatedUser.user_id ? updatedUser : user)
+            );
             setEditingUser(null);
-            usersApi.refetch();
         } catch (err) {
             setFormError(err.message || "Failed to update user role.");
         } finally {

@@ -36,13 +36,10 @@ function UserManagement() {
         setSuccessMessage("");
         setSubmitting(true);
         try {
-            // The backend only responds with success when the UPDATE actually
-            // persisted - and the response body carries the row's real,
-            // just-written account_status (via RETURNING), not an echo of
-            // what we asked for. Refetch the full list from that same
-            // source of truth so the table never shows an assumed value.
             const updatedUser = await updateUserStatus(editingUser.user_id, status);
-            await usersApi.refetch();
+            usersApi.setData((users) =>
+                (users || []).map((user) => user.user_id === updatedUser.user_id ? updatedUser : user)
+            );
             setEditingUser(null);
             setSuccessMessage(
                 `${updatedUser.full_name}'s account status is now ${updatedUser.account_status}.`
