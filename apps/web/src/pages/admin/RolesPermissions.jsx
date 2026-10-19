@@ -6,6 +6,7 @@ import Button from "../../components/ui/Button";
 import Modal from "../../components/ui/Modal";
 import FormField from "../../components/ui/FormField";
 import { useAuth } from "../../context/AuthContext";
+import { useToast } from "../../components/ui/ToastContext";
 
 const ROLE_OPTIONS = [
     { value: "WORKER", label: "Worker" },
@@ -16,21 +17,19 @@ const ROLE_OPTIONS = [
 
 function RolesPermissions() {
     const { user: currentUser } = useAuth();
+    const toast = useToast();
     const usersApi = useApi(listUsers, []);
     const [editingUser, setEditingUser] = useState(null);
     const [role, setRole] = useState("WORKER");
     const [submitting, setSubmitting] = useState(false);
-    const [formError, setFormError] = useState("");
 
     function openModal(user) {
         setEditingUser(user);
         setRole(user.role);
-        setFormError("");
     }
 
     async function handleSubmit(e) {
         e.preventDefault();
-        setFormError("");
         setSubmitting(true);
         try {
             const updatedUser = await updateUserRole(editingUser.user_id, role);
@@ -38,8 +37,9 @@ function RolesPermissions() {
                 (users || []).map((user) => user.user_id === updatedUser.user_id ? updatedUser : user)
             );
             setEditingUser(null);
+            toast.success(`${updatedUser.full_name}'s role is now ${updatedUser.role}.`);
         } catch (err) {
-            setFormError(err.message || "Failed to update user role.");
+            toast.error(err.message || "Failed to update user role.");
         } finally {
             setSubmitting(false);
         }
@@ -87,7 +87,6 @@ function RolesPermissions() {
             />
 
             <Modal open={Boolean(editingUser)} title={`Change role - ${editingUser?.full_name || ""}`} onClose={() => setEditingUser(null)}>
-                {formError && <div className="form-error" style={{ marginBottom: 12 }}>{formError}</div>}
                 <form className="form-grid" onSubmit={handleSubmit}>
                     <FormField
                         id="role"

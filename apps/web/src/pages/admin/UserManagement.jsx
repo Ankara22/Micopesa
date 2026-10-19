@@ -7,6 +7,7 @@ import Button from "../../components/ui/Button";
 import Modal from "../../components/ui/Modal";
 import FormField from "../../components/ui/FormField";
 import { useAuth } from "../../context/AuthContext";
+import { useToast } from "../../components/ui/ToastContext";
 
 const STATUS_OPTIONS = [
     { value: "ACTIVE", label: "Active" },
@@ -16,24 +17,19 @@ const STATUS_OPTIONS = [
 
 function UserManagement() {
     const { user: currentUser } = useAuth();
+    const toast = useToast();
     const usersApi = useApi(listUsers, []);
     const [editingUser, setEditingUser] = useState(null);
     const [status, setStatus] = useState("ACTIVE");
     const [submitting, setSubmitting] = useState(false);
-    const [formError, setFormError] = useState("");
-    const [successMessage, setSuccessMessage] = useState("");
 
     function openModal(user) {
         setEditingUser(user);
         setStatus(user.account_status);
-        setFormError("");
-        setSuccessMessage("");
     }
 
     async function handleSubmit(e) {
         e.preventDefault();
-        setFormError("");
-        setSuccessMessage("");
         setSubmitting(true);
         try {
             const updatedUser = await updateUserStatus(editingUser.user_id, status);
@@ -41,11 +37,11 @@ function UserManagement() {
                 (users || []).map((user) => user.user_id === updatedUser.user_id ? updatedUser : user)
             );
             setEditingUser(null);
-            setSuccessMessage(
+            toast.success(
                 `${updatedUser.full_name}'s account status is now ${updatedUser.account_status}.`
             );
         } catch (err) {
-            setFormError(err.message || "Failed to update user status.");
+            toast.error(err.message || "Failed to update user status.");
         } finally {
             setSubmitting(false);
         }
@@ -82,8 +78,6 @@ function UserManagement() {
                 </div>
             </div>
 
-            {successMessage && <div className="form-success" style={{ marginBottom: 12 }}>{successMessage}</div>}
-
             <DataTable
                 columns={columns}
                 rows={usersApi.data}
@@ -94,7 +88,6 @@ function UserManagement() {
             />
 
             <Modal open={Boolean(editingUser)} title={`Update status - ${editingUser?.full_name || ""}`} onClose={() => setEditingUser(null)}>
-                {formError && <div className="form-error" style={{ marginBottom: 12 }}>{formError}</div>}
                 <form className="form-grid" onSubmit={handleSubmit}>
                     <FormField
                         id="account_status"

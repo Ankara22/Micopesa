@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import useApi from "../../hooks/useApi";
 import { getEligibility, submitClaim, getMyClaims } from "../../services/withdrawalService";
 import Card from "../../components/ui/Card";
@@ -6,6 +6,9 @@ import DataTable from "../../components/ui/DataTable";
 import StatusBadge from "../../components/ui/StatusBadge";
 import FormField from "../../components/ui/FormField";
 import Button from "../../components/ui/Button";
+import Modal from "../../components/ui/Modal";
+import ErrorState from "../../components/ui/ErrorState";
+import { useToast } from "../../components/ui/ToastContext";
 
 function formatCurrency(value) {
     if (value === undefined || value === null) return "KSh 0.00";
@@ -16,39 +19,54 @@ const COLUMNS = [
     { key: "requested_at", header: "Requested", render: (row) => new Date(row.requested_at).toLocaleString() },
     { key: "amount_requested", header: "Amount", render: (row) => formatCurrency(row.amount_requested) },
     { key: "destination_phone", header: "Destination" },
+    { key: "withdrawal_reason", header: "Reason", render: (row) => row.withdrawal_reason || "-" },
     { key: "claim_status", header: "Status", render: (row) => <StatusBadge status={row.claim_status} /> },
 ];
 
 function Withdrawals() {
     const eligibilityApi = useApi(getEligibility, []);
     const claimsApi = useApi(getMyClaims, []);
+    const toast = useToast();
 
+    const [requestOpen, setRequestOpen] = useState(false);
     const [amount, setAmount] = useState("");
     const [phone, setPhone] = useState("");
+    const [reason, setReason] = useState("");
     const [submitting, setSubmitting] = useState(false);
-    const [formError, setFormError] = useState("");
-    const [successMessage, setSuccessMessage] = useState("");
+
+    useEffect(() => {
+        if (eligibilityApi.error) toast.error(eligibilityApi.error);
+    }, [eligibilityApi.error, toast]);
 
     async function handleSubmit(e) {
         e.preventDefault();
-        setFormError("");
-        setSuccessMessage("");
-
-        if (!amount || !phone) {
-            setFormError("Amount and destination phone are required.");
+        if (!amount || !phone || !reason.trim()) {
+            toast.error("Amount, destination phone, and withdrawal reason are required.");
             return;
         }
 
         setSubmitting(true);
         try {
-            await submitClaim({ amount_requested: Number(amount), destination_phone: phone });
-            setSuccessMessage("Withdrawal claim submitted successfully. It is now pending review.");
+            const result = await submitClaim({
+                amount_requested: Number(amount),
+                destination_phone: phone,
+                withdrawal_reason: reason.trim(),
+            });
+            claimsApi.setData((claims) => [result.claim, ...(claims || [])]);
+            toast.success("Withdrawal request submitted. It is now pending review.");
             setAmount("");
             setPhone("");
-            eligibilityApi.refetch();
-            claimsApi.refetch();
+            setReason("");
+            setRequestOpen(false);
+            const [eligibility, claims] = await Promise.all([
+                eligibilityApi.refetch(),
+                claimsApi.refetch(),
+            ]);
+            if (!eligibility || !claims) {
+                toast.info("Your request was saved, but some account details could not be refreshed.");
+            }
         } catch (err) {
-            setFormError(err.message || "Failed to submit withdrawal claim.");
+            toast.error(err.message || "Failed to submit withdrawal claim.");
         } finally {
             setSubmitting(false);
         }
@@ -67,7 +85,7 @@ function Withdrawals() {
 
             <Card title="Eligibility">
                 {eligibilityApi.loading && <p>Checking eligibility...</p>}
-                {eligibilityApi.error && <div className="form-error">{eligibilityApi.error}</div>}
+                {eligibilityApi.error && <ErrorState message={eligibilityApi.error} onRetry={eligibilityApi.refetch} />}
                 {eligibility && (
                     <>
                         <p>
@@ -91,9 +109,20 @@ function Withdrawals() {
             </Card>
 
             <div className="section card">
-                <h2 className="card-title">Submit a withdrawal claim</h2>
-                {formError && <div className="form-error" style={{ marginBottom: 12 }}>{formError}</div>}
-                {successMessage && <div className="form-success" style={{ marginBottom: 12 }}>{successMessage}</div>}
+                <h2 className="card-title">Request a withdrawal</h2>
+                <p className="page-subtitle">Submit a claim for review by a fund manager.</p>
+                <div className="form-actions" style={{ justifyContent: "flex-start", marginTop: 16 }}>
+                    <Button
+                        variant="primary"
+                        onClick={() => setRequestOpen(true)}
+                        disabled={!eligibility?.eligible || eligibilityApi.loading}
+                    >
+                        Request Withdrawal
+                    </Button>
+                </div>
+            </div>
+
+            <Modal open={requestOpen} title="Request a withdrawal" onClose={() => setRequestOpen(false)}>
                 <form className="form-grid" onSubmit={handleSubmit}>
                     <FormField
                         id="amount_requested"
@@ -112,14 +141,28 @@ function Withdrawals() {
                         value={phone}
                         onChange={(e) => setPhone(e.target.value)}
                         required
+                        disabled={submitting}
+                    />
+                    <FormField
+                        id="withdrawal_reason"
+                        label="Reason for withdrawal"
+                        as="textarea"
+                        maxLength="255"
+                        value={reason}
+                        onChange={(e) => setReason(e.target.value)}
+                        required
+                        disabled={submitting}
                     />
                     <div className="form-actions">
-                        <Button type="submit" variant="primary" loading={submitting} disabled={eligibility && !eligibility.eligible}>
-                            Submit claim
+                        <Button type="button" variant="secondary" onClick={() => setRequestOpen(false)}>
+                            Cancel
+                        </Button>
+                        <Button type="submit" variant="primary" loading={submitting}>
+                            Submit request
                         </Button>
                     </div>
                 </form>
-            </div>
+            </Modal>
 
             <div className="section">
                 <h2 className="card-title">Your withdrawal claims</h2>

@@ -62,5 +62,6 @@ export const ROLE_NAV = {
         { label: "Notifications", path: "/admin/notifications" },
         { label: "System Activity", path: "/admin/activity" },
         { label: "System Audit Logs", path: "/admin/audit-logs" },
+        { label: "Profile", path: "/admin/profile" },
     ],
 };

@@ -6,6 +6,7 @@ import StatusBadge from "../../components/ui/StatusBadge";
 import Button from "../../components/ui/Button";
 import Modal from "../../components/ui/Modal";
 import FormField from "../../components/ui/FormField";
+import { useToast } from "../../components/ui/ToastContext";
 
 const TYPE_OPTIONS = [
     { value: "SMS", label: "SMS" },
@@ -19,10 +20,10 @@ const EMPTY_FORM = { user_id: "", notification_type: "SMS", message: "" };
 function Notifications() {
     const notificationsApi = useApi(listNotifications, []);
     const usersApi = useApi(listUsers, []);
+    const toast = useToast();
     const [modalOpen, setModalOpen] = useState(false);
     const [form, setForm] = useState(EMPTY_FORM);
     const [submitting, setSubmitting] = useState(false);
-    const [formError, setFormError] = useState("");
 
     function handleChange(e) {
         const { name, value } = e.target;
@@ -31,15 +32,16 @@ function Notifications() {
 
     async function handleSubmit(e) {
         e.preventDefault();
-        setFormError("");
         setSubmitting(true);
         try {
             await createNotification(form);
             setModalOpen(false);
             setForm(EMPTY_FORM);
-            notificationsApi.refetch();
+            const notifications = await notificationsApi.refetch();
+            toast.success("Notification sent.");
+            if (!notifications) toast.error("Notification was sent, but the delivery list could not be refreshed.");
         } catch (err) {
-            setFormError(err.message || "Failed to send notification.");
+            toast.error(err.message || "Failed to send notification.");
         } finally {
             setSubmitting(false);
         }
@@ -82,7 +84,6 @@ function Notifications() {
             />
 
             <Modal open={modalOpen} title="Send a notification" onClose={() => setModalOpen(false)}>
-                {formError && <div className="form-error" style={{ marginBottom: 12 }}>{formError}</div>}
                 <form className="form-grid" onSubmit={handleSubmit}>
                     <FormField
                         id="user_id"

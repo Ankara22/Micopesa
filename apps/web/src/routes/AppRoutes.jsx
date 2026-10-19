@@ -43,6 +43,7 @@ import AdminSystemSettings from "../pages/admin/SystemSettings";
 import AdminNotifications from "../pages/admin/Notifications";
 import AdminSystemActivity from "../pages/admin/SystemActivity";
 import AdminAuditLogs from "../pages/admin/AuditLogs";
+import AdminProfile from "../pages/admin/Profile";
 
 /** Sends "/" to the signed-in user's own dashboard, or to /login otherwise. */
 function HomeRedirect() {
@@ -136,6 +137,7 @@ function AppRoutes() {
                 <Route path="/admin/notifications" element={<AdminNotifications />} />
                 <Route path="/admin/activity" element={<AdminSystemActivity />} />
                 <Route path="/admin/audit-logs" element={<AdminAuditLogs />} />
+                <Route path="/admin/profile" element={<AdminProfile />} />
             </Route>
 
             <Route path="*" element={<Navigate to="/" replace />} />

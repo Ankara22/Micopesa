@@ -78,6 +78,26 @@ export function AuthProvider({ children }) {
         }
     }, []);
 
+    const refreshUser = useCallback(async () => {
+        const versionAtStart = sessionVersionRef.current;
+        const tokenAtStart = localStorage.getItem(TOKEN_KEY);
+        if (!tokenAtStart) {
+            throw new Error("Your session is no longer available. Please sign in again.");
+        }
+
+        const response = await api.get("/api/auth/me");
+        if (
+            sessionVersionRef.current !== versionAtStart ||
+            localStorage.getItem(TOKEN_KEY) !== tokenAtStart
+        ) {
+            return null;
+        }
+
+        const currentUser = response.data.data.user;
+        setUser(currentUser);
+        return currentUser;
+    }, []);
+
     // `role` is optional and only meaningful when the backend's local-dev-only
     // ALLOW_PRIVILEGED_SIGNUP flag is enabled; the backend ignores it entirely
     // otherwise and always creates a WORKER.
@@ -119,6 +139,7 @@ export function AuthProvider({ children }) {
         error,
         login,
         register,
+        refreshUser,
         logout,
     };
 

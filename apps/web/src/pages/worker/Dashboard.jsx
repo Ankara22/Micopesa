@@ -1,12 +1,15 @@
 import { Link } from "react-router-dom";
+import { useCallback } from "react";
 import useApi from "../../hooks/useApi";
 import { getMyBalance } from "../../services/accountService";
-import { getMyPlan } from "../../services/retirementService";
+import { getRetirementPlan, updateRetirementPlan } from "../../services/retirementApi";
 import { getMyClaims } from "../../services/withdrawalService";
 import { StatCard } from "../../components/ui/Card";
-import LoadingState from "../../components/ui/LoadingState";
+import SkeletonLoader from "../../components/ui/SkeletonLoader";
 import ErrorState from "../../components/ui/ErrorState";
 import Button from "../../components/ui/Button";
+import PlanForm from "../../components/Retirement/PlanForm";
+import ProjectionSummary from "../../components/Retirement/ProjectionSummary";
 
 function formatCurrency(value) {
     if (value === undefined || value === null) return "KSh 0.00";
@@ -15,13 +18,20 @@ function formatCurrency(value) {
 
 function WorkerDashboard() {
     const balanceApi = useApi(getMyBalance, []);
-    const planApi = useApi(() => getMyPlan().catch(() => null), []);
+    const fetchPlan = useCallback(
+        () => getRetirementPlan().catch((err) => {
+            if (err.status === 404) return null;
+            throw err;
+        }),
+        []
+    );
+    const planApi = useApi(fetchPlan, []);
     const claimsApi = useApi(() => getMyClaims().catch(() => []), []);
 
     const loading = balanceApi.loading || planApi.loading || claimsApi.loading;
     const error = balanceApi.error;
 
-    if (loading) return <LoadingState message="Loading your dashboard..." />;
+    if (loading) return <SkeletonLoader variant="metrics" count={4} label="Loading your dashboard" />;
     if (error) return <ErrorState message={error} onRetry={balanceApi.refetch} />;
 
     const balance = balanceApi.data;
@@ -53,6 +63,29 @@ function WorkerDashboard() {
                 />
                 <StatCard label="Pending Withdrawal Claims" value={pendingClaims} />
             </div>
+
+            {planApi.error ? (
+                <ErrorState message={planApi.error} onRetry={planApi.refetch} />
+            ) : (
+                <>
+                    {plan && (
+                        <ProjectionSummary
+                            plan={plan}
+                            projection={projection}
+                            currentBalance={balance?.current_balance}
+                        />
+                    )}
+                    <PlanForm
+                        plan={plan}
+                        projection={projection}
+                        onSaved={async (payload) => {
+                            const result = await updateRetirementPlan(payload);
+                            planApi.setData(result);
+                            return result;
+                        }}
+                    />
+                </>
+            )}
 
             <div className="section card">
                 <h2 className="card-title">Quick actions</h2>

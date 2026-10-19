@@ -1,4 +1,5 @@
 const pool = require("../db/database");
+const { writeAuditLog } = require("../utils/auditLog");
 
 const VALID_ROLES = ["WORKER", "FUND_MANAGER", "REGULATOR", "ADMIN"];
 const VALID_STATUSES = ["ACTIVE", "INACTIVE", "SUSPENDED"];
@@ -60,24 +61,37 @@ async function updateUserRole(req, res) {
         });
     }
 
+    const client = await pool.connect();
     try {
-        const result = await pool.query(
+        await client.query("BEGIN");
+        const result = await client.query(
             `UPDATE users SET role = $1, updated_at = now() WHERE user_id = $2 RETURNING ${SAFE_COLUMNS}`,
             [role, userId]
         );
 
         if (result.rows.length === 0) {
+            await client.query("ROLLBACK");
             return res.status(404).json({ status: "error", message: "User not found" });
         }
 
+        await writeAuditLog(client, {
+            userId: actingAdminId,
+            actionType: "UPDATE",
+            entityName: "USERS_ROLE",
+            entityId: userId,
+        });
+        await client.query("COMMIT");
         return res.status(200).json({
             status: "success",
             message: "User role updated successfully",
             data: { user: result.rows[0] },
         });
     } catch (error) {
+        await client.query("ROLLBACK");
         console.error("Failed to update user role:", error);
         return res.status(500).json({ status: "error", message: "Failed to update user role due to a server error" });
+    } finally {
+        client.release();
     }
 }
 
@@ -119,22 +133,33 @@ async function updateUserStatus(req, res) {
         });
     }
 
+    const client = await pool.connect();
     try {
-        const result = await pool.query(
+        await client.query("BEGIN");
+        const result = await client.query(
             `UPDATE users SET account_status = $1, updated_at = now() WHERE user_id = $2 RETURNING ${SAFE_COLUMNS}`,
             [account_status, userId]
         );
 
         if (result.rows.length === 0) {
+            await client.query("ROLLBACK");
             return res.status(404).json({ status: "error", message: "User not found" });
         }
 
+        await writeAuditLog(client, {
+            userId: actingAdminId,
+            actionType: "UPDATE",
+            entityName: "USERS_ACCOUNT_STATUS",
+            entityId: userId,
+        });
+        await client.query("COMMIT");
         return res.status(200).json({
             status: "success",
             message: "User account status updated successfully",
             data: { user: result.rows[0] },
         });
     } catch (error) {
+        await client.query("ROLLBACK");
         // 23514 = Postgres check_violation. VALID_STATUSES above mirrors the
         // users.account_status CHECK constraint exactly, so this should be
         // unreachable in practice, but surfacing it as a 400 (rather than a
@@ -151,6 +176,8 @@ async function updateUserStatus(req, res) {
             status: "error",
             message: "Failed to update user status due to a server error",
         });
+    } finally {
+        client.release();
     }
 }
 

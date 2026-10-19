@@ -6,6 +6,7 @@ import StatusBadge from "./ui/StatusBadge";
 import Button from "./ui/Button";
 import Modal from "./ui/Modal";
 import FormField from "./ui/FormField";
+import { useToast } from "./ui/ToastContext";
 
 const REPORT_TYPE_OPTIONS = [
     { value: "RBA", label: "RBA" },
@@ -33,10 +34,10 @@ const COLUMNS = [
  */
 function ComplianceReportsPanel({ title, subtitle }) {
     const reportsApi = useApi(listReports, []);
+    const toast = useToast();
     const [modalOpen, setModalOpen] = useState(false);
     const [form, setForm] = useState(EMPTY_FORM);
     const [submitting, setSubmitting] = useState(false);
-    const [formError, setFormError] = useState("");
 
     function handleChange(e) {
         const { name, value } = e.target;
@@ -45,15 +46,16 @@ function ComplianceReportsPanel({ title, subtitle }) {
 
     async function handleSubmit(e) {
         e.preventDefault();
-        setFormError("");
         setSubmitting(true);
         try {
             await createReport(form);
             setModalOpen(false);
             setForm(EMPTY_FORM);
-            reportsApi.refetch();
+            const reports = await reportsApi.refetch();
+            toast.success("Compliance report created successfully.");
+            if (!reports) toast.error("The report was created, but the report list could not be refreshed.");
         } catch (err) {
-            setFormError(err.message || "Failed to create report.");
+            toast.error(err.message || "Failed to create report.");
         } finally {
             setSubmitting(false);
         }
@@ -82,7 +84,6 @@ function ComplianceReportsPanel({ title, subtitle }) {
             />
 
             <Modal open={modalOpen} title="Create a report" onClose={() => setModalOpen(false)}>
-                {formError && <div className="form-error" style={{ marginBottom: 12 }}>{formError}</div>}
                 <form className="form-grid" onSubmit={handleSubmit}>
                     <FormField
                         id="report_type"

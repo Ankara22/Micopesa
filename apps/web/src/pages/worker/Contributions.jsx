@@ -6,6 +6,7 @@ import DataTable from "../../components/ui/DataTable";
 import StatusBadge from "../../components/ui/StatusBadge";
 import FormField from "../../components/ui/FormField";
 import Button from "../../components/ui/Button";
+import { useToast } from "../../components/ui/ToastContext";
 
 function formatCurrency(value) {
     if (value === undefined || value === null) return "KSh 0.00";
@@ -23,22 +24,21 @@ const COLUMNS = [
 function Contributions() {
     const balanceApi = useApi(getMyBalance, []);
     const contributionsApi = useApi(getMyContributions, []);
+    const toast = useToast();
     const [amount, setAmount] = useState("");
     const [channel, setChannel] = useState("MPESA");
     const [isSubmitting, setIsSubmitting] = useState(false);
-    const [submission, setSubmission] = useState(null);
 
     async function handleSubmit(event) {
         event.preventDefault();
-        setSubmission(null);
         setIsSubmitting(true);
         try {
             const result = await initiateMyContribution({ amount, channel });
-            setSubmission({ message: result.message, error: false });
+            toast.success(result.message || "Contribution initiated successfully.");
             setAmount("");
             await contributionsApi.refetch();
         } catch (error) {
-            setSubmission({ message: error.message || "Could not initiate contribution.", error: true });
+            toast.error(error.message || "Could not initiate contribution.");
         } finally {
             setIsSubmitting(false);
         }
@@ -62,16 +62,11 @@ function Contributions() {
 
             <div className="section card">
                 <h2 className="card-title">Make a contribution</h2>
-                <div className="form-error" role="note" style={{ marginBottom: 14 }}>
+                <div className="form-note" role="note" style={{ marginBottom: 14 }}>
                     Initiation records a pending contribution and transaction. Payment is not collected
                     or confirmed yet because a payment-provider callback is not configured. Your balance
                     changes only after a future payment-confirmation workflow completes.
                 </div>
-                {submission && (
-                    <div className={submission.error ? "auth-error" : "form-success"} role="status">
-                        {submission.message}
-                    </div>
-                )}
                 <form className="form-grid" onSubmit={handleSubmit}>
                     <FormField
                         id="amount"

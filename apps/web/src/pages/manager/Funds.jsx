@@ -6,6 +6,7 @@ import StatusBadge from "../../components/ui/StatusBadge";
 import Button from "../../components/ui/Button";
 import Modal from "../../components/ui/Modal";
 import FormField from "../../components/ui/FormField";
+import { useToast } from "../../components/ui/ToastContext";
 
 const RISK_OPTIONS = [
     { value: "LOW", label: "Low" },
@@ -23,16 +24,15 @@ const EMPTY_FORM = { fund_name: "", administrator_name: "", risk_level: "MEDIUM"
 
 function Funds() {
     const fundsApi = useApi(listFunds, []);
+    const toast = useToast();
     const [modalOpen, setModalOpen] = useState(false);
     const [editingFund, setEditingFund] = useState(null);
     const [form, setForm] = useState(EMPTY_FORM);
     const [submitting, setSubmitting] = useState(false);
-    const [formError, setFormError] = useState("");
 
     function openCreateModal() {
         setEditingFund(null);
         setForm(EMPTY_FORM);
-        setFormError("");
         setModalOpen(true);
     }
 
@@ -45,7 +45,6 @@ function Funds() {
             expected_return: fund.expected_return,
             fund_status: fund.fund_status,
         });
-        setFormError("");
         setModalOpen(true);
     }
 
@@ -56,7 +55,6 @@ function Funds() {
 
     async function handleSubmit(e) {
         e.preventDefault();
-        setFormError("");
         setSubmitting(true);
         try {
             if (editingFund) {
@@ -68,9 +66,11 @@ function Funds() {
                 await createFund({ ...form, expected_return: Number(form.expected_return) });
             }
             setModalOpen(false);
-            fundsApi.refetch();
+            const funds = await fundsApi.refetch();
+            toast.success(editingFund ? "Fund updated successfully." : "Fund created successfully.");
+            if (!funds) toast.error("The fund was saved, but the list could not be refreshed.");
         } catch (err) {
-            setFormError(err.message || "Failed to save fund.");
+            toast.error(err.message || "Failed to save fund.");
         } finally {
             setSubmitting(false);
         }
@@ -116,7 +116,6 @@ function Funds() {
             />
 
             <Modal open={modalOpen} title={editingFund ? "Edit fund" : "Create fund"} onClose={() => setModalOpen(false)}>
-                {formError && <div className="form-error" style={{ marginBottom: 12 }}>{formError}</div>}
                 <form className="form-grid" onSubmit={handleSubmit}>
                     <FormField id="fund_name" label="Fund name" value={form.fund_name} onChange={handleChange} required />
                     <FormField

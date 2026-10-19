@@ -4,6 +4,7 @@ import { getPendingClaims, approveClaim, rejectClaim } from "../../services/with
 import DataTable from "../../components/ui/DataTable";
 import Button from "../../components/ui/Button";
 import Modal from "../../components/ui/Modal";
+import { useToast } from "../../components/ui/ToastContext";
 
 function formatCurrency(value) {
     if (value === undefined || value === null) return "KSh 0.00";
@@ -12,14 +13,13 @@ function formatCurrency(value) {
 
 function WithdrawalRequests() {
     const claimsApi = useApi(getPendingClaims, []);
-    const [confirming, setConfirming] = useState(null); // { claim, decision }
+    const toast = useToast();
+    const [confirming, setConfirming] = useState(null);
     const [processing, setProcessing] = useState(false);
-    const [actionError, setActionError] = useState("");
 
     async function handleConfirm() {
         if (!confirming) return;
         setProcessing(true);
-        setActionError("");
         try {
             if (confirming.decision === "approve") {
                 await approveClaim(confirming.claim.claim_id);
@@ -27,9 +27,11 @@ function WithdrawalRequests() {
                 await rejectClaim(confirming.claim.claim_id);
             }
             setConfirming(null);
-            claimsApi.refetch();
+            const claims = await claimsApi.refetch();
+            if (claims) toast.success("Withdrawal claim reviewed successfully.");
+            else toast.error("The claim was reviewed, but the list could not be refreshed.");
         } catch (err) {
-            setActionError(err.message || "Failed to update the claim.");
+            toast.error(err.message || "Failed to update the claim.");
         } finally {
             setProcessing(false);
         }
@@ -40,6 +42,7 @@ function WithdrawalRequests() {
         { key: "phone", header: "Phone" },
         { key: "amount_requested", header: "Amount", render: (row) => formatCurrency(row.amount_requested) },
         { key: "destination_phone", header: "Destination" },
+        { key: "withdrawal_reason", header: "Reason", render: (row) => row.withdrawal_reason || "-" },
         { key: "requested_at", header: "Requested", render: (row) => new Date(row.requested_at).toLocaleString() },
         {
             key: "actions",
@@ -81,7 +84,6 @@ function WithdrawalRequests() {
                 title={confirming?.decision === "approve" ? "Approve withdrawal claim?" : "Reject withdrawal claim?"}
                 onClose={() => setConfirming(null)}
             >
-                {actionError && <div className="form-error" style={{ marginBottom: 12 }}>{actionError}</div>}
                 {confirming && (
                     <p>
                         {confirming.decision === "approve" ? "Approve" : "Reject"} the claim for{" "}

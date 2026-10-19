@@ -176,7 +176,7 @@ async function login(req, res) {
 
     try {
         const result = await pool.query(
-            "SELECT user_id, full_name, phone, password_hash, role, account_status FROM users WHERE phone = $1",
+            "SELECT user_id, full_name, phone, password_hash, role, occupation, account_status, created_at FROM users WHERE phone = $1",
             [phone]
         );
 
@@ -217,6 +217,9 @@ async function login(req, res) {
                     full_name: user.full_name,
                     phone: user.phone,
                     role: user.role,
+                    occupation: user.occupation,
+                    account_status: user.account_status,
+                    created_at: user.created_at,
                 },
             },
         });

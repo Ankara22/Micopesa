@@ -1,4 +1,6 @@
 .app-shell {
+    width: 100%;
+    min-width: 0;
     min-height: 100svh;
     display: flex;
     flex-direction: column;
@@ -48,12 +50,13 @@
     padding: 2px 8px;
     border-radius: 999px;
     background: var(--accent-bg);
-    color: var(--accent);
+    color: var(--accent-text);
 }
 
 .app-body {
     display: flex;
     flex: 1;
+    width: 100%;
     min-height: 0;
 }
 
@@ -89,17 +92,23 @@
 }
 
 .app-sidebar nav a.active {
-    color: var(--accent);
-    border-left-color: var(--accent);
-    background: var(--accent-bg);
+    color: var(--accent-text);
+    border-left: 3px solid var(--accent-mint);
+    background: linear-gradient(90deg, rgba(16, 185, 129, 0.15), transparent);
     font-weight: 600;
 }
 
 .app-main {
     flex: 1;
     min-width: 0;
-    padding: 24px;
+    padding: 24px 32px;
     box-sizing: border-box;
+}
+
+@media (max-width: 768px) {
+    .app-main {
+        padding: 1rem;
+    }
 }
 
 @media (max-width: 860px) {

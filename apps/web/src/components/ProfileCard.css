@@ -1,0 +1,210 @@
+.profile-content {
+    width: 100%;
+    display: grid;
+    gap: 22px;
+}
+
+.profile-hero {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    padding: 26px;
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    background:
+        linear-gradient(115deg, rgba(16, 185, 129, 0.12), transparent 65%),
+        var(--bg);
+}
+
+.profile-avatar {
+    width: 76px;
+    height: 76px;
+    flex: 0 0 76px;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    color: #fff;
+    background: var(--accent-gradient);
+    box-shadow: var(--accent-glow);
+    font-size: 25px;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+}
+
+.profile-hero-copy {
+    min-width: 0;
+    flex: 1;
+}
+
+.profile-eyebrow {
+    margin: 0 0 4px;
+    color: var(--accent-text);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+}
+
+.profile-name {
+    margin: 0;
+    color: var(--text-h);
+    font-size: clamp(24px, 3vw, 34px);
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    line-height: 1.2;
+    overflow-wrap: anywhere;
+}
+
+.profile-description {
+    margin-top: 7px;
+    color: var(--text);
+    font-size: 14px;
+}
+
+.profile-badges {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+.profile-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.5fr) minmax(270px, 0.9fr);
+    align-items: start;
+    gap: 20px;
+}
+
+.profile-card {
+    min-width: 0;
+    height: 100%;
+    box-sizing: border-box;
+}
+
+.profile-details {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0 20px;
+    margin: 0;
+}
+
+.profile-detail {
+    min-width: 0;
+    padding: 14px 0;
+    border-bottom: 1px solid var(--border);
+}
+
+.profile-detail dt {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 5px;
+    color: var(--text);
+    font-size: 13px;
+}
+
+.profile-detail-icon {
+    width: 18px;
+    color: var(--accent-text);
+    text-align: center;
+}
+
+.profile-detail dd {
+    margin: 0;
+    color: var(--text-h);
+    font-size: 15px;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+.profile-readonly-note,
+.profile-privacy-note {
+    margin: 17px 0 0;
+    color: var(--text);
+    font-size: 13px;
+}
+
+.profile-tools-intro {
+    margin: 0 0 14px;
+    color: var(--text);
+    font-size: 14px;
+}
+
+.profile-links {
+    display: grid;
+    gap: 8px;
+}
+
+.profile-link {
+    min-height: 48px;
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    color: var(--text-h);
+    text-decoration: none;
+    font-size: 14px;
+    font-weight: 600;
+    transition: border-color 0.2s, background-color 0.2s;
+}
+
+.profile-link:hover,
+.profile-link:focus-visible {
+    border-color: var(--accent-border);
+    background: var(--accent-bg);
+}
+
+.profile-link:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+.profile-link-icon {
+    width: 24px;
+    color: var(--accent-text);
+    font-size: 18px;
+    text-align: center;
+}
+
+.profile-link-arrow {
+    margin-left: auto;
+    color: var(--accent-text);
+    font-size: 18px;
+}
+
+@media (max-width: 900px) {
+    .profile-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+@media (max-width: 600px) {
+    .profile-hero {
+        align-items: flex-start;
+        flex-wrap: wrap;
+        gap: 14px;
+        padding: 19px;
+    }
+
+    .profile-avatar {
+        width: 60px;
+        height: 60px;
+        flex-basis: 60px;
+        font-size: 21px;
+    }
+
+    .profile-hero-copy {
+        flex-basis: calc(100% - 80px);
+    }
+
+    .profile-badges {
+        justify-content: flex-start;
+        padding-left: 74px;
+    }
+
+    .profile-details {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}

@@ -6,6 +6,7 @@ import FormField from "../../components/ui/FormField";
 import Button from "../../components/ui/Button";
 import LoadingState from "../../components/ui/LoadingState";
 import ErrorState from "../../components/ui/ErrorState";
+import { useToast } from "../../components/ui/ToastContext";
 
 /**
  * The actual form, split into its own component so its local state can be
@@ -13,6 +14,7 @@ import ErrorState from "../../components/ui/ErrorState";
  * on mount - no effect needed to "sync" server data into form state.
  */
 function PlanForm({ plan, projection, onSaved }) {
+    const toast = useToast();
     const [form, setForm] = useState(() => ({
         target_amount: plan?.target_amount ?? "",
         target_retirement_age: plan?.target_age ?? "",
@@ -20,8 +22,6 @@ function PlanForm({ plan, projection, onSaved }) {
         current_age: "",
     }));
     const [submitting, setSubmitting] = useState(false);
-    const [formError, setFormError] = useState("");
-    const [successMessage, setSuccessMessage] = useState("");
 
     function handleChange(e) {
         const { name, value } = e.target;
@@ -30,9 +30,6 @@ function PlanForm({ plan, projection, onSaved }) {
 
     async function handleSubmit(e) {
         e.preventDefault();
-        setFormError("");
-        setSuccessMessage("");
-
         const payload = {
             target_amount: Number(form.target_amount),
             target_retirement_age: Number(form.target_retirement_age),
@@ -43,10 +40,10 @@ function PlanForm({ plan, projection, onSaved }) {
         setSubmitting(true);
         try {
             await saveMyPlan(payload);
-            setSuccessMessage("Retirement plan saved successfully.");
-            onSaved();
+            await onSaved();
+            toast.success("Retirement plan saved successfully.");
         } catch (err) {
-            setFormError(err.message || "Failed to save retirement plan.");
+            toast.error(err.message || "Failed to save retirement plan.");
         } finally {
             setSubmitting(false);
         }
@@ -54,8 +51,6 @@ function PlanForm({ plan, projection, onSaved }) {
 
     return (
         <Card title={plan ? "Update your plan" : "Create a retirement plan"}>
-            {formError && <div className="form-error" style={{ marginBottom: 12 }}>{formError}</div>}
-            {successMessage && <div className="form-success" style={{ marginBottom: 12 }}>{successMessage}</div>}
             <form className="form-grid" onSubmit={handleSubmit}>
                 <FormField
                     id="target_amount"

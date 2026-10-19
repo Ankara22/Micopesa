@@ -34,7 +34,9 @@ function DataTable({ columns, rows, rowKey = "id", loading, error, onRetry, empt
                     {rows.map((row) => (
                         <tr key={row[rowKey]}>
                             {columns.map((col) => (
-                                <td key={col.key}>{col.render ? col.render(row) : row[col.key]}</td>
+                                <td key={col.key} data-label={col.header || undefined}>
+                                    {col.render ? col.render(row) : row[col.key]}
+                                </td>
                             ))}
                         </tr>
                     ))}

@@ -2,14 +2,14 @@ import { Link } from "react-router-dom";
 import useApi from "../../hooks/useApi";
 import { getActivitySummary } from "../../services/adminService";
 import { StatCard } from "../../components/ui/Card";
-import LoadingState from "../../components/ui/LoadingState";
+import SkeletonLoader from "../../components/ui/SkeletonLoader";
 import ErrorState from "../../components/ui/ErrorState";
 import Button from "../../components/ui/Button";
 
 function AdminDashboard() {
     const summaryApi = useApi(getActivitySummary, []);
 
-    if (summaryApi.loading) return <LoadingState message="Loading system overview..." />;
+    if (summaryApi.loading) return <SkeletonLoader variant="metrics" count={4} label="Loading system overview" />;
     if (summaryApi.error) return <ErrorState message={summaryApi.error} onRetry={summaryApi.refetch} />;
 
     const summary = summaryApi.data || {};

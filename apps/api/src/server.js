@@ -14,6 +14,8 @@ const systemSettingsRoutes = require("./routes/systemSettingsRoutes");
 const notificationRoutes = require("./routes/notificationRoutes");
 const workerNotificationRoutes = require("./routes/workerNotificationRoutes");
 const activityRoutes = require("./routes/activityRoutes");
+const fundManagerRoutes = require("./routes/fundManagerRoutes");
+const regulatorRoutes = require("./routes/regulatorRoutes");
 const app = express();
 const PORT = process.env.PORT || 5000;
 
@@ -34,6 +36,8 @@ app.use("/api/admin/settings", systemSettingsRoutes);
 app.use("/api/admin/notifications", notificationRoutes);
 app.use("/api/notifications", workerNotificationRoutes);
 app.use("/api/admin/activity", activityRoutes);
+app.use("/api/fund-manager", fundManagerRoutes);
+app.use("/api/regulator", regulatorRoutes);
 
 app.get("/", (req, res) => {
     res.json({
