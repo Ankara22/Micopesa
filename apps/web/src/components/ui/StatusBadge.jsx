@@ -11,6 +11,7 @@ const COLOR_MAP = {
 
     PENDING: "yellow",
     SUBMITTED: "yellow",
+    TIMED_OUT: "yellow",
 
     REJECTED: "red",
     FAILED: "red",

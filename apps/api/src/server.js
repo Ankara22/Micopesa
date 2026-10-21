@@ -16,6 +16,7 @@ const workerNotificationRoutes = require("./routes/workerNotificationRoutes");
 const activityRoutes = require("./routes/activityRoutes");
 const fundManagerRoutes = require("./routes/fundManagerRoutes");
 const regulatorRoutes = require("./routes/regulatorRoutes");
+const mpesaRoutes = require("./routes/mpesaRoutes");
 const app = express();
 const PORT = process.env.PORT || 5000;
 
@@ -38,6 +39,7 @@ app.use("/api/notifications", workerNotificationRoutes);
 app.use("/api/admin/activity", activityRoutes);
 app.use("/api/fund-manager", fundManagerRoutes);
 app.use("/api/regulator", regulatorRoutes);
+app.use("/api/mpesa", mpesaRoutes);
 
 app.get("/", (req, res) => {
     res.json({
@@ -62,6 +64,10 @@ app.get("/api/health/db", async (req, res) => {
     }
 });
 
-app.listen(PORT, () => {
-    console.log(`MicoPesa API running on http://localhost:${PORT}`);
-});
+if (require.main === module) {
+    app.listen(PORT, () => {
+        console.log(`MicoPesa API running on http://localhost:${PORT}`);
+    });
+}
+
+module.exports = app;

@@ -1,0 +1,16 @@
+{
+  "name": "micopesa",
+  "private": true,
+  "scripts": {
+    "test": "npm run db:test:setup && npm run test:api && npm run test:frontend",
+    "test:frontend": "npm --prefix apps/web run test",
+    "test:api": "node --env-file=.env.test --test apps/api/tests/regression.test.js",
+    "test:coverage": "npm run db:test:setup && npm run test:api:coverage && npm run test:frontend:coverage",
+    "test:api:coverage": "node --env-file=.env.test --experimental-test-coverage --test apps/api/tests/regression.test.js",
+    "test:frontend:coverage": "npm --prefix apps/web run test:coverage",
+    "lint": "npm --prefix apps/web run lint",
+    "build": "npm --prefix apps/web run build",
+    "db:test:setup": "node --env-file=.env.test tests/scripts/dbTestSetup.js",
+    "db:test:teardown": "node --env-file=.env.test tests/scripts/dbTestTeardown.js"
+  }
+}

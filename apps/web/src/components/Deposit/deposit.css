@@ -1,0 +1,148 @@
+.deposit-modal-content {
+    display: grid;
+    gap: 18px;
+}
+
+.deposit-tabs {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 5px;
+    padding: 4px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--code-bg);
+}
+
+.deposit-tab {
+    min-height: 42px;
+    padding: 8px;
+    border: 0;
+    border-radius: 7px;
+    color: var(--text);
+    background: transparent;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.deposit-tab.active {
+    color: var(--text-h);
+    background: var(--bg);
+    box-shadow: var(--shadow);
+}
+
+.deposit-tab:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+.deposit-intro {
+    color: var(--text);
+    font-size: 14px;
+}
+
+.deposit-payment-state {
+    display: flex;
+    align-items: flex-start;
+    gap: 13px;
+    padding: 16px;
+    border: 1px solid var(--accent-border);
+    border-radius: 11px;
+    background: var(--accent-bg);
+}
+
+.deposit-payment-state.success {
+    border-color: var(--success-border);
+    background: var(--success-bg);
+}
+
+.deposit-payment-state.failure {
+    border-color: rgba(220, 38, 38, 0.4);
+    background: rgba(220, 38, 38, 0.1);
+}
+
+.deposit-status-indicator {
+    width: 28px;
+    height: 28px;
+    flex: 0 0 28px;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    color: #fff;
+    background: var(--accent);
+    font-weight: 700;
+}
+
+.deposit-payment-state.success .deposit-status-indicator {
+    background: #059669;
+}
+
+.deposit-payment-state.failure .deposit-status-indicator {
+    background: #dc2626;
+}
+
+.deposit-payment-state h3,
+.deposit-bank-unavailable h3 {
+    margin: 0 0 5px;
+    color: var(--text-h);
+    font-size: 16px;
+}
+
+.deposit-payment-state p,
+.deposit-bank-unavailable p {
+    margin: 0;
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.deposit-payment-state .deposit-poll-message,
+.deposit-payment-state .deposit-receipt {
+    margin-top: 9px;
+}
+
+.deposit-new-payment {
+    margin-top: 14px;
+}
+
+.deposit-receipt {
+    color: var(--text-h) !important;
+    font-weight: 600;
+}
+
+.deposit-spinner {
+    width: 15px;
+    height: 15px;
+    border: 2px solid rgba(255, 255, 255, 0.5);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: btn-spin 0.7s linear infinite;
+}
+
+.deposit-bank-unavailable {
+    padding: 22px 14px;
+    text-align: center;
+}
+
+.deposit-bank-icon {
+    width: 44px;
+    height: 44px;
+    display: grid;
+    place-items: center;
+    margin: 0 auto 12px;
+    border-radius: 50%;
+    color: var(--accent-text);
+    background: var(--accent-bg);
+    font-size: 22px;
+}
+
+.deposit-bank-unavailable h3 {
+    margin-bottom: 8px;
+}
+
+@media (max-width: 480px) {
+    .deposit-tab {
+        font-size: 12px;
+    }
+}

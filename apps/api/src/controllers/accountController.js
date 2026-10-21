@@ -70,7 +70,8 @@ async function getMyContributions(req, res) {
         const contributionsResult = await pool.query(
                 `SELECT c.contribution_id, c.transaction_id, c.amount, c.channel,
                     c.contribution_status, c.created_at,
-                    t.transaction_status, t.mpesa_receipt, t.completed_at
+                    t.transaction_status, t.mpesa_receipt, t.mpesa_result_code,
+                    t.mpesa_result_description, t.completed_at
                  FROM contributions c
                  JOIN transactions t ON t.transaction_id = c.transaction_id
                  WHERE c.account_id = $1
@@ -121,6 +122,13 @@ async function initiateMyContribution(req, res) {
         return res.status(400).json({
             status: "error",
             message: `channel must be one of: ${validChannels.join(", ")}`,
+        });
+    }
+
+    if (channel === "MPESA") {
+        return res.status(409).json({
+            status: "error",
+            message: "Use the M-Pesa STK Push flow to initiate a payment",
         });
     }
 

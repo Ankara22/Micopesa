@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 import useApi from "../../hooks/useApi";
 import { getMyBalance } from "../../services/accountService";
 import { getRetirementPlan, updateRetirementPlan } from "../../services/retirementApi";
@@ -10,6 +10,7 @@ import ErrorState from "../../components/ui/ErrorState";
 import Button from "../../components/ui/Button";
 import PlanForm from "../../components/Retirement/PlanForm";
 import ProjectionSummary from "../../components/Retirement/ProjectionSummary";
+import DepositModal from "../../components/Deposit/DepositModal";
 
 function formatCurrency(value) {
     if (value === undefined || value === null) return "KSh 0.00";
@@ -17,7 +18,14 @@ function formatCurrency(value) {
 }
 
 function WorkerDashboard() {
+    const [depositOpen, setDepositOpen] = useState(false);
     const balanceApi = useApi(getMyBalance, []);
+    const { setData: setBalanceData } = balanceApi;
+    const handleDepositCompleted = useCallback((payment) => {
+        if (payment.account_balance !== undefined) {
+            setBalanceData((current) => ({ ...current, current_balance: payment.account_balance }));
+        }
+    }, [setBalanceData]);
     const fetchPlan = useCallback(
         () => getRetirementPlan().catch((err) => {
             if (err.status === 404) return null;
@@ -90,8 +98,9 @@ function WorkerDashboard() {
             <div className="section card">
                 <h2 className="card-title">Quick actions</h2>
                 <div className="form-actions" style={{ justifyContent: "flex-start", flexWrap: "wrap" }}>
+                    <Button variant="primary" onClick={() => setDepositOpen(true)}>Make a Deposit</Button>
                     <Link to="/worker/contributions">
-                        <Button variant="primary">Make a Contribution</Button>
+                        <Button variant="secondary">Contribution History</Button>
                     </Link>
                     <Link to="/worker/withdrawals">
                         <Button variant="secondary">Request a Withdrawal</Button>
@@ -101,6 +110,11 @@ function WorkerDashboard() {
                     </Link>
                 </div>
             </div>
+            <DepositModal
+                open={depositOpen}
+                onClose={() => setDepositOpen(false)}
+                onCompleted={handleDepositCompleted}
+            />
         </div>
     );
 }
