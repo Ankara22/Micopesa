@@ -1,0 +1,225 @@
+.admin-dashboard {
+    width: 100%;
+    max-width: 1180px;
+    margin: 0 auto;
+    text-align: left;
+}
+
+.admin-dashboard-header {
+    margin-bottom: 24px;
+}
+
+.admin-dashboard-eyebrow {
+    margin: 0 0 4px;
+    color: var(--accent-text);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+
+.admin-dashboard .page-title,
+.admin-dashboard .page-subtitle {
+    text-align: left;
+}
+
+.admin-dashboard-section {
+    min-width: 0;
+}
+
+.admin-dashboard-stats {
+    margin-bottom: 16px;
+}
+
+.admin-dashboard-card {
+    min-width: 0;
+    padding: 20px;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--bg);
+}
+
+.admin-dashboard-section-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    margin-bottom: 14px;
+}
+
+.admin-dashboard-section-heading h2,
+.admin-dashboard-navigation h2 {
+    margin: 0;
+    color: var(--text-h);
+    font-size: 18px;
+    line-height: 1.35;
+}
+
+.admin-dashboard-link {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    color: var(--accent-text);
+    font-size: 14px;
+    font-weight: 700;
+    text-underline-offset: 3px;
+    white-space: nowrap;
+}
+
+.admin-dashboard-link:focus-visible,
+.admin-dashboard-navigation a:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+    border-radius: 3px;
+}
+
+.admin-dashboard-status-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.admin-dashboard-status-list li {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 44px;
+    padding: 0 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+}
+
+.admin-dashboard-status-list strong {
+    color: var(--text-h);
+    font-variant-numeric: tabular-nums;
+}
+
+.admin-dashboard-content {
+    display: grid;
+    grid-template-columns: minmax(0, 1.5fr) minmax(250px, 0.9fr);
+    gap: 16px;
+    margin-top: 20px;
+}
+
+.admin-dashboard-activity,
+.admin-dashboard-navigation {
+    height: fit-content;
+}
+
+.admin-dashboard-audit-list,
+.admin-dashboard-navigation ul {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.admin-dashboard-audit-list li {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 14px 0;
+    border-bottom: 1px solid var(--border);
+}
+
+.admin-dashboard-audit-list li:last-child {
+    border-bottom: 0;
+}
+
+.admin-dashboard-audit-copy {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+}
+
+.admin-dashboard-audit-copy strong {
+    color: var(--text-h);
+    overflow-wrap: anywhere;
+}
+
+.admin-dashboard-audit-copy span,
+.admin-dashboard-audit-list time,
+.admin-dashboard-navigation small,
+.admin-dashboard-empty {
+    color: var(--text);
+    font-size: 13px;
+}
+
+.admin-dashboard-audit-list time {
+    flex: 0 0 auto;
+    text-align: right;
+}
+
+.admin-dashboard-navigation h2 {
+    margin-bottom: 8px;
+}
+
+.admin-dashboard-navigation li {
+    border-top: 1px solid var(--border);
+}
+
+.admin-dashboard-navigation li a {
+    display: grid;
+    gap: 2px;
+    min-height: 56px;
+    align-content: center;
+    color: var(--accent-text);
+    font-weight: 700;
+    text-decoration: none;
+}
+
+.admin-dashboard-navigation li a:hover span {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+}
+
+.admin-dashboard-navigation small {
+    font-weight: 400;
+    line-height: 1.4;
+}
+
+.admin-dashboard-empty {
+    margin: 12px 0 0;
+    line-height: 1.5;
+}
+
+.admin-dashboard .state-block {
+    text-align: left;
+}
+
+@media (max-width: 760px) {
+    .admin-dashboard-content {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+@media (max-width: 520px) {
+    .admin-dashboard-header {
+        margin-bottom: 18px;
+    }
+
+    .admin-dashboard-card {
+        padding: 16px;
+    }
+
+    .admin-dashboard-section-heading {
+        align-items: flex-start;
+    }
+
+    .admin-dashboard-section-heading h2,
+    .admin-dashboard-navigation h2 {
+        font-size: 17px;
+    }
+
+    .admin-dashboard-audit-list li {
+        flex-direction: column;
+        gap: 4px;
+    }
+
+    .admin-dashboard-audit-list time {
+        text-align: left;
+    }
+}
