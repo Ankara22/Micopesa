@@ -74,7 +74,7 @@ async function login(phone, password = TEST_PASSWORD) {
     return response.body?.data?.token;
 }
 
-function mockDaraja({ amount = 2500, phoneNumber = "254700000004" } = {}) {
+function mockDaraja({ amount = 2500, phoneNumber = "254700000004", missingCheckoutRequestId = false } = {}) {
     darajaMockResponse = async (url, init) => {
         if (url.pathname.startsWith("/oauth/")) {
             return Response.json({ access_token: "mock-access-token", expires_in: "3600" });
@@ -86,11 +86,14 @@ function mockDaraja({ amount = 2500, phoneNumber = "254700000004" } = {}) {
             assert.equal(payload.PartyA, payload.PhoneNumber);
             assert.equal(payload.PhoneNumber, phoneNumber);
             assert.equal(payload.Amount, amount);
-            return Response.json({
+            const response = {
                 ResponseCode: "0",
-                CheckoutRequestID: `ws_CO_TEST_${++mockedCheckoutCounter}`,
                 CustomerMessage: "Success. Request accepted for processing",
-            });
+            };
+            if (!missingCheckoutRequestId) {
+                response.CheckoutRequestID = `ws_CO_TEST_${++mockedCheckoutCounter}`;
+            }
+            return Response.json(response);
         }
         throw new Error(`Unexpected Daraja URL in mock: ${url.pathname}`);
     };
@@ -261,6 +264,87 @@ test("profile identity is token-scoped and malformed profile paths do not resolv
     assert.equal((await request(`/api/auth/me/${fixtures.users["5"]}`, { token })).status, 404);
 });
 
+test("admin role and account-status updates persist independently and append audit records", async () => {
+    const adminToken = await login("254700000001");
+    const userId = fixtures.users["4"];
+    const initial = await request(`/api/admin/users/${userId}`, { token: adminToken });
+    assert.equal(initial.status, 200);
+    assert.equal(initial.body.data.user.role, "WORKER");
+    assert.equal(initial.body.data.user.account_status, "ACTIVE");
+
+    const suspended = await request(`/api/admin/users/${userId}/status`, {
+        method: "PATCH",
+        token: adminToken,
+        body: { account_status: "SUSPENDED" },
+    });
+    assert.equal(suspended.status, 200);
+    assert.equal(suspended.body.data.user.account_status, "SUSPENDED");
+    assert.equal(suspended.body.data.user.role, "WORKER");
+    const statusReadback = await request(`/api/admin/users/${userId}`, { token: adminToken });
+    assert.equal(statusReadback.body.data.user.account_status, "SUSPENDED");
+
+    const promoted = await request(`/api/admin/users/${userId}/role`, {
+        method: "PATCH",
+        token: adminToken,
+        body: { role: "FUND_MANAGER" },
+    });
+    assert.equal(promoted.status, 200);
+    assert.equal(promoted.body.data.user.role, "FUND_MANAGER");
+    assert.equal(promoted.body.data.user.account_status, "SUSPENDED");
+    const roleReadback = await request(`/api/admin/users/${userId}`, { token: adminToken });
+    assert.equal(roleReadback.body.data.user.role, "FUND_MANAGER");
+    assert.equal(roleReadback.body.data.user.account_status, "SUSPENDED");
+
+    const reactivated = await request(`/api/admin/users/${userId}/status`, {
+        method: "PATCH",
+        token: adminToken,
+        body: { account_status: "ACTIVE" },
+    });
+    assert.equal(reactivated.body.data.user.role, "FUND_MANAGER");
+    assert.equal(reactivated.body.data.user.account_status, "ACTIVE");
+
+    const audit = await request("/api/audit-logs/system", { token: adminToken });
+    const userUpdates = audit.body.data.filter((entry) => entry.entity_id === userId);
+    assert.deepEqual(
+        userUpdates.map((entry) => entry.entity_name).sort(),
+        ["USERS_ACCOUNT_STATUS", "USERS_ACCOUNT_STATUS", "USERS_ROLE"]
+    );
+    assert.ok(userUpdates.every((entry) => entry.user_id === fixtures.users.admin && entry.timestamp));
+});
+
+test("invalid or unauthorized admin role and status updates leave the user unchanged", async () => {
+    const adminToken = await login("254700000001");
+    const workerToken = await login("254700000004");
+    const userId = fixtures.users["5"];
+    const initial = await request(`/api/admin/users/${userId}`, { token: adminToken });
+    const originalUser = initial.body.data.user;
+
+    assert.equal((await request(`/api/admin/users/${userId}/role`, {
+        method: "PATCH",
+        token: adminToken,
+        body: { role: "SUPERADMIN" },
+    })).status, 400);
+    assert.equal((await request(`/api/admin/users/${userId}/status`, {
+        method: "PATCH",
+        token: adminToken,
+        body: { account_status: "DELETED" },
+    })).status, 400);
+    assert.equal((await request(`/api/admin/users/${userId}/role`, {
+        method: "PATCH",
+        token: workerToken,
+        body: { role: "REGULATOR" },
+    })).status, 403);
+    assert.equal((await request(`/api/admin/users/${userId}/status`, {
+        method: "PATCH",
+        token: workerToken,
+        body: { account_status: "SUSPENDED" },
+    })).status, 403);
+
+    const readback = await request(`/api/admin/users/${userId}`, { token: adminToken });
+    assert.equal(readback.body.data.user.role, originalUser.role);
+    assert.equal(readback.body.data.user.account_status, originalUser.account_status);
+});
+
 test("worker receives only own pending contributions with exact decimal amounts", async () => {
     const token = await login("254700000004");
     const response = await request("/api/accounts/my-contributions", { token });
@@ -346,6 +430,116 @@ test("direct contribution confirmation is rejected; only the mocked callback can
     assert.equal(Number(persisted.rows[0].current_balance), Number(before.rows[0].current_balance) + 2500);
     const count = await pool.query("SELECT count(*)::int AS count FROM transactions WHERE mpesa_receipt = 'TESTRECEIPT001'");
     assert.equal(count.rows[0].count, 1);
+});
+
+test("invalid M-Pesa amounts and phone numbers are rejected before creating payment records", async () => {
+    const token = await login("254700000004");
+    const before = await pool.query("SELECT count(*)::int AS count FROM transactions");
+
+    for (const amount of [0, -1, 1.5, "not-a-number"]) {
+        assert.equal((await request("/api/mpesa/stkpush", {
+            method: "POST",
+            token,
+            body: { amount, phoneNumber: "0700000004" },
+        })).status, 400);
+    }
+    for (const phoneNumber of ["12345", "2547000000041", "0200000000"]) {
+        assert.equal((await request("/api/mpesa/stkpush", {
+            method: "POST",
+            token,
+            body: { amount: 2500, phoneNumber },
+        })).status, 400);
+    }
+
+    const after = await pool.query("SELECT count(*)::int AS count FROM transactions");
+    assert.equal(after.rows[0].count, before.rows[0].count);
+    assert.equal(darajaRequests.length, 0);
+});
+
+test("payment callback amount or phone mismatches never credit an account", async () => {
+    mockDaraja();
+    const token = await login("254700000004");
+    const before = await pool.query(
+        "SELECT current_balance FROM pension_accounts WHERE account_id = $1",
+        [fixtures.accounts.workerA]
+    );
+
+    for (const [callbackAmount, callbackPhone, expectedDescription] of [
+        [2499, 254700000004, "Payment amount did not match the pending deposit"],
+        [2500, 254700000005, "Payment phone number did not match the pending deposit"],
+    ]) {
+        const initiated = await request("/api/mpesa/stkpush", {
+            method: "POST",
+            token,
+            body: { amount: 2500, phoneNumber: "0700000004" },
+        });
+        assert.equal(initiated.status, 202);
+        const callback = await request("/api/mpesa/callback", {
+            method: "POST",
+            body: {
+                Body: {
+                    stkCallback: {
+                        CheckoutRequestID: initiated.body.data.checkout_request_id,
+                        ResultCode: 0,
+                        CallbackMetadata: {
+                            Item: [
+                                { Name: "Amount", Value: callbackAmount },
+                                { Name: "MpesaReceiptNumber", Value: `MISMATCH${mockedCheckoutCounter}` },
+                                { Name: "PhoneNumber", Value: callbackPhone },
+                            ],
+                        },
+                    },
+                },
+            },
+        });
+        assert.equal(callback.status, 200);
+        const saved = await pool.query(
+            `SELECT t.transaction_status, t.mpesa_result_description, c.contribution_status
+             FROM transactions t JOIN contributions c ON c.transaction_id = t.transaction_id
+             WHERE t.checkout_request_id = $1`,
+            [initiated.body.data.checkout_request_id]
+        );
+        assert.equal(saved.rows[0].transaction_status, "FAILED");
+        assert.equal(saved.rows[0].contribution_status, "FAILED");
+        assert.equal(saved.rows[0].mpesa_result_description, expectedDescription);
+    }
+
+    const after = await pool.query(
+        "SELECT current_balance FROM pension_accounts WHERE account_id = $1",
+        [fixtures.accounts.workerA]
+    );
+    assert.equal(after.rows[0].current_balance, before.rows[0].current_balance);
+});
+
+test("payment status is user-scoped and missing provider identifiers remain pending", async () => {
+    mockDaraja();
+    const workerAToken = await login("254700000004");
+    const workerBToken = await login("254700000005");
+    const initiated = await request("/api/mpesa/stkpush", {
+        method: "POST",
+        token: workerAToken,
+        body: { amount: 2500, phoneNumber: "0700000004" },
+    });
+    assert.equal(initiated.status, 202);
+    assert.equal((await request(`/api/mpesa/status/${initiated.body.data.checkout_request_id}`, {
+        token: workerBToken,
+    })).status, 404);
+    assert.equal((await request(`/api/mpesa/status/${initiated.body.data.checkout_request_id}`, {
+        token: workerAToken,
+    })).body.data.transaction_status, "PENDING");
+
+    mockDaraja({ missingCheckoutRequestId: true });
+    const noProviderId = await request("/api/mpesa/stkpush", {
+        method: "POST",
+        token: workerAToken,
+        body: { amount: 2500, phoneNumber: "0700000004" },
+    });
+    assert.equal(noProviderId.status, 202);
+    assert.equal(noProviderId.body.data.checkout_request_id, null);
+    assert.equal(noProviderId.body.data.transaction_status, "PENDING");
+    assert.equal((await request(`/api/mpesa/status/${noProviderId.body.data.transaction_id}`, {
+        token: workerAToken,
+    })).body.data.transaction_status, "PENDING");
 });
 
 test("mocked Daraja cancellation and timeout callbacks retain distinct statuses", async () => {

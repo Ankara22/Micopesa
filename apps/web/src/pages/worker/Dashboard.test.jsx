@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import WorkerDashboard from './Dashboard'
@@ -33,7 +33,13 @@ vi.mock('../../components/Retirement/ProjectionSummary', () => ({
   default: () => <div>Retirement projection summary</div>,
 }))
 vi.mock('../../components/Deposit/DepositModal', () => ({
-  default: ({ open }) => open ? <div role="dialog">Deposit flow</div> : null,
+  default: ({ open, onCompleted }) => open ? (
+    <div role="dialog">
+      <span>Deposit flow</span>
+      <button onClick={() => onCompleted({ transaction_status: 'PENDING' })}>Pending payment update</button>
+      <button onClick={() => onCompleted({ transaction_status: 'COMPLETED' })}>Verified payment update</button>
+    </div>
+  ) : null,
 }))
 
 function renderDashboard() {
@@ -99,6 +105,24 @@ describe('WorkerDashboard', () => {
     await waitFor(() => {
       expect(screen.getByText('Could not load withdrawal requests')).toBeInTheDocument()
       expect(screen.getByText('Could not load contributions')).toBeInTheDocument()
+    })
+  })
+
+  it('refreshes balance and contribution history only after a completed payment update', async () => {
+    renderDashboard()
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Make a contribution' })[0])
+    expect(serviceMocks.getMyBalance).toHaveBeenCalledTimes(1)
+    expect(serviceMocks.getMyContributions).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Pending payment update' }))
+    expect(serviceMocks.getMyBalance).toHaveBeenCalledTimes(1)
+    expect(serviceMocks.getMyContributions).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Verified payment update' }))
+    await waitFor(() => {
+      expect(serviceMocks.getMyBalance).toHaveBeenCalledTimes(2)
+      expect(serviceMocks.getMyContributions).toHaveBeenCalledTimes(2)
     })
   })
 })

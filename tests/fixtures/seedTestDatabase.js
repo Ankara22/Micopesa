@@ -4,21 +4,85 @@ const apiRequire = createRequire(path.resolve(__dirname, "../../apps/api/package
 const bcrypt = apiRequire("bcrypt");
 
 const TEST_PASSWORD = "TestPassword123!";
+const TEST_USERS = [
+    ["Admin Example", "254700000001", "ADMIN", "ACTIVE"],
+    ["Fund Manager Example", "254700000002", "FUND_MANAGER", "ACTIVE"],
+    ["Regulator Example", "254700000003", "REGULATOR", "ACTIVE"],
+    ["Worker A Example", "254700000004", "WORKER", "ACTIVE"],
+    ["Worker B Example", "254700000005", "WORKER", "ACTIVE"],
+    ["Inactive Worker Example", "254700000006", "WORKER", "INACTIVE"],
+];
+const TEST_PHONES = TEST_USERS.map(([, phone]) => phone);
+
+async function cleanTestFixtures(pool) {
+    const client = await pool.connect();
+    try {
+        await client.query("BEGIN");
+        const existingUsers = await client.query(
+            "SELECT user_id, phone, full_name FROM users WHERE phone = ANY($1)",
+            [TEST_PHONES]
+        );
+        const nonFixtureUser = await client.query(
+            "SELECT phone FROM users WHERE NOT (phone = ANY($1)) LIMIT 1",
+            [TEST_PHONES]
+        );
+        if (nonFixtureUser.rowCount) {
+            throw new Error("Refusing to reset test fixtures: users table contains non-fixture users.");
+        }
+        const expectedNames = new Map(TEST_USERS.map(([name, phone]) => [phone, name]));
+        if (existingUsers.rows.some((user) => expectedNames.get(user.phone) !== user.full_name)) {
+            throw new Error("Refusing to reset test fixtures: a reserved test phone belongs to a different user.");
+        }
+
+        const userIds = existingUsers.rows.map((user) => user.user_id);
+        if (userIds.length) {
+            const testAccounts = await client.query(
+                "SELECT account_id FROM pension_accounts WHERE user_id = ANY($1)",
+                [userIds]
+            );
+            const accountIds = testAccounts.rows.map((account) => account.account_id);
+            const associatedTransactions = await client.query(
+                `SELECT DISTINCT t.transaction_id
+                 FROM transactions t
+                 LEFT JOIN contributions c ON c.transaction_id = t.transaction_id
+                 LEFT JOIN pension_accounts pa ON pa.account_id = c.account_id
+                 WHERE pa.user_id = ANY($1) OR t.mpesa_phone = ANY($2)`,
+                [userIds, TEST_PHONES]
+            );
+            const transactionIds = associatedTransactions.rows.map((row) => row.transaction_id);
+
+            await client.query("DELETE FROM audit_logs WHERE user_id = ANY($1)", [userIds]);
+            await client.query("DELETE FROM compliance_reports WHERE generated_by = ANY($1)", [userIds]);
+            await client.query(
+                `DELETE FROM fund_allocations fa USING funds f
+                 WHERE fa.fund_id = f.fund_id AND f.managed_by = ANY($1)`,
+                [userIds]
+            );
+            await client.query("DELETE FROM funds WHERE managed_by = ANY($1)", [userIds]);
+            await client.query("DELETE FROM contributions WHERE account_id = ANY($1)", [accountIds]);
+            await client.query("DELETE FROM transactions WHERE transaction_id = ANY($1)", [transactionIds]);
+            await client.query("DELETE FROM users WHERE user_id = ANY($1)", [userIds]);
+        }
+
+        const remainingAuditLogs = await client.query("SELECT count(*)::int AS count FROM audit_logs");
+        if (remainingAuditLogs.rows[0].count !== 0) {
+            throw new Error("Refusing to seed fixtures while non-fixture audit records remain in the test database.");
+        }
+        await client.query("COMMIT");
+    } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+    } finally {
+        client.release();
+    }
+}
 
 async function seedTestDatabase(pool) {
-    await pool.query("TRUNCATE TABLE users, transactions CASCADE");
+    await cleanTestFixtures(pool);
     const passwordHash = await bcrypt.hash(TEST_PASSWORD, 4);
     const users = {};
-    const userData = [
-        ["Admin Example", "254700000001", "ADMIN", "ACTIVE"],
-        ["Fund Manager Example", "254700000002", "FUND_MANAGER", "ACTIVE"],
-        ["Regulator Example", "254700000003", "REGULATOR", "ACTIVE"],
-        ["Worker A Example", "254700000004", "WORKER", "ACTIVE"],
-        ["Worker B Example", "254700000005", "WORKER", "ACTIVE"],
-        ["Inactive Worker Example", "254700000006", "WORKER", "INACTIVE"],
-    ];
 
-    for (const [fullName, phone, role, accountStatus] of userData) {
+    for (const [fullName, phone, role, accountStatus] of TEST_USERS) {
         const result = await pool.query(
             `INSERT INTO users (full_name, phone, password_hash, role, account_status, occupation)
              VALUES ($1, $2, $3, $4, $5, 'OTHER_INFORMAL_WORKER')

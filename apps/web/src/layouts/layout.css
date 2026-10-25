@@ -4,6 +4,8 @@
     min-height: 100svh;
     display: flex;
     flex-direction: column;
+    color: var(--text-h);
+    background: var(--app-bg);
 }
 
 .app-header {
@@ -25,6 +27,12 @@
     font-size: 20px;
     cursor: pointer;
     color: var(--text-h);
+}
+
+.sidebar-toggle:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+    border-radius: 4px;
 }
 
 .app-header-title {
@@ -93,8 +101,8 @@
 
 .app-sidebar nav a.active {
     color: var(--accent-text);
-    border-left: 3px solid var(--accent-mint);
-    background: linear-gradient(90deg, rgba(16, 185, 129, 0.15), transparent);
+    border-left: 3px solid var(--accent);
+    background: linear-gradient(90deg, var(--accent-bg), transparent);
     font-weight: 600;
 }
 
@@ -103,6 +111,7 @@
     min-width: 0;
     padding: 24px 32px;
     box-sizing: border-box;
+    background: var(--app-bg);
 }
 
 @media (max-width: 768px) {

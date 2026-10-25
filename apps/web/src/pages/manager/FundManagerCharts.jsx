@@ -9,7 +9,14 @@ import DarkChartTooltip from "../../components/charts/DarkChartTooltip";
 import "../../components/charts/charts.css";
 import { getCurrentAllocationBreakdown } from "./fundAllocationUtils";
 
-const CHART_COLORS = ["#059669", "#10b981", "#34d399", "#047857", "#6ee7b7", "#a7f3d0"];
+const CHART_COLORS = [
+    "var(--chart-series-1)",
+    "var(--chart-series-2)",
+    "var(--chart-series-3)",
+    "var(--chart-series-4)",
+    "var(--chart-series-5)",
+    "var(--chart-series-6)",
+];
 
 function FundManagerCharts({ funds, allocationEntries }) {
     const breakdown = getCurrentAllocationBreakdown(funds, allocationEntries);
