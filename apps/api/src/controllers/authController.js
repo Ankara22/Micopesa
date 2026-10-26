@@ -14,41 +14,18 @@ const VALID_OCCUPATIONS = [
     "OTHER_INFORMAL_WORKER",
 ];
 
-// Roles a user could theoretically hold, per the users.role CHECK constraint
-// in database/schema.sql. Public registration is NOT allowed to assign any
-// of these directly from client input - see `register` below.
-const VALID_ROLES = ["WORKER", "FUND_MANAGER", "REGULATOR", "ADMIN"];
 const PUBLIC_REGISTRATION_ROLE = "WORKER";
-
-/**
- * LOCAL DEVELOPMENT ONLY. When ALLOW_PRIVILEGED_SIGNUP=true, the register
- * endpoint additionally accepts a client-supplied `role` (validated against
- * the exact VALID_ROLES allowlist) so a developer without working
- * ADMIN/FUND_MANAGER/REGULATOR credentials can create test accounts for
- * every role. Read fresh on every call (not cached at module load) so it
- * can be toggled without restarting the server during local testing.
- *
- * Default (absent/false): public registration always forces WORKER,
- * exactly as before. This flag must NEVER be enabled in production.
- */
-function isPrivilegedSignupAllowed() {
-    return process.env.ALLOW_PRIVILEGED_SIGNUP === "true";
-}
 
 /**
  * POST /api/auth/register
  * Body: { full_name, phone, password, occupation, role? }
  *
- * SECURITY: by default, any "role" field sent in the request body is
- * ignored and public registration always creates a WORKER. Elevated roles
- * (FUND_MANAGER, REGULATOR, ADMIN) must normally be provisioned through a
- * separate, privileged workflow (e.g. an ADMIN-only user-management
- * endpoint), not through this public endpoint - unless the local-dev-only
- * ALLOW_PRIVILEGED_SIGNUP flag is enabled (see isPrivilegedSignupAllowed).
+ * Public registration always creates a WORKER. Privileged roles must be
+ * assigned through a separately authorized administrative or provisioning
+ * workflow.
  */
 async function register(req, res) {
     const { full_name, phone, password, occupation } = req.body;
-    const privilegedSignupAllowed = isPrivilegedSignupAllowed();
 
     if (!full_name || !phone || !password) {
         return res.status(400).json({
@@ -64,30 +41,8 @@ async function register(req, res) {
         });
     }
 
-    let role = PUBLIC_REGISTRATION_ROLE;
-    if (privilegedSignupAllowed && req.body.role !== undefined) {
-        if (!VALID_ROLES.includes(req.body.role)) {
-            return res.status(400).json({
-                status: "error",
-                message: `role must be one of: ${VALID_ROLES.join(", ")}`,
-            });
-        }
-        role = req.body.role;
-    }
-
-    // WORKER accounts always require a valid occupation (they also get a
-    // pension account below). Privileged roles (FUND_MANAGER/REGULATOR/
-    // ADMIN) never receive a pension account, so occupation is optional for
-    // them, but if one is supplied it must still be a valid value.
-    if (role === "WORKER") {
-        if (!VALID_OCCUPATIONS.includes(occupation)) {
-            return res.status(400).json({
-                status: "error",
-                message: `occupation must be one of: ${VALID_OCCUPATIONS.join(", ")}`,
-            });
-        }
-    } else if (occupation !== undefined && occupation !== null && occupation !== "" &&
-        !VALID_OCCUPATIONS.includes(occupation)) {
+    const role = PUBLIC_REGISTRATION_ROLE;
+    if (!VALID_OCCUPATIONS.includes(occupation)) {
         return res.status(400).json({
             status: "error",
             message: `occupation must be one of: ${VALID_OCCUPATIONS.join(", ")}`,
@@ -287,4 +242,4 @@ async function getMe(req, res) {
     }
 }
 
-module.exports = { register, login, logout, getMe, VALID_ROLES };
+module.exports = { register, login, logout, getMe };

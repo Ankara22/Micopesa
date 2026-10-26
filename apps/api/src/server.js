@@ -1,3 +1,6 @@
+const { assertSafeAuthConfiguration } = require("./utils/authConfiguration");
+assertSafeAuthConfiguration();
+
 const express = require("express");
 const cors = require("cors");
 const pool = require("./db/database");

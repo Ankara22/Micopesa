@@ -4,7 +4,9 @@
  * Validates the JWT sent in the "Authorization: Bearer <token>" header and
  * attaches { userId, role } to req.user for downstream handlers.
  */
-function requireAuth(req, res, next) {
+const pool = require("../db/database");
+
+async function requireAuth(req, res, next) {
     const authHeader = req.headers.authorization;
 
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -23,13 +25,9 @@ function requireAuth(req, res, next) {
         });
     }
 
+    let decoded;
     try {
-        const decoded = verifyTokenString(token);
-        req.user = {
-            userId: decoded.userId,
-            role: decoded.role,
-        };
-        return next();
+        decoded = verifyTokenString(token);
     } catch (error) {
         if (error.name === "TokenExpiredError") {
             return res.status(401).json({
@@ -42,6 +40,45 @@ function requireAuth(req, res, next) {
             message: "Invalid authentication token",
         });
     }
+
+    if (!decoded || typeof decoded.userId !== "string" || decoded.userId.trim() === "") {
+        return res.status(401).json({
+            status: "error",
+            message: "Invalid authentication token",
+        });
+    }
+
+    let result;
+    try {
+        result = await pool.query(
+            "SELECT user_id, role, account_status FROM users WHERE user_id = $1",
+            [decoded.userId]
+        );
+    } catch (error) {
+        console.error("Authentication user lookup failed:", error);
+        return res.status(500).json({
+            status: "error",
+            message: "Authentication service temporarily unavailable",
+        });
+    }
+
+    const user = result.rows[0];
+    if (!user) {
+        return res.status(401).json({
+            status: "error",
+            message: "Invalid authentication token",
+        });
+    }
+
+    if (user.account_status !== "ACTIVE") {
+        return res.status(403).json({
+            status: "error",
+            message: "This account is not active",
+        });
+    }
+
+    req.user = { userId: user.user_id, role: user.role };
+    return next();
 }
 
 // Backward-compatible alias - existing routes (e.g. accountRoutes.js) import
