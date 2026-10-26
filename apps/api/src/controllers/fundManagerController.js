@@ -1,5 +1,5 @@
 const pool = require("../db/database");
-const { writeAuditLog } = require("../utils/auditLog");
+const { reviewWithdrawalClaim: reviewClaimTransaction } = require("../services/withdrawalService");
 
 async function getPerformance(req, res) {
     const { userId } = req.user;
@@ -65,46 +65,19 @@ async function reviewWithdrawal(req, res) {
     const client = await pool.connect();
     try {
         await client.query("BEGIN");
-        const existing = await client.query(
-            "SELECT claim_status FROM withdrawal_claims WHERE claim_id = $1 FOR UPDATE",
-            [id]
-        );
-        if (existing.rows.length === 0) {
-            await client.query("ROLLBACK");
-            return res.status(404).json({ status: "error", message: "Withdrawal claim not found" });
-        }
-        if (existing.rows[0].claim_status !== "PENDING") {
-            await client.query("ROLLBACK");
-            return res.status(409).json({
-                status: "error",
-                message: `Claim has already been ${existing.rows[0].claim_status.toLowerCase()}`,
-            });
-        }
-
-        const result = await client.query(
-            `UPDATE withdrawal_claims
-             SET claim_status = $1, reviewed_by = $2, reviewed_at = now()
-             WHERE claim_id = $3
-             RETURNING claim_id, account_id, reviewed_by, amount_requested,
-                       destination_phone, withdrawal_reason, claim_status, requested_at, reviewed_at`,
-            [decision, userId, id]
-        );
-
-        await writeAuditLog(client, {
-            userId,
-            actionType: decision === "APPROVED" ? "APPROVE" : "REJECT",
-            entityName: "WITHDRAWAL_CLAIMS",
-            entityId: id,
-        });
+        const claim = await reviewClaimTransaction(client, { userId, claimId: id, decision });
         await client.query("COMMIT");
 
         return res.status(200).json({
             status: "success",
             message: `Claim ${decision.toLowerCase()} successfully`,
-            data: { claim: result.rows[0] },
+            data: { claim },
         });
     } catch (error) {
         await client.query("ROLLBACK");
+        if (error.statusCode) {
+            return res.status(error.statusCode).json({ status: "error", message: error.message });
+        }
         console.error("Failed to review withdrawal claim:", error);
         return res.status(500).json({
             status: "error",

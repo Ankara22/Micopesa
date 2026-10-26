@@ -104,6 +104,8 @@ function Withdrawals() {
                             </ul>
                         )}
                         <p>Current balance: {formatCurrency(eligibility.current_balance)}</p>
+                        <p>Reserved for approved, unpaid withdrawals: {formatCurrency(eligibility.reserved_withdrawal_amount)}</p>
+                        <p><strong>Available balance after approved reservations: {formatCurrency(eligibility.available_balance)}</strong></p>
                     </>
                 )}
             </Card>

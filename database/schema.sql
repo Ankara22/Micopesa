@@ -369,6 +369,9 @@ CREATE TABLE withdrawal_claims (
 CREATE INDEX idx_withdrawal_claims_account_id ON withdrawal_claims (account_id);
 CREATE INDEX idx_withdrawal_claims_reviewed_by ON withdrawal_claims (reviewed_by);
 CREATE INDEX idx_withdrawal_claims_claim_status ON withdrawal_claims (claim_status);
+CREATE UNIQUE INDEX uq_withdrawal_claims_one_pending_per_account
+    ON withdrawal_claims (account_id)
+    WHERE claim_status = 'PENDING';
 
 CREATE TRIGGER trg_withdrawal_claims_set_updated_at
     BEFORE UPDATE ON withdrawal_claims

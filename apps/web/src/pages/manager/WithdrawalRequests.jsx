@@ -49,11 +49,13 @@ function WithdrawalRequests() {
             header: "",
             render: (row) => (
                 <div style={{ display: "flex", gap: 8 }}>
-                    <Button variant="primary" size="sm" onClick={() => setConfirming({ claim: row, decision: "approve" })}>
-                        Approve
-                    </Button>
+                    {row.claim_status === "PENDING" && (
+                        <Button variant="primary" size="sm" onClick={() => setConfirming({ claim: row, decision: "approve" })}>
+                            Approve
+                        </Button>
+                    )}
                     <Button variant="danger" size="sm" onClick={() => setConfirming({ claim: row, decision: "reject" })}>
-                        Reject
+                        {row.claim_status === "APPROVED" ? "Cancel approval" : "Reject"}
                     </Button>
                 </div>
             ),
@@ -65,7 +67,7 @@ function WithdrawalRequests() {
             <div className="page-header">
                 <div>
                     <h1 className="page-title">Withdrawal Requests</h1>
-                    <p className="page-subtitle">Review pending withdrawal claims from workers.</p>
+                    <p className="page-subtitle">Review pending claims and cancel approved claims that have not been paid.</p>
                 </div>
             </div>
 
@@ -76,17 +78,17 @@ function WithdrawalRequests() {
                 loading={claimsApi.loading}
                 error={claimsApi.error}
                 onRetry={claimsApi.refetch}
-                emptyMessage="There are no pending withdrawal requests."
+                emptyMessage="There are no pending or approved-unpaid withdrawal claims."
             />
 
             <Modal
                 open={Boolean(confirming)}
-                title={confirming?.decision === "approve" ? "Approve withdrawal claim?" : "Reject withdrawal claim?"}
+                title={confirming?.decision === "approve" ? "Approve withdrawal claim?" : "Reject or cancel withdrawal claim?"}
                 onClose={() => setConfirming(null)}
             >
                 {confirming && (
                     <p>
-                        {confirming.decision === "approve" ? "Approve" : "Reject"} the claim for{" "}
+                        {confirming.decision === "approve" ? "Approve" : confirming.claim.claim_status === "APPROVED" ? "Cancel approval for" : "Reject"} the claim for{" "}
                         <strong>{formatCurrency(confirming.claim.amount_requested)}</strong> from{" "}
                         <strong>{confirming.claim.full_name}</strong>?
                     </p>
