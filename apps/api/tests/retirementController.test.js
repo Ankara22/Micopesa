@@ -1,7 +1,24 @@
 const { after, test } = require("node:test");
 const assert = require("node:assert/strict");
-const pool = require("../src/db/database");
+const Module = require("node:module");
+
+const pool = {
+    query: async () => ({ rows: [] }),
+    connect: async () => assert.fail("Unexpected database connection"),
+};
+const databaseModulePath = require.resolve("../src/db/database");
+const originalModuleLoad = Module._load;
+Module._load = function loadWithMockedDatabase(request, parent, isMain) {
+    if (request === "jsonwebtoken") {
+        return { sign: () => "", verify: () => ({}) };
+    }
+    if (Module._resolveFilename(request, parent, isMain) === databaseModulePath) return pool;
+    return originalModuleLoad.call(this, request, parent, isMain);
+};
 const { getPlan, upsertPlan } = require("../src/controllers/retirementController");
+const { getMyContributions } = require("../src/controllers/accountController");
+const { requireRole } = require("../src/middleware/authMiddleware");
+Module._load = originalModuleLoad;
 
 const originalQuery = pool.query;
 const originalConnect = pool.connect;
@@ -103,7 +120,7 @@ test("saves owner-scoped annual projection snapshots using only the credited acc
     assert.equal(queries.some(({ query }) => query === "ROLLBACK"), false);
 });
 
-test("returns the authenticated user's account and settings without requiring an existing plan", async () => {
+test("returns 404 with the authenticated user's account context when no active plan exists", async () => {
     const queries = [];
     pool.query = async (query, values = []) => {
         queries.push({ query, values });
@@ -118,12 +135,172 @@ test("returns the authenticated user's account and settings without requiring an
 
     await getPlan({ user: { userId: "worker-user-1" } }, res);
 
-    assert.equal(res.statusCode, 200);
+    assert.equal(res.statusCode, 404);
+    assert.equal(res.body.code, "RETIREMENT_PLAN_NOT_FOUND");
     assert.equal(res.body.data.plan, null);
     assert.equal(res.body.data.projection, null);
     assert.equal(res.body.data.account.current_balance, "1250.00");
     assert.equal(res.body.data.assumed_yearly_growth, 8);
     assert.deepEqual(queries[0].values, ["worker-user-1"]);
+});
+
+test("returns only an active plan belonging to the authenticated user's account", async () => {
+    const queries = [];
+    pool.query = async (query, values = []) => {
+        queries.push({ query, values });
+        if (query.includes("FROM pension_accounts")) {
+            return { rows: [{ account_id: "account-worker-1", current_balance: "1250.00" }] };
+        }
+        if (query.includes("SELECT setting_key, setting_value")) return { rows: settings };
+        if (query.includes("FROM retirement_plans")) {
+            assert.deepEqual(values, ["account-worker-1"]);
+            return { rows: [{
+                plan_id: "plan-worker-1",
+                account_id: "account-worker-1",
+                plan_status: "ACTIVE",
+            }] };
+        }
+        if (query.includes("FROM retirement_projections")) {
+            assert.deepEqual(values, ["plan-worker-1"]);
+            return { rows: [{ projection_id: "projection-worker-1", plan_id: "plan-worker-1" }] };
+        }
+        assert.fail(`Unexpected query: ${query}`);
+    };
+    const res = response();
+
+    await getPlan({
+        user: { userId: "worker-user-1" },
+        params: { accountId: "account-worker-2", planId: "plan-worker-2" },
+        query: { account_id: "account-worker-2", plan_id: "plan-worker-2" },
+    }, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.data.plan.plan_id, "plan-worker-1");
+    assert.equal(res.body.data.projection.projection_id, "projection-worker-1");
+    assert.deepEqual(queries[0].values, ["worker-user-1"]);
+    assert.equal(queries.some(({ values }) => values.includes("account-worker-2")), false);
+    assert.equal(queries.some(({ values }) => values.includes("plan-worker-2")), false);
+});
+
+test("worker reads their own contributions using only the authenticated account", async () => {
+    const queries = [];
+    pool.query = async (query, values = []) => {
+        queries.push({ query, values });
+        if (query.includes("FROM pension_accounts")) {
+            return { rows: [{ account_id: "account-worker-1" }] };
+        }
+        if (query.includes("FROM contributions c")) {
+            return { rows: [{
+                contribution_id: "contribution-worker-1",
+                amount: "1200.00",
+                account_id: "account-worker-1",
+            }] };
+        }
+        assert.fail(`Unexpected query: ${query}`);
+    };
+    const res = response();
+
+    await getMyContributions({
+        user: { userId: "worker-user-1", role: "WORKER" },
+        body: { account_id: "account-worker-2" },
+        query: { account_id: "account-worker-2" },
+    }, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.data[0].contribution_id, "contribution-worker-1");
+    assert.deepEqual(queries[0].values, ["worker-user-1"]);
+    assert.deepEqual(queries[1].values, ["account-worker-1"]);
+    assert.match(queries[1].query, /WHERE c\.account_id = \$1/);
+});
+
+test("worker cannot retrieve another worker's contributions by supplying account identifiers", async () => {
+    const queries = [];
+    pool.query = async (query, values = []) => {
+        queries.push({ query, values });
+        if (query.includes("FROM pension_accounts")) {
+            return { rows: [{ account_id: "account-worker-1" }] };
+        }
+        if (query.includes("FROM contributions c")) {
+            assert.deepEqual(values, ["account-worker-1"]);
+            return { rows: [{
+                contribution_id: "contribution-worker-1",
+                amount: "1200.00",
+                account_id: "account-worker-1",
+            }] };
+        }
+        assert.fail(`Unexpected query: ${query}`);
+    };
+    const res = response();
+
+    await getMyContributions({
+        user: { userId: "worker-user-1", role: "WORKER" },
+        params: { accountId: "account-worker-2" },
+        body: { account_id: "account-worker-2" },
+        query: { account_id: "account-worker-2" },
+    }, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.body.data.map((row) => row.contribution_id), ["contribution-worker-1"]);
+    assert.equal(queries.some(({ values }) => values.includes("account-worker-2")), false);
+});
+
+test("returns 404 when the authenticated worker has no pension account for contributions", async () => {
+    let queryCount = 0;
+    pool.query = async (query, values = []) => {
+        queryCount += 1;
+        assert.match(query, /FROM pension_accounts/);
+        assert.deepEqual(values, ["worker-without-account"]);
+        return { rows: [] };
+    };
+    const res = response();
+
+    await getMyContributions({ user: { userId: "worker-without-account" } }, res);
+
+    assert.equal(res.statusCode, 404);
+    assert.equal(queryCount, 1);
+});
+
+test("worker receives 404 rather than another worker's retirement plan", async () => {
+    const queries = [];
+    pool.query = async (query, values = []) => {
+        queries.push({ query, values });
+        if (query.includes("FROM pension_accounts")) {
+            return { rows: [{ account_id: "account-worker-1", current_balance: "0.00" }] };
+        }
+        if (query.includes("SELECT setting_key, setting_value")) return { rows: settings };
+        if (query.includes("FROM retirement_plans")) {
+            assert.deepEqual(values, ["account-worker-1"]);
+            return { rows: [] };
+        }
+        assert.fail(`A missing owned plan must stop before projection lookup: ${query}`);
+    };
+    const res = response();
+
+    await getPlan({
+        user: { userId: "worker-user-1" },
+        params: { accountId: "account-worker-2", planId: "plan-worker-2" },
+        query: { account_id: "account-worker-2", plan_id: "plan-worker-2" },
+    }, res);
+
+    assert.equal(res.statusCode, 404);
+    assert.equal(res.body.data.plan, null);
+    assert.deepEqual(queries[0].values, ["worker-user-1"]);
+    assert.equal(queries.some(({ values }) => values.includes("account-worker-2")), false);
+    assert.equal(queries.some(({ values }) => values.includes("plan-worker-2")), false);
+});
+
+test("worker-only route role guard rejects unauthorized roles", () => {
+    const middleware = requireRole("WORKER");
+    let nextCalled = false;
+    const res = response();
+    middleware(
+        { user: { userId: "manager-user-1", role: "FUND_MANAGER" } },
+        res,
+        () => { nextCalled = true; }
+    );
+
+    assert.equal(res.statusCode, 403);
+    assert.equal(nextCalled, false);
 });
 
 test("cannot read another user's projection by supplying an account identifier", async () => {
