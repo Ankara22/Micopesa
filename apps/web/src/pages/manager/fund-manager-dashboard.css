@@ -1,0 +1,288 @@
+.fund-manager-dashboard {
+    width: 100%;
+    max-width: 1180px;
+    margin: 0 auto;
+    text-align: left;
+}
+
+.fund-manager-dashboard-header {
+    margin-bottom: 24px;
+}
+
+.fund-manager-dashboard .page-title,
+.fund-manager-dashboard .page-subtitle {
+    text-align: left;
+}
+
+.fund-manager-eyebrow {
+    margin: 0 0 4px;
+    color: var(--accent-text);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+
+.fund-manager-summary {
+    margin-bottom: 20px;
+}
+
+.fund-manager-dashboard-section {
+    min-width: 0;
+    margin-top: 20px;
+    padding: 20px;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--bg);
+}
+
+.fund-manager-section-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 14px;
+}
+
+.fund-manager-section-heading h2 {
+    margin: 0;
+    color: var(--text-h);
+    font-size: 18px;
+    line-height: 1.35;
+}
+
+.fund-manager-link {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    color: var(--accent-text);
+    font-size: 14px;
+    font-weight: 700;
+    text-underline-offset: 3px;
+    white-space: nowrap;
+}
+
+.fund-manager-link:focus-visible,
+.fund-manager-quick-links a:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+    border-radius: 3px;
+}
+
+.fund-manager-section-note {
+    margin: 0 0 12px;
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.fund-manager-fund-list,
+.fund-manager-claim-list,
+.fund-manager-quick-links ul {
+    display: grid;
+    gap: 12px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.fund-manager-fund-list {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 250px), 1fr));
+}
+
+.fund-manager-fund-list > li {
+    min-width: 0;
+    padding: 16px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--bg);
+}
+
+.fund-manager-fund-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 14px;
+}
+
+.fund-manager-fund-heading h3 {
+    margin: 0 0 3px;
+    color: var(--text-h);
+    font-size: 16px;
+    overflow-wrap: anywhere;
+}
+
+.fund-manager-fund-heading > div > span {
+    color: var(--text);
+    font-size: 13px;
+}
+
+.fund-manager-fund-list dl {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    margin: 0;
+}
+
+.fund-manager-fund-list dl > div {
+    min-width: 0;
+}
+
+.fund-manager-fund-list dt {
+    color: var(--text);
+    font-size: 12px;
+}
+
+.fund-manager-fund-list dd {
+    margin: 3px 0 0;
+    color: var(--text-h);
+    font-size: 14px;
+    font-weight: 650;
+    overflow-wrap: anywhere;
+    font-variant-numeric: tabular-nums;
+}
+
+.fund-manager-claim-list > li {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 14px 0;
+    border-bottom: 1px solid var(--border);
+}
+
+.fund-manager-claim-list > li:last-child {
+    border-bottom: 0;
+}
+
+.fund-manager-claim-info {
+    display: grid;
+    justify-items: start;
+    gap: 5px;
+    min-width: 0;
+}
+
+.fund-manager-claim-info > strong {
+    color: var(--text-h);
+    overflow-wrap: anywhere;
+}
+
+.fund-manager-claim-info > span:not(.badge) {
+    color: var(--text);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+}
+
+.fund-manager-claim-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.fund-manager-empty {
+    margin: 0;
+    color: var(--text);
+    font-size: 14px;
+}
+
+.fund-manager-quick-links ul {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
+}
+
+.fund-manager-quick-links li {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+}
+
+.fund-manager-quick-links a {
+    display: grid;
+    align-content: center;
+    gap: 3px;
+    min-height: 64px;
+    padding: 10px 12px;
+    color: var(--accent-text);
+    text-decoration: none;
+}
+
+.fund-manager-quick-links a:hover span {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+}
+
+.fund-manager-quick-links small {
+    color: var(--text);
+    font-size: 12px;
+    line-height: 1.4;
+}
+
+.fund-manager-dashboard .dashboard-chart-grid {
+    grid-template-columns: minmax(0, 1fr);
+    margin: 0;
+}
+
+.fund-manager-dashboard .dashboard-chart-panel {
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--text);
+}
+
+.fund-manager-dashboard .dashboard-chart-subtitle {
+    min-height: 0;
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.fund-manager-dashboard .dashboard-chart-empty {
+    min-height: 150px;
+    color: var(--text);
+}
+
+.fund-manager-dashboard .dashboard-chart-legend {
+    justify-content: flex-start;
+    margin: 12px 0 0;
+    padding: 0;
+    list-style: none;
+    color: var(--text);
+}
+
+.fund-manager-dashboard .dashboard-chart-legend li {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.fund-manager-dashboard .dashboard-chart-legend i {
+    flex: 0 0 auto;
+}
+
+.fund-manager-dashboard .state-block {
+    text-align: left;
+}
+
+@media (max-width: 600px) {
+    .fund-manager-dashboard-header {
+        margin-bottom: 18px;
+    }
+
+    .fund-manager-dashboard-section {
+        padding: 16px;
+    }
+
+    .fund-manager-claim-list > li {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 12px;
+    }
+
+    .fund-manager-claim-actions {
+        width: 100%;
+    }
+
+    .fund-manager-claim-actions .btn {
+        flex: 1 1 auto;
+        min-height: 44px;
+    }
+}

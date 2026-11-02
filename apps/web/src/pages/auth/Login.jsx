@@ -1,99 +1,179 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../../context/AuthContext";
 import { DASHBOARD_BY_ROLE, ROLE_PATH_PREFIX } from "../../routes/roleRoutes";
+import { requestEmailVerificationForAddress } from "../../services/authEmailApi";
+import AuthLayout from "./AuthLayout";
+import { useTranslation } from "react-i18next";
 import "./auth.css";
 
 function Login() {
+    const { t } = useTranslation();
     const { login } = useAuth();
     const navigate = useNavigate();
     const location = useLocation();
 
-    const [phone, setPhone] = useState("");
+    const [identifier, setIdentifier] = useState("");
+    const [identifierType, setIdentifierType] = useState("email");
     const [password, setPassword] = useState("");
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [formError, setFormError] = useState("");
+    const [verificationMessage, setVerificationMessage] = useState("");
+    const [verificationError, setVerificationError] = useState("");
+    const [isRequestingVerification, setIsRequestingVerification] = useState(false);
+    const submissionInProgress = useRef(false);
+
+    async function handleRequestVerification() {
+        if (isRequestingVerification) return;
+        const normalizedEmail = identifier.trim().toLowerCase();
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) return;
+        setIsRequestingVerification(true);
+        setVerificationMessage("");
+        setVerificationError("");
+        try {
+            await requestEmailVerificationForAddress(normalizedEmail);
+            setVerificationMessage("auth.login.verificationRequestAccepted");
+        } catch {
+            setVerificationError("auth.login.verificationRequestError");
+        } finally {
+            setIsRequestingVerification(false);
+        }
+    }
 
     async function handleSubmit(event) {
         event.preventDefault();
+        if (submissionInProgress.current) return;
         setFormError("");
 
-        if (!phone || !password) {
-            setFormError("Phone number and password are required.");
+        const normalizedIdentifier = identifier.trim();
+        if (!normalizedIdentifier || !password) {
+            setFormError(identifierType === "email" ? "auth.login.emailRequired" : "auth.login.phoneRequired");
             return;
         }
 
+        submissionInProgress.current = true;
         setIsSubmitting(true);
-        const result = await login(phone.trim(), password);
-        setIsSubmitting(false);
+        try {
+            const result = await login(normalizedIdentifier, password);
+            if (!result.success) {
+                if (result.status >= 500) {
+                    setFormError("auth.login.serviceUnavailable");
+                } else if (result.status === null) {
+                    setFormError("auth.login.connectionError");
+                } else {
+                    setFormError("auth.login.invalidCredentials");
+                }
+                return;
+            }
 
-        if (!result.success) {
-            setFormError(result.message || "Login failed. Please try again.");
-            return;
+            if (result.user.force_password_change) {
+                navigate("/change-password", { replace: true });
+                return;
+            }
+
+            // Only honor a remembered destination belonging to the role that
+            // authenticated, then fall back to that role's dashboard.
+            const rememberedPath = location.state?.from?.pathname;
+            const rolePrefix = ROLE_PATH_PREFIX[result.user.role];
+            const redirectTo =
+                (rememberedPath && rolePrefix && rememberedPath.startsWith(rolePrefix)
+                    ? rememberedPath
+                    : null) ||
+                DASHBOARD_BY_ROLE[result.user.role] ||
+                "/";
+            navigate(redirectTo, { replace: true });
+        } catch {
+            setFormError("auth.login.genericError");
+        } finally {
+            submissionInProgress.current = false;
+            setIsSubmitting(false);
         }
-
-        // Only honor a remembered "redirect back to" location if it actually
-        // belongs to the role that just logged in - otherwise a location
-        // remembered for a different user/role could bounce a correctly
-        // authenticated user straight to /unauthorized instead of their
-        // own dashboard.
-        const rememberedPath = location.state?.from?.pathname;
-        const rolePrefix = ROLE_PATH_PREFIX[result.user.role];
-        const redirectTo =
-            (rememberedPath && rolePrefix && rememberedPath.startsWith(rolePrefix)
-                ? rememberedPath
-                : null) ||
-            DASHBOARD_BY_ROLE[result.user.role] ||
-            "/";
-        navigate(redirectTo, { replace: true });
     }
 
     return (
-        <div className="auth-page">
-            <form className="auth-card" onSubmit={handleSubmit} noValidate>
-                <h1>Sign in to MicoPesa</h1>
-                <p className="auth-subtitle">Access your pension account</p>
+        <AuthLayout>
+            <div className="auth-card">
+                <p className="auth-eyebrow auth-card-eyebrow">{t("auth.login.welcome")}</p>
+                <h1>{t("auth.login.title")}</h1>
+                <p className="auth-subtitle">
+                    {identifierType === "email"
+                        ? t("auth.login.emailDescription")
+                        : t("auth.login.phoneDescription")}
+                </p>
 
                 {formError && (
-                    <div className="auth-error" role="alert">
-                        {formError}
+                    <div className="auth-error" id="login-error" role="alert">
+                        {t(formError)}
                     </div>
                 )}
 
-                <label htmlFor="phone">Phone number</label>
-                <input
-                    id="phone"
-                    name="phone"
-                    type="tel"
-                    autoComplete="tel"
-                    placeholder="+254700000000"
-                    value={phone}
-                    onChange={(e) => setPhone(e.target.value)}
-                    disabled={isSubmitting}
-                    required
-                />
-
-                <label htmlFor="password">Password</label>
-                <input
-                    id="password"
-                    name="password"
-                    type="password"
-                    autoComplete="current-password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    disabled={isSubmitting}
-                    required
-                />
-
-                <button type="submit" className="auth-submit" disabled={isSubmitting}>
-                    {isSubmitting ? "Signing in..." : "Sign in"}
-                </button>
+                <form className="auth-form" onSubmit={handleSubmit} noValidate aria-busy={isSubmitting}>
+                    <div className="auth-field">
+                        <label htmlFor="login-identifier">{t(identifierType === "email" ? "auth.login.email" : "auth.login.phone")}</label>
+                        <input
+                            id="login-identifier"
+                            name="identifier"
+                            type={identifierType === "email" ? "email" : "tel"}
+                            autoComplete={identifierType === "email" ? "email" : "tel"}
+                            placeholder={t(identifierType === "email" ? "auth.login.emailPlaceholder" : "auth.login.phonePlaceholder")}
+                            value={identifier}
+                            onChange={(e) => setIdentifier(e.target.value)}
+                            disabled={isSubmitting}
+                            aria-describedby={formError ? "login-error" : undefined}
+                            required
+                        />
+                    </div>
+                    <div className="auth-field">
+                        <label htmlFor="login-password">{t("auth.login.password")}</label>
+                        <input
+                            id="login-password"
+                            name="password"
+                            type="password"
+                            autoComplete="current-password"
+                            value={password}
+                            onChange={(e) => setPassword(e.target.value)}
+                            disabled={isSubmitting}
+                            aria-describedby={formError ? "login-error" : undefined}
+                            required
+                        />
+                    </div>
+                    <button type="submit" className="auth-submit" disabled={isSubmitting} aria-busy={isSubmitting}>
+                        {isSubmitting ? t("auth.login.submitting") : t("auth.login.signIn")}
+                    </button>
+                </form>
 
                 <p className="auth-footer">
-                    Don&apos;t have an account? <Link to="/register">Register</Link>
+                    <button
+                        type="button"
+                        className="auth-link-button"
+                        onClick={() => {
+                            setIdentifierType((current) => current === "email" ? "phone" : "email");
+                            setIdentifier("");
+                            setFormError("");
+                            setVerificationMessage("");
+                            setVerificationError("");
+                        }}
+                    >
+                        {t(identifierType === "email" ? "auth.login.switchToPhone" : "auth.login.switchToEmail")}
+                    </button>
                 </p>
-            </form>
-        </div>
+                {identifierType === "email" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identifier.trim()) && (
+                    <div className="auth-footer">
+                        <button className="auth-link-button" type="button" onClick={handleRequestVerification} disabled={isRequestingVerification}>
+                            {isRequestingVerification ? t("auth.login.requesting") : t("auth.login.resendVerification")}
+                        </button>
+                        {verificationMessage && <p role="status">{t(verificationMessage)}</p>}
+                        {verificationError && <p role="alert">{t(verificationError)}</p>}
+                    </div>
+                )}
+                <p className="auth-footer">
+                    <Link to="/forgot-password">{t("auth.login.forgotPassword")}</Link>
+                </p>
+                <p className="auth-footer">
+                    {t("auth.login.newToMicoPesa")} <Link to="/register">{t("auth.login.createAccount")}</Link>
+                </p>
+            </div>
+        </AuthLayout>
     );
 }
 

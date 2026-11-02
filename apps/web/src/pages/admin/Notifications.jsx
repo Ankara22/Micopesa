@@ -1,118 +1,186 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import useApi from "../../hooks/useApi";
 import { listNotifications, createNotification, listUsers } from "../../services/adminService";
 import DataTable from "../../components/ui/DataTable";
-import StatusBadge from "../../components/ui/StatusBadge";
 import Button from "../../components/ui/Button";
 import Modal from "../../components/ui/Modal";
-import FormField from "../../components/ui/FormField";
+import LoadingState from "../../components/ui/LoadingState";
+import ErrorState from "../../components/ui/ErrorState";
+import { useToast } from "../../components/ui/ToastContext";
+import { AdminCard, AdminPage } from "../../components/AdminPage";
 
-const TYPE_OPTIONS = [
-    { value: "SMS", label: "SMS" },
-    { value: "EMAIL", label: "Email" },
-    { value: "PUSH", label: "Push" },
-    { value: "USSD", label: "USSD" },
-];
-
+const CHANNELS = ["SMS", "EMAIL", "PUSH", "USSD"];
 const EMPTY_FORM = { user_id: "", notification_type: "SMS", message: "" };
 
 function Notifications() {
     const notificationsApi = useApi(listNotifications, []);
     const usersApi = useApi(listUsers, []);
-    const [modalOpen, setModalOpen] = useState(false);
+    const toast = useToast();
     const [form, setForm] = useState(EMPTY_FORM);
     const [submitting, setSubmitting] = useState(false);
-    const [formError, setFormError] = useState("");
+    const submissionInProgressRef = useRef(false);
+    const [viewingNotification, setViewingNotification] = useState(null);
 
-    function handleChange(e) {
-        const { name, value } = e.target;
-        setForm((prev) => ({ ...prev, [name]: value }));
+    function handleChange(event) {
+        const { name, value } = event.target;
+        setForm((current) => ({ ...current, [name]: value }));
     }
 
-    async function handleSubmit(e) {
-        e.preventDefault();
-        setFormError("");
+    async function handleSubmit(event) {
+        event.preventDefault();
+        if (submissionInProgressRef.current || usersApi.loading || usersApi.error) return;
+        submissionInProgressRef.current = true;
         setSubmitting(true);
         try {
             await createNotification(form);
-            setModalOpen(false);
             setForm(EMPTY_FORM);
-            notificationsApi.refetch();
-        } catch (err) {
-            setFormError(err.message || "Failed to send notification.");
+            const notifications = await notificationsApi.refetch();
+            toast.success(notifications
+                ? "Notification queued. Delivery status will update when the provider reports it."
+                : "Notification queued, but the delivery list could not be refreshed.");
+        } catch (error) {
+            toast.error(error.message || "Failed to queue notification.");
         } finally {
+            submissionInProgressRef.current = false;
             setSubmitting(false);
         }
     }
 
-    const userOptions = (usersApi.data || []).map((u) => ({
-        value: u.user_id,
-        label: `${u.full_name} (${u.role})`,
+    const userOptions = (usersApi.data || []).map((user) => ({
+        value: user.user_id,
+        label: `${user.full_name} (${user.role.replace("_", " ")})`,
     }));
 
     const columns = [
-        { key: "recipient_name", header: "Recipient" },
-        { key: "created_by_name", header: "Sent By", render: (row) => row.created_by_name || "System" },
-        { key: "notification_type", header: "Type" },
-        { key: "message", header: "Message" },
-        { key: "delivery_status", header: "Delivery", render: (row) => <StatusBadge status={row.delivery_status} /> },
-        { key: "created_at", header: "Created", render: (row) => new Date(row.created_at).toLocaleString() },
+        { key: "notification_id", header: "Ref" },
+        { key: "recipient_name", header: "To" },
+        { key: "notification_type", header: "Channel" },
+        {
+            key: "message",
+            header: "Message",
+            render: (row) => <span className="admin-message-preview" title={row.message}>{row.message}</span>,
+        },
+        { key: "created_by_name", header: "Sent by", render: (row) => row.created_by_name || "System" },
+        {
+            key: "delivery_status",
+            header: "Delivery",
+            render: (row) => <span className="admin-status-pill" data-status={row.delivery_status}>{row.delivery_status}</span>,
+        },
+        {
+            key: "actions",
+            header: "Action",
+            render: (row) => (
+                <Button variant="secondary" size="sm" onClick={() => setViewingNotification(row)}>
+                    View
+                </Button>
+            ),
+        },
     ];
 
     return (
-        <div>
-            <div className="page-header">
-                <div>
-                    <h1 className="page-title">Notifications</h1>
-                    <p className="page-subtitle">Compose and monitor platform notifications.</p>
-                </div>
-                <Button variant="primary" onClick={() => setModalOpen(true)}>
-                    + Send Notification
-                </Button>
+        <AdminPage
+            title="Notifications"
+            subtitle="Compose messages and review notifications that are queued or have a recorded delivery status."
+        >
+            <div className="admin-stack">
+                <AdminCard
+                    title="Send a notification"
+                    description="Messages are queued in the platform. A queued record does not confirm delivery through an SMS, email, push, or USSD provider."
+                >
+                    {usersApi.loading && usersApi.data === null ? (
+                        <LoadingState message="Loading recipient list..." />
+                    ) : usersApi.error && usersApi.data === null ? (
+                        <ErrorState message={usersApi.error} onRetry={usersApi.refetch} />
+                    ) : (
+                        <form className="admin-form-grid" onSubmit={handleSubmit}>
+                            <div>
+                                <label className="admin-field-label" htmlFor="notification-recipient">Recipient</label>
+                                <select
+                                    className="admin-control"
+                                    id="notification-recipient"
+                                    name="user_id"
+                                    value={form.user_id}
+                                    onChange={handleChange}
+                                    disabled={submitting || usersApi.loading || Boolean(usersApi.error)}
+                                    required
+                                >
+                                    <option value="">Select a recipient...</option>
+                                    {userOptions.map((option) => (
+                                        <option key={option.value} value={option.value}>{option.label}</option>
+                                    ))}
+                                </select>
+                            </div>
+                            <div>
+                                <span className="admin-field-label">Channel</span>
+                                <div className="admin-channel-pills" role="group" aria-label="Notification channel">
+                                    {CHANNELS.map((channel) => (
+                                        <button
+                                            className="admin-channel-pill"
+                                            type="button"
+                                            key={channel}
+                                            aria-pressed={form.notification_type === channel}
+                                            disabled={submitting}
+                                            onClick={() => setForm((current) => ({ ...current, notification_type: channel }))}
+                                        >
+                                            {channel}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                            <div className="admin-span-all">
+                                <label className="admin-field-label" htmlFor="notification-message">Message</label>
+                                <textarea
+                                    className="admin-control"
+                                    id="notification-message"
+                                    name="message"
+                                    rows={4}
+                                    maxLength={255}
+                                    value={form.message}
+                                    onChange={handleChange}
+                                    disabled={submitting}
+                                    required
+                                />
+                                <p className="admin-hint">{form.message.length}/255 characters. 255 characters at most.</p>
+                            </div>
+                            <div className="admin-span-all">
+                                <Button type="submit" variant="primary" loading={submitting} disabled={usersApi.loading || Boolean(usersApi.error)}>
+                                    Send
+                                </Button>
+                            </div>
+                        </form>
+                    )}
+                </AdminCard>
+
+                <AdminCard title="Sent and queued">
+                    <DataTable
+                        columns={columns}
+                        rows={notificationsApi.data}
+                        rowKey="notification_id"
+                        loading={notificationsApi.loading}
+                        refreshing={notificationsApi.refreshing}
+                        error={notificationsApi.error}
+                        onRetry={notificationsApi.refetch}
+                        emptyMessage="No notifications have been queued."
+                    />
+                </AdminCard>
             </div>
 
-            <DataTable
-                columns={columns}
-                rows={notificationsApi.data}
-                rowKey="notification_id"
-                loading={notificationsApi.loading}
-                error={notificationsApi.error}
-                onRetry={notificationsApi.refetch}
-                emptyMessage="No notifications have been sent yet."
-            />
-
-            <Modal open={modalOpen} title="Send a notification" onClose={() => setModalOpen(false)}>
-                {formError && <div className="form-error" style={{ marginBottom: 12 }}>{formError}</div>}
-                <form className="form-grid" onSubmit={handleSubmit}>
-                    <FormField
-                        id="user_id"
-                        label="Recipient"
-                        as="select"
-                        options={[{ value: "", label: "Select a user..." }, ...userOptions]}
-                        value={form.user_id}
-                        onChange={handleChange}
-                        required
-                    />
-                    <FormField
-                        id="notification_type"
-                        label="Type"
-                        as="select"
-                        options={TYPE_OPTIONS}
-                        value={form.notification_type}
-                        onChange={handleChange}
-                    />
-                    <FormField id="message" label="Message" as="textarea" value={form.message} onChange={handleChange} required />
-                    <div className="form-actions">
-                        <Button type="button" variant="secondary" onClick={() => setModalOpen(false)}>
-                            Cancel
-                        </Button>
-                        <Button type="submit" variant="primary" loading={submitting}>
-                            Send
-                        </Button>
+            <Modal
+                open={Boolean(viewingNotification)}
+                title="Notification details"
+                onClose={() => setViewingNotification(null)}
+            >
+                {viewingNotification && (
+                    <div className="admin-stack">
+                        <p><strong>Reference:</strong> {viewingNotification.notification_id}</p>
+                        <p><strong>To:</strong> {viewingNotification.recipient_name}</p>
+                        <p><strong>Channel:</strong> {viewingNotification.notification_type}</p>
+                        <p><strong>Delivery:</strong> {viewingNotification.delivery_status}</p>
+                        <p><strong>Message:</strong> {viewingNotification.message}</p>
                     </div>
-                </form>
+                )}
             </Modal>
-        </div>
+        </AdminPage>
     );
 }
 

@@ -1,0 +1,385 @@
+.worker-dashboard {
+    width: 100%;
+    max-width: 1120px;
+    margin: 0 auto;
+    text-align: left;
+}
+
+.worker-dashboard .page-header {
+    margin-bottom: 24px;
+}
+
+.worker-dashboard .page-title,
+.worker-dashboard .page-subtitle {
+    text-align: left;
+}
+
+.worker-dashboard-quick-links {
+    margin-top: 24px;
+    padding: 20px;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--bg);
+}
+
+.worker-dashboard-quick-links h2 {
+    margin: 0 0 14px;
+    color: var(--text-h);
+    font-size: 18px;
+}
+
+.worker-dashboard-quick-links ul {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
+    gap: 10px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.worker-dashboard-quick-links li {
+    min-width: 0;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+}
+
+.worker-dashboard-quick-links a {
+    display: grid;
+    gap: 4px;
+    min-height: 64px;
+    padding: 12px;
+    color: var(--accent-text);
+    font-weight: 700;
+    text-decoration: none;
+}
+
+.worker-dashboard-quick-links a:hover span {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+}
+
+.worker-dashboard-quick-links a:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+    border-radius: 3px;
+}
+
+.worker-dashboard-quick-links small {
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 1.4;
+}
+
+.worker-dashboard-eyebrow,
+.worker-dashboard-label {
+    margin: 0;
+    color: var(--accent-text);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+
+.worker-dashboard-eyebrow {
+    margin-bottom: 6px;
+}
+
+.worker-dashboard-overview {
+    display: grid;
+    gap: 16px;
+}
+
+.worker-balance-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+    padding: clamp(20px, 4vw, 32px);
+    border: 1px solid var(--accent-border);
+    border-radius: 16px;
+    background:
+        linear-gradient(115deg, var(--accent-bg), transparent 72%),
+        var(--bg);
+    box-shadow: var(--shadow);
+}
+
+.worker-dashboard-label {
+    color: var(--text);
+}
+
+.worker-balance-amount {
+    margin: 8px 0 14px;
+    color: var(--text-h);
+    font-size: clamp(28px, 5vw, 40px);
+    font-weight: 750;
+    line-height: 1.15;
+    letter-spacing: -0.04em;
+    overflow-wrap: anywhere;
+    font-variant-numeric: tabular-nums;
+}
+
+.worker-balance-status {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    color: var(--text);
+    font-size: 13px;
+}
+
+.worker-dashboard-summary-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.4fr) minmax(240px, 0.8fr);
+    gap: 16px;
+}
+
+.worker-summary-card,
+.worker-dashboard-activity {
+    min-width: 0;
+    padding: 20px;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--bg);
+}
+
+.worker-summary-heading,
+.worker-dashboard-section-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.worker-summary-heading h2,
+.worker-dashboard-section-heading h2 {
+    margin: 4px 0 0;
+    color: var(--text-h);
+    font-size: 18px;
+    line-height: 1.35;
+}
+
+.worker-retirement-values {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    margin: 18px 0;
+}
+
+.worker-retirement-values > div {
+    display: grid;
+    gap: 5px;
+    min-width: 0;
+}
+
+.worker-retirement-values span,
+.worker-dashboard-supporting {
+    color: var(--text);
+    font-size: 14px;
+}
+
+.worker-retirement-values strong {
+    color: var(--text-h);
+    font-size: 16px;
+    overflow-wrap: anywhere;
+    font-variant-numeric: tabular-nums;
+}
+
+.worker-dashboard-supporting {
+    margin: 16px 0;
+    line-height: 1.55;
+}
+
+.worker-pending-count {
+    display: inline-grid;
+    min-width: 34px;
+    min-height: 34px;
+    place-items: center;
+    border-radius: 50%;
+    background: var(--accent-bg);
+    color: var(--accent-text);
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+
+.worker-pending-list,
+.worker-contribution-list {
+    margin: 16px 0;
+    padding: 0;
+    list-style: none;
+}
+
+.worker-pending-list li,
+.worker-contribution-list li {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-width: 0;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border);
+}
+
+.worker-pending-list li:last-child,
+.worker-contribution-list li:last-child {
+    border-bottom: 0;
+}
+
+.worker-pending-list li > span:first-child,
+.worker-contribution-detail strong {
+    color: var(--text-h);
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+
+.worker-dashboard-text-link {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    color: var(--accent-text);
+    font-size: 14px;
+    font-weight: 700;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 3px;
+}
+
+.worker-dashboard-text-link:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+    border-radius: 3px;
+}
+
+.worker-dashboard-activity {
+    margin-top: 20px;
+}
+
+.worker-dashboard-literacy {
+    margin-top: 20px;
+    padding: 20px;
+    border: 1px solid var(--accent-border);
+    border-radius: 14px;
+    background: linear-gradient(115deg, var(--accent-bg), transparent 65%), var(--bg);
+}
+
+.worker-dashboard-insight-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+    margin-top: 16px;
+}
+
+.worker-dashboard-insight-card {
+    min-width: 0;
+    border-color: var(--accent-border);
+}
+
+.worker-dashboard-insight-card .card-title {
+    color: var(--text-h);
+    font-size: 16px;
+}
+
+.worker-dashboard-insight-card p,
+.worker-dashboard-insight-note {
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.55;
+}
+
+.worker-dashboard-insight-card p {
+    margin: 0;
+}
+
+.worker-dashboard-insight-card .worker-dashboard-insight-next {
+    margin-top: 12px;
+    color: var(--accent-text);
+    font-weight: 650;
+}
+
+.worker-dashboard-insight-note {
+    margin: 16px 0 0;
+}
+
+.worker-dashboard-section-heading {
+    align-items: center;
+}
+
+.worker-contribution-detail {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+}
+
+.worker-contribution-detail span {
+    color: var(--text);
+    font-size: 13px;
+    overflow-wrap: anywhere;
+}
+
+.worker-dashboard-empty {
+    display: grid;
+    justify-items: start;
+    gap: 14px;
+    padding: 20px 0 4px;
+    color: var(--text);
+    line-height: 1.5;
+}
+
+.worker-dashboard-plan-form {
+    margin-top: 20px;
+}
+
+.worker-dashboard-plan-form > * {
+    max-width: 760px;
+}
+
+.worker-dashboard .retirement-card {
+    margin: 18px 0;
+}
+
+.worker-dashboard .state-block,
+.worker-dashboard .error-state {
+    text-align: left;
+}
+
+@media (max-width: 700px) {
+    .worker-dashboard .page-header {
+        margin-bottom: 18px;
+    }
+
+    .worker-dashboard-summary-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .worker-balance-card {
+        align-items: stretch;
+        flex-direction: column;
+        gap: 18px;
+    }
+
+    .worker-balance-card .btn {
+        width: 100%;
+        min-height: 48px;
+    }
+
+    .worker-summary-card,
+    .worker-dashboard-activity,
+    .worker-dashboard-literacy,
+    .worker-dashboard-insight-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .worker-retirement-values {
+        gap: 8px;
+    }
+}
+
+@media (max-width: 380px) {
+    .worker-retirement-values {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .worker-contribution-list li,
+    .worker-pending-list li {
+        align-items: flex-start;
+    }
+}

@@ -10,7 +10,7 @@ export async function getMyContributions() {
     return res.data.data;
 }
 
-export async function initiateMyContribution({ amount, channel }) {
-    const res = await api.post("/api/accounts/my-contributions", { amount, channel });
+export async function initiateMyContribution({ amount, channel, fund_ids }) {
+    const res = await api.post("/api/accounts/my-contributions", { amount, channel, fund_ids });
     return res.data;
 }

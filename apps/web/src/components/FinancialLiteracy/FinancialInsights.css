@@ -1,0 +1,101 @@
+.worker-dashboard-literacy {
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
+    margin-top: 20px;
+    padding: 20px;
+    border: 1px solid var(--accent-border);
+    border-radius: 14px;
+    background: linear-gradient(115deg, var(--accent-bg), transparent 65%), var(--bg);
+}
+
+.worker-dashboard-section-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-width: 0;
+}
+
+.worker-dashboard-section-heading > * {
+    min-width: 0;
+}
+
+.worker-dashboard-section-heading h2 {
+    margin: 4px 0 0;
+    color: var(--text-h);
+    font-size: 18px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+}
+
+.worker-dashboard-label {
+    margin: 0;
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.worker-dashboard-insight-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+    margin-top: 16px;
+}
+
+.worker-dashboard-insight-grid.is-stacked {
+    grid-template-columns: minmax(0, 1fr);
+}
+
+.worker-dashboard-insight-card {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    border-color: var(--accent-border);
+}
+
+.worker-dashboard-insight-card .card-title {
+    color: var(--text-h);
+    font-size: 16px;
+    overflow-wrap: anywhere;
+}
+
+.worker-dashboard-insight-card p,
+.worker-dashboard-insight-note {
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.55;
+    overflow-wrap: anywhere;
+}
+
+.worker-dashboard-insight-card p {
+    margin: 0;
+}
+
+.worker-dashboard-insight-card .worker-dashboard-insight-next {
+    margin-top: 12px;
+    color: var(--accent-text);
+    font-weight: 650;
+}
+
+.worker-dashboard-insight-note {
+    margin: 16px 0 0;
+}
+
+@media (max-width: 700px) {
+    .worker-dashboard-literacy {
+        padding: 16px;
+    }
+
+    .worker-dashboard-section-heading {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .worker-dashboard-section-heading .btn {
+        width: 100%;
+    }
+
+    .worker-dashboard-insight-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}

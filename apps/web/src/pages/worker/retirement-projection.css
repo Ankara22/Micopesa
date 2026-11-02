@@ -1,0 +1,81 @@
+.retirement-projection-page {
+    min-width: 0;
+}
+
+.retirement-projection-loading {
+    display: grid;
+    gap: 20px;
+    min-width: 0;
+}
+
+.retirement-projection-empty {
+    align-items: flex-start;
+    gap: 12px;
+    text-align: left;
+}
+
+.retirement-assumptions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+}
+
+.retirement-assumption-value {
+    margin: 0;
+    color: var(--text-h);
+    font-size: clamp(1.25rem, 3vw, 1.75rem);
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+}
+
+.retirement-assumption-note,
+.retirement-disclaimer {
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.55;
+    overflow-wrap: anywhere;
+}
+
+.retirement-disclaimer {
+    margin: 18px 0 0;
+}
+
+.retirement-projection-page .retirement-card,
+.retirement-projection-page .dashboard-chart-grid {
+    width: 100%;
+    min-width: 0;
+}
+
+.retirement-projection-page .retirement-card {
+    margin: 0 0 20px;
+}
+
+.retirement-projection-page .retirement-projection-status {
+    color: var(--text-h);
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+}
+
+.retirement-projection-page .retirement-intro {
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.55;
+    overflow-wrap: anywhere;
+}
+
+.retirement-projection-page .retirement-metric {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.retirement-projection-page .retirement-metric dd {
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+}
+
+@media (max-width: 640px) {
+    .retirement-assumptions {
+        grid-template-columns: 1fr;
+    }
+}
