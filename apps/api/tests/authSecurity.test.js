@@ -7,6 +7,7 @@ const pool = require("../src/db/database");
 const { requireAuth, requireRole } = require("../src/middleware/authMiddleware");
 const { generateToken } = require("../src/utils/token");
 const { register } = require("../src/controllers/authController");
+const authEmailService = require("../src/services/authEmailService");
 const { isEnvironmentFlagEnabled } = require("../src/utils/authConfiguration");
 
 process.env.JWT_SECRET ||= "micopesa-auth-security-test-secret";
@@ -14,12 +15,14 @@ process.env.JWT_SECRET ||= "micopesa-auth-security-test-secret";
 const originalQuery = pool.query;
 const originalConnect = pool.connect;
 const originalHash = bcrypt.hash;
+const originalIssueEmailToken = authEmailService.issueEmailToken;
 const originalFlag = process.env.ALLOW_PRIVILEGED_SIGNUP;
 
 afterEach(() => {
     pool.query = originalQuery;
     pool.connect = originalConnect;
     bcrypt.hash = originalHash;
+    authEmailService.issueEmailToken = originalIssueEmailToken;
     if (originalFlag === undefined) {
         delete process.env.ALLOW_PRIVILEGED_SIGNUP;
     } else {
@@ -66,9 +69,15 @@ test("database role overrides an ADMIN role embedded in the token", async () => 
     });
     assert.equal(result.nextCalls, 1);
     assert.equal(result.res.statusCode, null);
-    assert.equal(result.queryText, "SELECT user_id, role, account_status FROM users WHERE user_id = $1");
+    assert.match(result.queryText, /force_password_change/);
+    assert.match(result.queryText, /is_temp_password/);
     assert.deepEqual(result.queryValues, ["user-1"]);
-    assert.deepEqual(result.req.user, { userId: "user-1", role: "WORKER" });
+    assert.deepEqual(result.req.user, {
+        userId: "user-1",
+        role: "WORKER",
+        forcePasswordChange: false,
+        isTempPassword: false,
+    });
 
     let roleNextCalls = 0;
     requireRole("ADMIN")({ user: { userId: "user-1", role: "WORKER" } }, createResponse(), () => {
@@ -100,7 +109,12 @@ test("active users are authenticated with their current database role", async ()
         user: { user_id: "user-3", role: "FUND_MANAGER", account_status: "ACTIVE" },
     });
     assert.equal(result.nextCalls, 1);
-    assert.deepEqual(result.req.user, { userId: "user-3", role: "FUND_MANAGER" });
+    assert.deepEqual(result.req.user, {
+        userId: "user-3",
+        role: "FUND_MANAGER",
+        forcePasswordChange: false,
+        isTempPassword: false,
+    });
 
     let roleNextCalls = 0;
     requireRole("FUND_MANAGER")({ user: { userId: "user-3", role: "FUND_MANAGER" } }, createResponse(), () => {
@@ -167,8 +181,11 @@ async function registerWithMocks(body) {
                         user_id: "new-worker",
                         full_name: body.full_name,
                         phone: body.phone,
-                        role: values[3],
-                        occupation: values[4],
+                        email: values[2],
+                        role: values[4],
+                        occupation: values[5],
+                        login_method: "EMAIL",
+                        email_verified: false,
                         account_status: "ACTIVE",
                     }],
                 };
@@ -178,6 +195,7 @@ async function registerWithMocks(body) {
         release() {},
     });
     bcrypt.hash = async (password) => `hashed:${password}`;
+    authEmailService.issueEmailToken = async () => {};
 
     const res = createResponse();
     await register({ body }, res);
@@ -186,6 +204,7 @@ async function registerWithMocks(body) {
 
 const workerRegistration = {
     full_name: "Test Worker",
+    email: "worker@example.com",
     phone: "07000000001",
     password: "password123",
     occupation: "OTHER_INFORMAL_WORKER",
@@ -195,7 +214,11 @@ test("public registration without a role creates a worker", async () => {
     const { res, calls } = await registerWithMocks({ ...workerRegistration });
     assert.equal(res.statusCode, 201);
     assert.equal(res.body.data.user.role, "WORKER");
-    assert.ok(calls.some(({ query, values }) => query.includes("INSERT INTO users") && values[3] === "WORKER"));
+    assert.equal(res.body.data.user.email, "worker@example.com");
+    assert.equal(res.body.data.user.email_verified, false);
+    assert.equal(res.body.data.user.login_method, "EMAIL");
+    assert.equal(res.body.data.token, undefined);
+    assert.ok(calls.some(({ query, values }) => query.includes("INSERT INTO users") && values[4] === "WORKER" && query.includes("'EMAIL'")));
 });
 
 for (const role of ["ADMIN", "FUND_MANAGER", "REGULATOR"]) {
@@ -208,7 +231,7 @@ for (const role of ["ADMIN", "FUND_MANAGER", "REGULATOR"]) {
         });
         assert.equal(res.statusCode, 201);
         assert.equal(res.body.data.user.role, "WORKER");
-        assert.ok(calls.some(({ query, values }) => query.includes("INSERT INTO users") && values[3] === "WORKER"));
+        assert.ok(calls.some(({ query, values }) => query.includes("INSERT INTO users") && values[4] === "WORKER" && query.includes("'EMAIL'")));
     });
 }
 
@@ -216,7 +239,8 @@ test("legitimate worker registration retains hashing and pension-account creatio
     const { res, calls } = await registerWithMocks({ ...workerRegistration, phone: "07000000003" });
     assert.equal(res.statusCode, 201);
     const userInsert = calls.find(({ query }) => query.includes("INSERT INTO users"));
-    assert.equal(userInsert.values[2], "hashed:password123");
+    assert.equal(userInsert.values[3], "hashed:password123");
+    assert.equal(userInsert.values[2], "worker@example.com");
     assert.ok(calls.some(({ query }) => query.includes("INSERT INTO pension_accounts")));
 });
 

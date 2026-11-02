@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import useApi from "../../hooks/useApi";
 import { listFunds, createFund, updateFund } from "../../services/fundService";
 import DataTable from "../../components/ui/DataTable";
@@ -29,6 +29,7 @@ function Funds() {
     const [editingFund, setEditingFund] = useState(null);
     const [form, setForm] = useState(EMPTY_FORM);
     const [submitting, setSubmitting] = useState(false);
+    const submissionInProgressRef = useRef(false);
 
     function openCreateModal() {
         setEditingFund(null);
@@ -55,6 +56,8 @@ function Funds() {
 
     async function handleSubmit(e) {
         e.preventDefault();
+        if (submissionInProgressRef.current) return;
+        submissionInProgressRef.current = true;
         setSubmitting(true);
         try {
             if (editingFund) {
@@ -72,6 +75,7 @@ function Funds() {
         } catch (err) {
             toast.error(err.message || "Failed to save fund.");
         } finally {
+            submissionInProgressRef.current = false;
             setSubmitting(false);
         }
     }
@@ -110,20 +114,28 @@ function Funds() {
                 rows={fundsApi.data}
                 rowKey="fund_id"
                 loading={fundsApi.loading}
+                refreshing={fundsApi.refreshing}
                 error={fundsApi.error}
                 onRetry={fundsApi.refetch}
                 emptyMessage="You do not manage any funds yet."
             />
 
-            <Modal open={modalOpen} title={editingFund ? "Edit fund" : "Create fund"} onClose={() => setModalOpen(false)}>
+            <Modal
+                open={modalOpen}
+                title={editingFund ? "Edit fund" : "Create fund"}
+                onClose={() => {
+                    if (!submitting) setModalOpen(false);
+                }}
+            >
                 <form className="form-grid" onSubmit={handleSubmit}>
-                    <FormField id="fund_name" label="Fund name" value={form.fund_name} onChange={handleChange} required />
+                    <FormField id="fund_name" label="Fund name" value={form.fund_name} onChange={handleChange} required disabled={submitting} />
                     <FormField
                         id="administrator_name"
                         label="Administrator name"
                         value={form.administrator_name}
                         onChange={handleChange}
                         required
+                        disabled={submitting}
                     />
                     <FormField
                         id="risk_level"
@@ -132,6 +144,7 @@ function Funds() {
                         options={RISK_OPTIONS}
                         value={form.risk_level}
                         onChange={handleChange}
+                        disabled={submitting}
                     />
                     <FormField
                         id="expected_return"
@@ -141,6 +154,7 @@ function Funds() {
                         value={form.expected_return}
                         onChange={handleChange}
                         required
+                        disabled={submitting}
                     />
                     {editingFund && (
                         <FormField
@@ -150,10 +164,11 @@ function Funds() {
                             options={STATUS_OPTIONS}
                             value={form.fund_status}
                             onChange={handleChange}
+                            disabled={submitting}
                         />
                     )}
                     <div className="form-actions">
-                        <Button type="button" variant="secondary" onClick={() => setModalOpen(false)}>
+                        <Button type="button" variant="secondary" disabled={submitting} onClick={() => setModalOpen(false)}>
                             Cancel
                         </Button>
                         <Button type="submit" variant="primary" loading={submitting}>

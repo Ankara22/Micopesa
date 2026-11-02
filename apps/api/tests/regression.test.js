@@ -69,6 +69,13 @@ async function login(phone, password = TEST_PASSWORD) {
     return response.body?.data?.token;
 }
 
+async function setAccountBalance(accountId, balance) {
+    await pool.query(
+        "UPDATE pension_accounts SET current_balance = $2 WHERE account_id = $1",
+        [accountId, balance]
+    );
+}
+
 before(async () => {
     await new Promise((resolve, reject) => {
         server.once("error", reject);
@@ -382,19 +389,46 @@ test("payment status route remains user-scoped while new initiation is disabled"
 });
 
 test("withdrawal submission rejects requests exceeding the uncredited balance", async () => {
+    await setAccountBalance(fixtures.accounts.workerA, 1000);
+    const beforeBalance = await pool.query("SELECT current_balance FROM pension_accounts WHERE account_id = $1", [fixtures.accounts.workerA]);
+    const pendingContributions = await pool.query(
+        `SELECT COALESCE(SUM(c.amount), 0)::numeric AS amount
+         FROM contributions c
+         JOIN transactions t ON t.transaction_id = c.transaction_id
+         WHERE c.account_id = $1
+           AND c.contribution_status = 'PENDING'
+           AND t.transaction_status = 'PENDING'`,
+        [fixtures.accounts.workerA]
+    );
+    assert.equal(pendingContributions.rows[0].amount, "4600.00");
+
     const managerToken = await login("254700000002");
     const approved = await request(`/api/withdrawals/${fixtures.pendingWithdrawalId}/approve`, {
         method: "PATCH",
         token: managerToken,
     });
     assert.equal(approved.status, 200);
+    assert.equal(approved.body.data.claim.claim_status, "APPROVED");
+    const afterBalance = await pool.query("SELECT current_balance FROM pension_accounts WHERE account_id = $1", [fixtures.accounts.workerA]);
+    assert.equal(afterBalance.rows[0].current_balance, beforeBalance.rows[0].current_balance);
     const workerToken = await login("254700000004");
     const submitted = await request("/api/withdrawals", {
         method: "POST",
         token: workerToken,
-        body: { amount_requested: 5000, destination_phone: "254700000004", withdrawal_reason: "medical" },
+        body: { amount_requested: 500, destination_phone: "254700000004", withdrawal_reason: "medical" },
     });
     assert.equal(submitted.status, 400);
+    assert.match(submitted.body.message, /cannot exceed the available balance/i);
+    const pendingContributionsAfterReview = await pool.query(
+        `SELECT COALESCE(SUM(c.amount), 0)::numeric AS amount
+         FROM contributions c
+         JOIN transactions t ON t.transaction_id = c.transaction_id
+         WHERE c.account_id = $1
+           AND c.contribution_status = 'PENDING'
+           AND t.transaction_status = 'PENDING'`,
+        [fixtures.accounts.workerA]
+    );
+    assert.equal(pendingContributionsAfterReview.rows[0].amount, "4600.00");
 
     for (const amount of [0, -1, "not-a-number"]) {
         assert.equal((await request("/api/withdrawals", {
@@ -416,6 +450,7 @@ test("withdrawal exceeding available balance is rejected", async () => {
 });
 
 test("manager approval changes claim status without changing balance or ledger", async () => {
+    await setAccountBalance(fixtures.accounts.workerA, 2000);
     const managerToken = await login("254700000002");
     const beforeBalance = await pool.query("SELECT current_balance FROM pension_accounts WHERE account_id = $1", [fixtures.accounts.workerA]);
     const beforeLedger = await pool.query("SELECT count(*)::int AS count FROM transactions");
@@ -432,6 +467,8 @@ test("manager approval changes claim status without changing balance or ledger",
 });
 
 test("worker cannot review claims and repeated manager review returns conflict", async () => {
+    await setAccountBalance(fixtures.accounts.workerA, 2000);
+    const beforeBalance = await pool.query("SELECT current_balance FROM pension_accounts WHERE account_id = $1", [fixtures.accounts.workerA]);
     const workerToken = await login("254700000004");
     const forbidden = await request(`/api/withdrawals/${fixtures.pendingWithdrawalId}/approve`, {
         method: "PATCH",
@@ -448,7 +485,12 @@ test("worker cannot review claims and repeated manager review returns conflict",
         token: managerToken,
     });
     assert.equal(first.status, 200);
+    assert.equal(first.body.data.claim.claim_status, "APPROVED");
     assert.equal(second.status, 409);
+    const afterBalance = await pool.query("SELECT current_balance FROM pension_accounts WHERE account_id = $1", [fixtures.accounts.workerA]);
+    assert.equal(afterBalance.rows[0].current_balance, beforeBalance.rows[0].current_balance);
+    const claim = await pool.query("SELECT claim_status FROM withdrawal_claims WHERE claim_id = $1", [fixtures.pendingWithdrawalId]);
+    assert.equal(claim.rows[0].claim_status, "APPROVED");
 });
 
 test("manager rejection records rejected status", async () => {
@@ -470,9 +512,14 @@ test("withdrawal submission audit record", { skip: "TODO: withdrawal submission 
 test("denied permission audit record", { skip: "TODO: denied permission actions are not audited." }, () => {});
 
 test("manager approval appends an audit record; audit API exposes no mutation routes", async () => {
+    await setAccountBalance(fixtures.accounts.workerA, 2000);
+    const beforeBalance = await pool.query("SELECT current_balance FROM pension_accounts WHERE account_id = $1", [fixtures.accounts.workerA]);
     const token = await login("254700000002");
     const reviewed = await request(`/api/withdrawals/${fixtures.pendingWithdrawalId}/approve`, { method: "PATCH", token });
     assert.equal(reviewed.status, 200);
+    assert.equal(reviewed.body.data.claim.claim_status, "APPROVED");
+    const afterBalance = await pool.query("SELECT current_balance FROM pension_accounts WHERE account_id = $1", [fixtures.accounts.workerA]);
+    assert.equal(afterBalance.rows[0].current_balance, beforeBalance.rows[0].current_balance);
     const logs = await request("/api/audit-logs/operational", { token });
     assert.equal(logs.status, 200);
     assert.equal(logs.body.data.length, 1);
@@ -505,16 +552,14 @@ test("retirement projection matches an independent monthly-compounding calculati
     }
 });
 
-test("projection handles zero years and rejects negative contribution at the API boundary", async () => {
-    const zeroYears = calculateProjection({
+test("projection rejects invalid retirement ages and supports zero planned contributions", async () => {
+    assert.throws(() => calculateProjection({
         currentBalance: 1200,
         monthlyContribution: 500,
         targetAmount: 1000,
         targetAge: 60,
         currentAge: 60,
-    });
-    assert.equal(zeroYears.projectedBalance, 1200);
-    assert.equal(zeroYears.months, 0);
+    }), { code: "PROJECTION_INVALID" });
     const zeroContribution = calculateProjection({
         currentBalance: 0,
         monthlyContribution: 0,
@@ -532,8 +577,26 @@ test("projection handles zero years and rejects negative contribution at the API
     assert.equal(negative.status, 400);
 });
 
-test("retirement projection at configurable 10% and 7% rates", { skip: "TODO: projection service fixes annual return at 8% and accepts no rate parameter." }, () => {});
-test("retirement dashboard chart receives calculator series", { skip: "TODO: no retirement chart series is implemented in the frontend." }, () => {});
+test("projection calculation honors zero and nonzero annual growth assumptions", () => {
+    const atTenPercent = calculateProjection({
+        currentBalance: 10000,
+        monthlyContribution: 100,
+        targetAmount: 100000,
+        targetAge: 40,
+        currentAge: 30,
+        annualRate: 0.1,
+    });
+    const atSevenPercent = calculateProjection({
+        currentBalance: 10000,
+        monthlyContribution: 100,
+        targetAmount: 100000,
+        targetAge: 40,
+        currentAge: 30,
+        annualRate: 0.07,
+    });
+    assert.ok(atTenPercent.projectedBalance > atSevenPercent.projectedBalance);
+    assert.equal(atTenPercent.yearByYear.length, 11);
+});
 
 test("workerA cannot access workerB data through guessed resource paths", async () => {
     const token = await login("254700000004");

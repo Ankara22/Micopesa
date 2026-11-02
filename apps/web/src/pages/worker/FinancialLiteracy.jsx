@@ -1,32 +1,63 @@
+import { useCallback } from "react";
+import { useTranslation } from "react-i18next";
+import { useAuth } from "../../context/AuthContext";
 import useApi from "../../hooks/useApi";
+import { getMyBalance, getMyContributions } from "../../services/accountService";
+import { getRetirementPlan } from "../../services/retirementApi";
 import { getArticles } from "../../services/literacyService";
-import LoadingState from "../../components/ui/LoadingState";
-import ErrorState from "../../components/ui/ErrorState";
-import Card from "../../components/ui/Card";
+import FinancialInsights from "../../components/FinancialLiteracy/FinancialInsights";
+import ArticleLibrary from "../../components/FinancialLiteracy/ArticleLibrary";
+import "./financial-literacy.css";
 
 function FinancialLiteracy() {
-    const articlesApi = useApi(getArticles, []);
-
-    if (articlesApi.loading) return <LoadingState message="Loading articles..." />;
-    if (articlesApi.error) return <ErrorState message={articlesApi.error} onRetry={articlesApi.refetch} />;
+    const { t } = useTranslation();
+    const { loginSessionId } = useAuth();
+    const balanceApi = useApi(getMyBalance, [loginSessionId]);
+    const contributionsApi = useApi(getMyContributions, [loginSessionId]);
+    const fetchPlan = useCallback(
+        () => getRetirementPlan().catch((err) => {
+            if (err.status === 404) return null;
+            throw err;
+        }),
+        []
+    );
+    const planApi = useApi(fetchPlan, [loginSessionId]);
+    const articlesApi = useApi(getArticles, [loginSessionId]);
+    const insightsLoading = (
+        (balanceApi.loading && balanceApi.data === null) ||
+        (contributionsApi.loading && contributionsApi.data === null) ||
+        (planApi.loading && planApi.data === null)
+    );
+    const plan = planApi.data?.plan;
 
     return (
-        <div>
+        <div className="financial-literacy-page">
             <div className="page-header">
                 <div>
-                    <h1 className="page-title">Financial Literacy</h1>
-                    <p className="page-subtitle">Tips and guidance to help you save smarter for retirement.</p>
+                    <h1 className="page-title">{t("worker.literacy.title")}</h1>
+                    <p className="page-subtitle">{t("worker.literacy.subtitle")}</p>
                 </div>
             </div>
 
-            <div className="form-grid">
-                {(articlesApi.data || []).map((article) => (
-                    <Card key={article.id} title={article.title}>
-                        <p style={{ fontWeight: 600, marginTop: 0 }}>{article.summary}</p>
-                        <p style={{ margin: 0 }}>{article.body}</p>
-                    </Card>
-                ))}
-            </div>
+            <ArticleLibrary
+                articles={articlesApi.data}
+                loading={articlesApi.loading && articlesApi.data === null}
+                error={Boolean(articlesApi.error && articlesApi.data === null)}
+                onRetry={articlesApi.refetch}
+            />
+
+            <FinancialInsights
+                key={loginSessionId}
+                sessionKey={loginSessionId}
+                balance={balanceApi.data}
+                contributions={contributionsApi.data}
+                plan={plan}
+                projection={planApi.data?.projection}
+                dataReady={!insightsLoading}
+                loading={insightsLoading}
+                dataUnavailable={Boolean(balanceApi.error || contributionsApi.error || planApi.error)}
+                layout="stacked"
+            />
         </div>
     );
 }

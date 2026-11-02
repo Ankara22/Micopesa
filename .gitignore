@@ -1,5 +1,6 @@
 # Dependencies
 node_modules/
+apps/api/storage/
 .pnp/
 .pnp.js
 

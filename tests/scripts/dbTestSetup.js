@@ -46,10 +46,10 @@ async function main() {
     try {
         const migrations = [
             "database/schema.sql",
-            "database/migration_to_final_schema.sql",
             "database/migration_withdrawal_reason.sql",
             "database/migration_mpesa_stk_push.sql",
             "database/migration_withdrawal_pending_unique.sql",
+            "database/migration_user_profiles.sql",
         ];
         for (const migration of migrations) {
             const sql = fs.readFileSync(path.join(repositoryRoot, migration), "utf8");

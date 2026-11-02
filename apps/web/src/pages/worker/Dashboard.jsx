@@ -1,220 +1,123 @@
 import { Link } from "react-router-dom";
-import { useCallback, useState } from "react";
+import { useTranslation } from "react-i18next";
+import { useCallback } from "react";
 import { useAuth } from "../../context/AuthContext";
 import useApi from "../../hooks/useApi";
 import { getMyBalance, getMyContributions } from "../../services/accountService";
-import { getRetirementPlan, updateRetirementPlan } from "../../services/retirementApi";
-import { getMyClaims } from "../../services/withdrawalService";
+import { getRetirementPlan } from "../../services/retirementApi";
+import { StatCard } from "../../components/ui/Card";
 import SkeletonLoader from "../../components/ui/SkeletonLoader";
 import ErrorState from "../../components/ui/ErrorState";
-import Button from "../../components/ui/Button";
+import LoadingState from "../../components/ui/LoadingState";
 import StatusBadge from "../../components/ui/StatusBadge";
-import PlanForm from "../../components/Retirement/PlanForm";
-import ProjectionSummary from "../../components/Retirement/ProjectionSummary";
-import DepositModal from "../../components/Deposit/DepositModal";
+import { formatKes } from "../../i18n/formatters";
 import "./worker-dashboard.css";
 
-function formatCurrency(value) {
-    if (value === undefined || value === null || !Number.isFinite(Number(value))) return "Not available";
-    return `KSh ${Number(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
+const WORKER_LINKS = [
+    { key: "contributions", to: "/worker/contributions" },
+    { key: "balance", to: "/worker/balance" },
+    { key: "funds", to: "/worker/funds" },
+    { key: "plan", to: "/worker/retirement-plan" },
+    { key: "projection", to: "/worker/retirement-projection" },
+    { key: "literacy", to: "/worker/literacy" },
+];
 
-function formatDate(value) {
-    const date = new Date(value);
-    return Number.isNaN(date.getTime()) ? "Date unavailable" : date.toLocaleDateString();
-}
-
-function getGreeting() {
+function getGreetingKey() {
     const hour = new Date().getHours();
-    if (hour < 12) return "Good morning";
-    if (hour < 18) return "Good afternoon";
-    return "Good evening";
+    if (hour < 12) return "greetingMorning";
+    if (hour < 18) return "greetingAfternoon";
+    return "greetingEvening";
 }
 
 function WorkerDashboard() {
-    const [depositOpen, setDepositOpen] = useState(false);
-    const { user } = useAuth();
-    const balanceApi = useApi(getMyBalance, []);
-    const contributionsApi = useApi(getMyContributions, []);
-    const handleDepositCompleted = useCallback((payment) => {
-        if (payment.transaction_status === "COMPLETED") {
-            balanceApi.refetch();
-            contributionsApi.refetch();
-        }
-    }, [balanceApi, contributionsApi]);
+    const { t, i18n } = useTranslation();
+    const { user, loginSessionId } = useAuth();
+    const balanceApi = useApi(getMyBalance, [loginSessionId]);
+    const contributionsApi = useApi(getMyContributions, [loginSessionId]);
     const fetchPlan = useCallback(
-        () => getRetirementPlan().catch((err) => {
-            if (err.status === 404) return null;
-            throw err;
+        () => getRetirementPlan().catch((error) => {
+            if (error.status === 404) return null;
+            throw error;
         }),
         []
     );
-    const planApi = useApi(fetchPlan, []);
-    const claimsApi = useApi(getMyClaims, []);
-
-    const loading = balanceApi.loading || planApi.loading || claimsApi.loading || contributionsApi.loading;
-
-    if (loading) return <SkeletonLoader variant="metrics" count={3} label="Loading your dashboard" />;
-
-    const balance = balanceApi.data;
-    const plan = planApi.data?.plan;
-    const projection = planApi.data?.projection;
-    const claims = claimsApi.data || [];
-    const pendingClaims = claims.filter((claim) => claim.claim_status === "PENDING");
-    const contributions = contributionsApi.data || [];
-    const recentContributions = contributions.slice(0, 3);
+    const planApi = useApi(fetchPlan, [loginSessionId]);
     const firstName = user?.full_name?.trim().split(/\s+/)[0];
+    const completedContributions = (contributionsApi.data || [])
+        .filter((contribution) => contribution.contribution_status === "COMPLETED");
+    const completedTotal = completedContributions.reduce(
+        (total, contribution) => total + (Number.isFinite(Number(contribution.amount)) ? Number(contribution.amount) : 0),
+        0
+    );
 
     return (
         <div className="worker-dashboard">
-            <div className="page-header">
+            <header className="page-header">
                 <div>
-                    <p className="worker-dashboard-eyebrow">Your pension, at a glance</p>
-                    <h1 className="page-title">{getGreeting()}{firstName ? `, ${firstName}` : ""}</h1>
-                    <p className="page-subtitle">A clear view of your savings, retirement plan, and account activity.</p>
+                    <p className="worker-dashboard-eyebrow">{t("worker.dashboard.eyebrow")}</p>
+                    <h1 className="page-title">{t(`worker.dashboard.${getGreetingKey()}`)}{firstName ? `, ${firstName}` : ""}</h1>
+                    <p className="page-subtitle">{t("worker.dashboard.subtitle")}</p>
                 </div>
-            </div>
+            </header>
 
-            <section className="worker-dashboard-overview" aria-label="Pension account overview">
-                <div className="worker-balance-card">
-                    <div>
-                        <p className="worker-dashboard-label">Current pension balance</p>
-                        {balanceApi.error ? (
-                            <ErrorState message={balanceApi.error} onRetry={balanceApi.refetch} />
-                        ) : (
-                            <>
-                                <p className="worker-balance-amount">{formatCurrency(balance?.current_balance)}</p>
-                                <div className="worker-balance-status">
-                                    <span>Account status</span>
-                                    <StatusBadge status={balance?.account_status} />
-                                </div>
-                            </>
-                        )}
-                    </div>
-                    <Button variant="primary" onClick={() => setDepositOpen(true)}>
-                        Make a contribution
-                    </Button>
-                </div>
-
-                <div className="worker-dashboard-summary-grid">
-                    <section className="worker-summary-card" aria-labelledby="worker-retirement-summary-title">
-                        <div className="worker-summary-heading">
-                            <div>
-                                <p className="worker-dashboard-label">Retirement plan</p>
-                                <h2 id="worker-retirement-summary-title">
-                                    {plan ? `Target age ${plan.target_age}` : "Your future, your goal"}
-                                </h2>
-                            </div>
-                            {plan && <StatusBadge status={plan.plan_status} />}
+            <section aria-label={t("worker.dashboard.summaryLabel")}>
+                {balanceApi.loading && balanceApi.data === null ? (
+                    <SkeletonLoader variant="metrics" count={3} label={t("worker.dashboard.loadingSummary")} />
+                ) : balanceApi.error && balanceApi.data === null ? (
+                    <ErrorState message={t("worker.common.errors.load")} title={t("worker.common.unableToLoad")} retryLabel={t("worker.common.tryAgain")} onRetry={balanceApi.refetch} />
+                ) : (
+                    <>
+                        {balanceApi.refreshing && <LoadingState message={t("worker.dashboard.refreshingSummary")} />}
+                        {balanceApi.error && <ErrorState message={t("worker.common.errors.load")} title={t("worker.common.unableToLoad")} retryLabel={t("worker.common.tryAgain")} onRetry={balanceApi.refetch} />}
+                        <div className="stat-card-grid">
+                            <StatCard
+                                label={t("worker.dashboard.balance")}
+                                value={formatKes(balanceApi.data?.current_balance, i18n.language) || t("worker.common.notAvailable")}
+                                hint={balanceApi.data?.account_status
+                                    ? t("worker.dashboard.accountStatus", { status: t(`worker.common.statuses.${balanceApi.data.account_status}`, { defaultValue: balanceApi.data.account_status }) })
+                                    : t("worker.dashboard.accountStatusUnavailable")}
+                            />
+                            <StatCard
+                                label={t("worker.dashboard.completedRecords")}
+                                value={contributionsApi.data === null ? "—" : completedContributions.length}
+                                hint={contributionsApi.data === null
+                                    ? t("worker.dashboard.contributionSummaryUnavailable")
+                                    : t("worker.dashboard.recordedTotal", { amount: formatKes(completedTotal, i18n.language) })}
+                            />
+                            <StatCard
+                                label={t("worker.dashboard.retirementTarget")}
+                                value={planApi.data?.plan?.target_age
+                                    ? t("worker.retirement.age", { age: planApi.data.plan.target_age })
+                                    : planApi.loading ? t("worker.dashboard.loading") : t("worker.dashboard.notSet")}
+                                hint={planApi.data?.plan?.target_amount
+                                    ? t("worker.dashboard.goal", { amount: formatKes(planApi.data.plan.target_amount, i18n.language) })
+                                    : t("worker.dashboard.setTarget")}
+                            />
                         </div>
-                        {plan ? (
-                            <div className="worker-retirement-values">
-                                <div>
-                                    <span>Goal amount</span>
-                                    <strong>{formatCurrency(plan.target_amount)}</strong>
-                                </div>
-                                <div>
-                                    <span>Projected amount</span>
-                                    <strong>{formatCurrency(projection?.projected_amount)}</strong>
-                                </div>
-                            </div>
-                        ) : (
+                        {contributionsApi.error && <ErrorState message={t("worker.common.errors.load")} title={t("worker.common.unableToLoad")} retryLabel={t("worker.common.tryAgain")} onRetry={contributionsApi.refetch} />}
+                        {planApi.error && <ErrorState message={t("worker.common.errors.load")} title={t("worker.common.unableToLoad")} retryLabel={t("worker.common.tryAgain")} onRetry={planApi.refetch} />}
+                        {planApi.data?.plan?.plan_status && (
                             <p className="worker-dashboard-supporting">
-                                Create a retirement plan to set a target and view an estimate based on your chosen contribution.
+                                {t("worker.dashboard.planStatus")} <StatusBadge status={planApi.data.plan.plan_status} label={t(`worker.common.statuses.${planApi.data.plan.plan_status}`, { defaultValue: planApi.data.plan.plan_status })} />
                             </p>
                         )}
-                        {planApi.error ? (
-                            <ErrorState message={planApi.error} onRetry={planApi.refetch} />
-                        ) : plan && projection ? (
-                            <ProjectionSummary plan={plan} projection={projection} currentBalance={balance?.current_balance} />
-                        ) : null}
-                        <Link className="worker-dashboard-text-link" to="/worker/retirement-plan">
-                            {plan ? "View or update your plan" : "Create your retirement plan"}
-                        </Link>
-                    </section>
-
-                    <section className="worker-summary-card" aria-labelledby="worker-withdrawals-title">
-                        <div className="worker-summary-heading">
-                            <div>
-                                <p className="worker-dashboard-label">Withdrawals</p>
-                                <h2 id="worker-withdrawals-title">Request status</h2>
-                            </div>
-                            {!claimsApi.error && <span className="worker-pending-count">{pendingClaims.length}</span>}
-                        </div>
-                        {claimsApi.error ? (
-                            <ErrorState message={claimsApi.error} onRetry={claimsApi.refetch} />
-                        ) : pendingClaims.length ? (
-                            <ul className="worker-pending-list">
-                                {pendingClaims.slice(0, 2).map((claim) => (
-                                    <li key={claim.claim_id}>
-                                        <span>{formatCurrency(claim.amount_requested)}</span>
-                                        <StatusBadge status={claim.claim_status} />
-                                    </li>
-                                ))}
-                            </ul>
-                        ) : (
-                            <p className="worker-dashboard-supporting">You have no withdrawal requests awaiting review.</p>
-                        )}
-                        <Link className="worker-dashboard-text-link" to="/worker/withdrawals">
-                            View withdrawals
-                        </Link>
-                    </section>
-                </div>
-            </section>
-
-            <section className="worker-dashboard-activity" aria-labelledby="worker-recent-contributions-title">
-                <div className="worker-dashboard-section-heading">
-                    <div>
-                        <p className="worker-dashboard-label">Account activity</p>
-                        <h2 id="worker-recent-contributions-title">Recent contributions</h2>
-                    </div>
-                    <Link className="worker-dashboard-text-link" to="/worker/contributions">
-                        View all
-                    </Link>
-                </div>
-                {contributionsApi.error ? (
-                    <ErrorState message={contributionsApi.error} onRetry={contributionsApi.refetch} />
-                ) : recentContributions.length ? (
-                    <ul className="worker-contribution-list">
-                        {recentContributions.map((contribution) => (
-                            <li key={contribution.contribution_id}>
-                                <div className="worker-contribution-detail">
-                                    <strong>{formatCurrency(contribution.amount)}</strong>
-                                    <span>{formatDate(contribution.created_at)} · {contribution.channel}</span>
-                                </div>
-                                <StatusBadge status={contribution.contribution_status} />
-                            </li>
-                        ))}
-                    </ul>
-                ) : (
-                    <div className="worker-dashboard-empty">
-                        <p>No contributions yet. When you make one, its status will appear here.</p>
-                        <Button variant="secondary" onClick={() => setDepositOpen(true)}>
-                            Make your first contribution
-                        </Button>
-                    </div>
+                    </>
                 )}
             </section>
 
-            {planApi.error ? null : (
-                <section className="worker-dashboard-plan-form" aria-label="Retirement plan form">
-                    <PlanForm
-                        plan={plan}
-                        projection={projection}
-                        onSaved={async (payload) => {
-                            const result = await updateRetirementPlan(payload);
-                            planApi.setData(result);
-                            return result;
-                        }}
-                    />
-                </section>
-            )}
-
-            <DepositModal
-                open={depositOpen}
-                onClose={() => setDepositOpen(false)}
-                onCompleted={handleDepositCompleted}
-            />
+            <nav className="worker-dashboard-quick-links" aria-label={t("worker.dashboard.workerFeatures")}>
+                <h2>{t("worker.dashboard.explore")}</h2>
+                <ul>
+                    {WORKER_LINKS.map((item) => (
+                        <li key={item.to}>
+                            <Link to={item.to}>
+                                <span>{t(`worker.dashboard.links.${item.key}`)}</span>
+                                <small>{t(`worker.dashboard.links.${item.key}Description`)}</small>
+                            </Link>
+                        </li>
+                    ))}
+                </ul>
+            </nav>
         </div>
     );
 }

@@ -28,7 +28,8 @@
 -- Safety mechanism (data preservation)
 --   Before creating/replacing any role-enforcement trigger, this script
 --   checks existing rows in funds, withdrawal_claims, and compliance_reports
---   for role violations that the new trigger would reject going forward.
+--   for role/status violations that the new trigger would reject going
+--   forward.
 --   Triggers only validate future INSERT/UPDATE operations - they do NOT
 --   retroactively re-validate rows that already exist. To avoid silently
 --   leaving "grandfathered" bad data that would later behave inconsistently
@@ -103,7 +104,8 @@ BEGIN
     SELECT count(*) INTO v_bad_reports
     FROM compliance_reports c
     JOIN users u ON u.user_id = c.generated_by
-    WHERE u.role NOT IN ('FUND_MANAGER', 'REGULATOR');
+    WHERE u.role IS DISTINCT FROM 'FUND_MANAGER'
+       OR u.account_status IS DISTINCT FROM 'ACTIVE';
 
     IF v_bad_funds > 0 OR v_bad_claims > 0 OR v_bad_reports > 0 THEN
         RAISE EXCEPTION
@@ -112,7 +114,7 @@ BEGIN
             'Resolve these rows (reassign to a user with the correct role, or set withdrawal_claims.reviewed_by to NULL) and re-run this script. Diagnostic queries:\n'
             '  SELECT f.fund_id, f.managed_by, u.role FROM funds f JOIN users u ON u.user_id = f.managed_by WHERE u.role <> ''FUND_MANAGER'';\n'
             '  SELECT w.claim_id, w.reviewed_by, u.role FROM withdrawal_claims w JOIN users u ON u.user_id = w.reviewed_by WHERE u.role <> ''FUND_MANAGER'';\n'
-            '  SELECT c.report_id, c.generated_by, u.role FROM compliance_reports c JOIN users u ON u.user_id = c.generated_by WHERE u.role NOT IN (''FUND_MANAGER'', ''REGULATOR'');',
+            '  SELECT c.report_id, c.generated_by, u.role, u.account_status FROM compliance_reports c JOIN users u ON u.user_id = c.generated_by WHERE u.role IS DISTINCT FROM ''FUND_MANAGER'' OR u.account_status IS DISTINCT FROM ''ACTIVE'';',
             v_bad_funds, v_bad_claims, v_bad_reports;
     END IF;
 
@@ -161,23 +163,30 @@ CREATE INDEX IF NOT EXISTS idx_notifications_created_by ON notifications (create
 
 -- -----------------------------------------------------------------------------
 -- 4. COMPLIANCE_REPORTS role enforcement
---    Only FUND_MANAGER and REGULATOR may be assigned to generated_by.
---    WORKER and ADMIN are rejected.
+--    Only active FUND_MANAGER users may be assigned to generated_by.
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION enforce_compliance_report_generator_role()
 RETURNS TRIGGER AS $$
 DECLARE
     generator_role VARCHAR(20);
+    generator_status VARCHAR(15);
 BEGIN
-    SELECT role INTO generator_role FROM users WHERE user_id = NEW.generated_by;
-
-    IF generator_role IS NULL THEN
-        RAISE EXCEPTION 'generated_by user % does not exist', NEW.generated_by;
+    IF TG_OP = 'INSERT' AND NEW.generated_by IS NULL THEN
+        RAISE EXCEPTION 'new compliance reports require a submitting fund manager';
+    END IF;
+    IF NEW.generated_by IS NULL THEN
+        RETURN NEW;
     END IF;
 
-    IF generator_role NOT IN ('FUND_MANAGER', 'REGULATOR') THEN
-        RAISE EXCEPTION 'generated_by user % must have role FUND_MANAGER or REGULATOR, found %',
-            NEW.generated_by, generator_role;
+    SELECT role, account_status
+    INTO generator_role, generator_status
+    FROM users
+    WHERE user_id = NEW.generated_by;
+    IF generator_role IS DISTINCT FROM 'FUND_MANAGER'
+       OR generator_status IS DISTINCT FROM 'ACTIVE' THEN
+        RAISE EXCEPTION
+            'generated_by user % must be an active FUND_MANAGER (found role %, status %)',
+            NEW.generated_by, generator_role, generator_status;
     END IF;
 
     RETURN NEW;

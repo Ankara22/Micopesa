@@ -1,128 +1,94 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import WorkerDashboard from './Dashboard'
+import { cleanup, render, screen } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import i18n from "../../i18n";
+import WorkerDashboard from "./Dashboard";
 
-const serviceMocks = vi.hoisted(() => ({
-  getMyBalance: vi.fn(),
-  getMyContributions: vi.fn(),
-  getRetirementPlan: vi.fn(),
-  updateRetirementPlan: vi.fn(),
-  getMyClaims: vi.fn(),
-  useAuth: vi.fn(),
-}))
+const mocks = vi.hoisted(() => ({
+    getMyBalance: vi.fn(),
+    getMyContributions: vi.fn(),
+    getRetirementPlan: vi.fn(),
+    useAuth: vi.fn(),
+}));
 
-vi.mock('../../services/accountService', () => ({
-  getMyBalance: serviceMocks.getMyBalance,
-  getMyContributions: serviceMocks.getMyContributions,
-}))
-vi.mock('../../services/retirementApi', () => ({
-  getRetirementPlan: serviceMocks.getRetirementPlan,
-  updateRetirementPlan: serviceMocks.updateRetirementPlan,
-}))
-vi.mock('../../services/withdrawalService', () => ({
-  getMyClaims: serviceMocks.getMyClaims,
-}))
-vi.mock('../../context/AuthContext', () => ({
-  useAuth: serviceMocks.useAuth,
-}))
-vi.mock('../../components/Retirement/PlanForm', () => ({
-  default: () => <div>Retirement plan form</div>,
-}))
-vi.mock('../../components/Retirement/ProjectionSummary', () => ({
-  default: () => <div>Retirement projection summary</div>,
-}))
-vi.mock('../../components/Deposit/DepositModal', () => ({
-  default: ({ open, onCompleted }) => open ? (
-    <div role="dialog">
-      <span>Deposit flow</span>
-      <button onClick={() => onCompleted({ transaction_status: 'PENDING' })}>Pending payment update</button>
-      <button onClick={() => onCompleted({ transaction_status: 'COMPLETED' })}>Verified payment update</button>
-    </div>
-  ) : null,
-}))
+vi.mock("../../services/accountService", () => ({
+    getMyBalance: mocks.getMyBalance,
+    getMyContributions: mocks.getMyContributions,
+}));
+vi.mock("../../services/retirementApi", () => ({
+    getRetirementPlan: mocks.getRetirementPlan,
+}));
+vi.mock("../../context/AuthContext", () => ({ useAuth: mocks.useAuth }));
 
 function renderDashboard() {
-  return render(
-    <MemoryRouter>
-      <WorkerDashboard />
-    </MemoryRouter>,
-  )
+    return render(<MemoryRouter><WorkerDashboard /></MemoryRouter>);
 }
 
-describe('WorkerDashboard', () => {
-  beforeEach(() => {
-    vi.clearAllMocks()
-    serviceMocks.useAuth.mockReturnValue({ user: { full_name: 'Amina Worker' } })
-    serviceMocks.getMyBalance.mockResolvedValue({ current_balance: '14850.00', account_status: 'ACTIVE' })
-    serviceMocks.getMyContributions.mockResolvedValue([
-      {
-        contribution_id: 'contribution-1',
-        amount: '2500.00',
-        channel: 'MPESA',
-        contribution_status: 'COMPLETED',
-        created_at: '2026-10-20T09:00:00.000Z',
-      },
-    ])
-    serviceMocks.getRetirementPlan.mockResolvedValue({
-      plan: { plan_id: 'plan-1', target_amount: '500000.00', target_age: 60, plan_status: 'ACTIVE' },
-      projection: { projected_amount: '420000.00', projection_years: 20, assumed_contribution: '2000.00' },
-    })
-    serviceMocks.getMyClaims.mockResolvedValue([
-      { claim_id: 'claim-1', amount_requested: '1200.00', claim_status: 'PENDING' },
-    ])
-  })
+describe("WorkerDashboard", () => {
+    afterEach(() => {
+        cleanup();
+        i18n.changeLanguage("en");
+    });
 
-  it('shows the authenticated worker name and API-backed account, plan, claim, and contribution data', async () => {
-    renderDashboard()
+    beforeEach(() => {
+        vi.clearAllMocks();
+        mocks.useAuth.mockReturnValue({
+            user: { full_name: "Amina Worker", user_id: "worker-1" },
+            loginSessionId: "login-1",
+        });
+        mocks.getMyBalance.mockResolvedValue({ current_balance: "14850.00", account_status: "ACTIVE" });
+        mocks.getMyContributions.mockResolvedValue([
+            { contribution_id: "c1", amount: "2500.00", contribution_status: "COMPLETED" },
+            { contribution_id: "c2", amount: "900.00", contribution_status: "PENDING" },
+        ]);
+        mocks.getRetirementPlan.mockResolvedValue({
+            plan: { target_amount: "500000.00", target_age: 60, plan_status: "ACTIVE" },
+            projection: { projected_amount: "420000.00" },
+        });
+    });
 
-    expect(await screen.findByRole('heading', { name: /Amina/ })).toBeInTheDocument()
-    expect(screen.getByText('KSh 14,850.00')).toBeInTheDocument()
-    expect(screen.getByText('KSh 500,000.00')).toBeInTheDocument()
-    expect(screen.getByText('KSh 420,000.00')).toBeInTheDocument()
-    expect(screen.getByText('KSh 1,200.00')).toBeInTheDocument()
-    expect(screen.getByText('KSh 2,500.00')).toBeInTheDocument()
-    expect(screen.getByText('COMPLETED')).toBeInTheDocument()
-    expect(screen.getByText('Retirement projection summary')).toBeInTheDocument()
-  })
+    it("shows concise summaries from existing account APIs and links to dedicated features", async () => {
+        renderDashboard();
 
-  it('shows empty states when the worker has no plan, pending claims, or contributions', async () => {
-    serviceMocks.getRetirementPlan.mockRejectedValue({ status: 404, message: 'No plan yet' })
-    serviceMocks.getMyClaims.mockResolvedValue([])
-    serviceMocks.getMyContributions.mockResolvedValue([])
-    renderDashboard()
+        expect(await screen.findByRole("heading", { name: /Good .*Amina/ })).toBeInTheDocument();
+        expect(screen.getByText("KSh 14,850.00")).toBeInTheDocument();
+        expect(screen.getByText("Completed contribution records").parentElement)
+            .toHaveTextContent("1");
+        expect(screen.getByText("Recorded total KSh 2,500.00")).toBeInTheDocument();
+        expect(screen.getByText("Goal KSh 500,000.00")).toBeInTheDocument();
+        expect(screen.getByRole("link", { name: /My Funds & Allocation/ })).toHaveAttribute("href", "/worker/funds");
+        expect(screen.getByRole("link", { name: /Financial Literacy/ })).toHaveAttribute("href", "/worker/literacy");
+        expect(screen.queryByRole("heading", { name: "My Fund Allocation" })).not.toBeInTheDocument();
+        expect(screen.queryByRole("heading", { name: "Insights for your next step" })).not.toBeInTheDocument();
+        expect(screen.queryByText("Retirement plan form")).not.toBeInTheDocument();
+        expect(mocks.getMyBalance).toHaveBeenCalledTimes(1);
+        expect(mocks.getMyContributions).toHaveBeenCalledTimes(1);
+    });
 
-    expect(await screen.findByText('Create your retirement plan')).toBeInTheDocument()
-    expect(screen.getByText('You have no withdrawal requests awaiting review.')).toBeInTheDocument()
-    expect(screen.getByText(/No contributions yet/)).toBeInTheDocument()
-  })
+    it("shows useful no-record summaries without inventing account data", async () => {
+        mocks.getRetirementPlan.mockRejectedValue({ status: 404, message: "No plan" });
+        mocks.getMyContributions.mockResolvedValue([]);
+        renderDashboard();
 
-  it('surfaces withdrawal and contribution service errors instead of presenting empty data', async () => {
-    serviceMocks.getMyClaims.mockRejectedValue(new Error('Could not load withdrawal requests'))
-    serviceMocks.getMyContributions.mockRejectedValue(new Error('Could not load contributions'))
-    renderDashboard()
+        expect(await screen.findByText("Not set")).toBeInTheDocument();
+        expect(screen.getByText("Recorded total KSh 0.00")).toBeInTheDocument();
+        expect(screen.queryByText(/insights for your next step/i)).not.toBeInTheDocument();
+    });
 
-    await waitFor(() => {
-      expect(screen.getByText('Could not load withdrawal requests')).toBeInTheDocument()
-      expect(screen.getByText('Could not load contributions')).toBeInTheDocument()
-    })
-  })
+    it("surfaces API errors with recovery actions", async () => {
+        mocks.getMyBalance.mockRejectedValue(new Error("Balance service unavailable"));
+        renderDashboard();
 
-  it('refreshes balance and contribution history only after a completed payment update', async () => {
-    renderDashboard()
+        expect(await screen.findByText("Unable to load this information right now. Please try again.")).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+    });
 
-    fireEvent.click(screen.getAllByRole('button', { name: 'Make a contribution' })[0])
-    expect(serviceMocks.getMyBalance).toHaveBeenCalledTimes(1)
-    expect(serviceMocks.getMyContributions).toHaveBeenCalledTimes(1)
+    it("renders worker dashboard labels in Kiswahili", async () => {
+        await i18n.changeLanguage("sw");
+        renderDashboard();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Pending payment update' }))
-    expect(serviceMocks.getMyBalance).toHaveBeenCalledTimes(1)
-    expect(serviceMocks.getMyContributions).toHaveBeenCalledTimes(1)
-
-    fireEvent.click(screen.getByRole('button', { name: 'Verified payment update' }))
-    await waitFor(() => {
-      expect(serviceMocks.getMyBalance).toHaveBeenCalledTimes(2)
-      expect(serviceMocks.getMyContributions).toHaveBeenCalledTimes(2)
-    })
-  })
-})
+        expect(await screen.findByText("Salio la sasa la pensheni")).toBeInTheDocument();
+        expect(screen.getByText("Rekodi za michango iliyokamilika")).toBeInTheDocument();
+        expect(screen.getByRole("link", { name: /Hazina Zangu na Mgao/ })).toHaveAttribute("href", "/worker/funds");
+    });
+});

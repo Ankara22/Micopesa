@@ -2,17 +2,24 @@ import { Routes, Route, Navigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import ProtectedRoute from "../components/ProtectedRoute";
 import AppLayout from "../layouts/AppLayout";
+import AdminLayout from "../layouts/AdminLayout";
 import { DASHBOARD_BY_ROLE } from "./roleRoutes";
+import SkeletonLoader from "../components/ui/SkeletonLoader";
 
 // Public pages
 import Login from "../pages/auth/Login";
 import Register from "../pages/auth/Register";
+import ForgotPassword from "../pages/auth/ForgotPassword";
+import ResetPassword from "../pages/auth/ResetPassword";
+import VerifyEmail from "../pages/auth/VerifyEmail";
+import ChangeTemporaryPassword from "../pages/auth/ChangeTemporaryPassword";
 import Unauthorized from "../pages/Unauthorized";
 
 // Worker pages
 import WorkerDashboard from "../pages/worker/Dashboard";
 import WorkerContributions from "../pages/worker/Contributions";
 import WorkerBalanceHistory from "../pages/worker/BalanceHistory";
+import WorkerFunds from "../pages/worker/Funds";
 import WorkerRetirementPlan from "../pages/worker/RetirementPlan";
 import WorkerRetirementProjection from "../pages/worker/RetirementProjection";
 import WorkerWithdrawals from "../pages/worker/Withdrawals";
@@ -22,6 +29,7 @@ import WorkerProfile from "../pages/worker/Profile";
 
 // Fund manager pages
 import ManagerDashboard from "../pages/manager/Dashboard";
+import ManagerAnalytics from "../pages/manager/Analytics";
 import ManagerFunds from "../pages/manager/Funds";
 import ManagerWithdrawalRequests from "../pages/manager/WithdrawalRequests";
 import ManagerOperationalReports from "../pages/manager/OperationalReports";
@@ -50,11 +58,7 @@ function HomeRedirect() {
     const { isAuthenticated, isLoading, user } = useAuth();
 
     if (isLoading) {
-        return (
-            <div className="auth-loading">
-                <p>Loading...</p>
-            </div>
-        );
+        return <SkeletonLoader variant="dashboard" count={3} label="Restoring your MicoPesa session" />;
     }
 
     if (!isAuthenticated) {
@@ -70,6 +74,17 @@ function AppRoutes() {
             <Route path="/" element={<HomeRedirect />} />
             <Route path="/login" element={<Login />} />
             <Route path="/register" element={<Register />} />
+            <Route path="/forgot-password" element={<ForgotPassword />} />
+            <Route path="/reset-password" element={<ResetPassword />} />
+            <Route path="/verify-email" element={<VerifyEmail />} />
+            <Route
+                path="/change-password"
+                element={
+                    <ProtectedRoute>
+                        <ChangeTemporaryPassword />
+                    </ProtectedRoute>
+                }
+            />
             <Route path="/unauthorized" element={<Unauthorized />} />
 
             {/* WORKER */}
@@ -83,6 +98,7 @@ function AppRoutes() {
                 <Route path="/worker/dashboard" element={<WorkerDashboard />} />
                 <Route path="/worker/contributions" element={<WorkerContributions />} />
                 <Route path="/worker/balance" element={<WorkerBalanceHistory />} />
+                <Route path="/worker/funds" element={<WorkerFunds />} />
                 <Route path="/worker/retirement-plan" element={<WorkerRetirementPlan />} />
                 <Route path="/worker/retirement-projection" element={<WorkerRetirementProjection />} />
                 <Route path="/worker/withdrawals" element={<WorkerWithdrawals />} />
@@ -101,9 +117,11 @@ function AppRoutes() {
             >
                 <Route path="/manager/dashboard" element={<ManagerDashboard />} />
                 <Route path="/manager/funds" element={<ManagerFunds />} />
+                <Route path="/manager/analytics" element={<ManagerAnalytics />} />
                 <Route path="/manager/withdrawal-requests" element={<ManagerWithdrawalRequests />} />
                 <Route path="/manager/reports" element={<ManagerOperationalReports />} />
                 <Route path="/manager/audit-logs" element={<ManagerAuditLogs />} />
+                <Route path="/manager/notifications" element={<WorkerNotifications />} />
                 <Route path="/manager/profile" element={<ManagerProfile />} />
             </Route>
 
@@ -119,6 +137,7 @@ function AppRoutes() {
                 <Route path="/regulator/funds" element={<RegulatorFundOversight />} />
                 <Route path="/regulator/compliance-reports" element={<RegulatorComplianceReports />} />
                 <Route path="/regulator/audit-logs" element={<RegulatorAuditLogs />} />
+                <Route path="/regulator/notifications" element={<WorkerNotifications />} />
                 <Route path="/regulator/profile" element={<RegulatorProfile />} />
             </Route>
 
@@ -126,7 +145,7 @@ function AppRoutes() {
             <Route
                 element={
                     <ProtectedRoute allowedRoles={["ADMIN"]}>
-                        <AppLayout />
+                        <AdminLayout />
                     </ProtectedRoute>
                 }
             >

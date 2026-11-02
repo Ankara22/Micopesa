@@ -1,7 +1,63 @@
 const pool = require("../db/database");
+const { writeAuditLog } = require("../utils/auditLog");
+const {
+    getActiveWorkerAccount,
+    getEligibleFundsByIds,
+    listEligibleFunds,
+} = require("../services/fundEligibilityService");
 
 const VALID_RISK_LEVELS = ["LOW", "MEDIUM", "HIGH"];
 const VALID_FUND_STATUSES = ["ACTIVE", "SUSPENDED", "CLOSED"];
+
+function validateAllocationRequest(body) {
+    if (!Array.isArray(body?.allocations) || body.allocations.length === 0) {
+        return { error: "allocations must be a non-empty array" };
+    }
+
+    const seenFundIds = new Set();
+    const allocations = [];
+    let totalCents = 0;
+
+    for (const [index, item] of body.allocations.entries()) {
+        if (typeof item?.fund_id !== "string" || item.fund_id.trim() === "") {
+            return { error: `allocations[${index}].fund_id must be a non-empty fund ID` };
+        }
+        const fundId = item.fund_id.trim();
+        if (seenFundIds.has(fundId)) {
+            return { error: `Fund ${fundId} appears more than once in allocations` };
+        }
+        seenFundIds.add(fundId);
+
+        const rawPercentage = item.allocation_percentage;
+        if (typeof rawPercentage !== "string" && typeof rawPercentage !== "number") {
+            return { error: `Allocation percentage for fund ${fundId} must be a positive number with up to two decimal places` };
+        }
+
+        const percentageText = String(rawPercentage).trim();
+        if (!/^\d+(?:\.\d{1,2})?$/.test(percentageText)) {
+            return { error: `Allocation percentage for fund ${fundId} must be a positive number with up to two decimal places` };
+        }
+        const [wholePart, fractionalPart = ""] = percentageText.split(".");
+        const percentageCents = Number(wholePart) * 100 + Number(fractionalPart.padEnd(2, "0"));
+        if (!Number.isSafeInteger(percentageCents) || percentageCents <= 0 || percentageCents > 10000) {
+            return { error: `Allocation percentage for fund ${fundId} must be greater than 0 and no greater than 100` };
+        }
+
+        totalCents += percentageCents;
+        allocations.push({
+            fund_id: fundId,
+            percentage: (percentageCents / 100).toFixed(2),
+        });
+    }
+
+    if (totalCents !== 10000) {
+        return {
+            error: `Allocation percentages must total exactly 100.00% (received ${(totalCents / 100).toFixed(2)}%)`,
+        };
+    }
+
+    return { allocations };
+}
 
 /**
  * POST /api/funds
@@ -79,6 +135,179 @@ async function listFunds(req, res) {
     } catch (error) {
         console.error("Failed to list funds:", error);
         return res.status(500).json({ status: "error", message: "Failed to list funds due to a server error" });
+    }
+}
+
+/**
+ * GET /api/funds/available
+ * WORKER only. Returns selectable fund records without allocation/account data.
+ */
+async function listAvailableFunds(req, res) {
+    try {
+        const account = await getActiveWorkerAccount(req.user.userId);
+        if (!account) {
+            return res.status(403).json({
+                status: "error",
+                message: "An active pension account is required to browse eligible funds",
+            });
+        }
+        const funds = await listEligibleFunds(req.user.userId);
+
+        return res.status(200).json({ status: "success", data: funds });
+    } catch (error) {
+        console.error("Failed to list available funds:", error);
+        return res.status(500).json({
+            status: "error",
+            message: "Failed to fetch available funds due to a server error",
+        });
+    }
+}
+
+async function getMyAllocations(req, res) {
+    const { userId } = req.user;
+    try {
+        const account = await getActiveWorkerAccount(userId);
+        if (!account) {
+            return res.status(403).json({
+                status: "error",
+                message: "An active pension account is required to view allocation preferences",
+            });
+        }
+        const result = await pool.query(
+            `SELECT fa.allocation_id, fa.fund_id, f.fund_name, f.administrator_name,
+                    f.risk_level, f.expected_return, f.fund_status,
+                    fa.percentage AS allocation_percentage, fa.effective_from, fa.effective_to
+             FROM pension_accounts pa
+             JOIN fund_allocations fa ON fa.account_id = pa.account_id
+             JOIN funds f ON f.fund_id = fa.fund_id
+             WHERE pa.user_id = $1 AND pa.account_status = 'ACTIVE'
+               AND fa.effective_from <= CURRENT_DATE
+               AND (fa.effective_to IS NULL OR fa.effective_to >= CURRENT_DATE)
+             ORDER BY f.fund_name ASC`,
+            [userId]
+        );
+
+        return res.status(200).json({ status: "success", data: result.rows });
+    } catch (error) {
+        console.error("Failed to fetch worker fund allocations:", error);
+        return res.status(500).json({
+            status: "error",
+            message: "Failed to fetch your fund allocation due to a server error",
+        });
+    }
+}
+
+async function replaceMyAllocations(req, res) {
+    const { userId } = req.user;
+    const validation = validateAllocationRequest(req.body);
+    if (validation.error) {
+        return res.status(400).json({ status: "error", message: validation.error });
+    }
+
+    let client;
+    let transactionStarted = false;
+    try {
+        client = await pool.connect();
+        await client.query("BEGIN");
+        transactionStarted = true;
+
+        const account = await getActiveWorkerAccount(userId, client, { lock: true });
+        if (!account) {
+            await client.query("ROLLBACK");
+            transactionStarted = false;
+            return res.status(404).json({
+                status: "error",
+                message: "A pension account is required before setting a fund allocation",
+            });
+        }
+        const accountId = account.account_id;
+
+        const fundIds = validation.allocations.map(({ fund_id }) => fund_id);
+        const eligibleFunds = await getEligibleFundsByIds(fundIds, client, { lock: true });
+        const eligibleFundIds = new Set(eligibleFunds.map(({ fund_id }) => fund_id));
+        const unavailableFund = fundIds.find((fundId) => !eligibleFundIds.has(fundId));
+        if (unavailableFund) {
+            await client.query("ROLLBACK");
+            transactionStarted = false;
+            return res.status(409).json({
+                status: "error",
+                message: `Fund ${unavailableFund} does not exist or is not currently active`,
+            });
+        }
+
+        const sameDayAllocations = await client.query(
+            `SELECT allocation_id FROM fund_allocations
+             WHERE account_id = $1 AND effective_from = CURRENT_DATE
+             FOR UPDATE`,
+            [accountId]
+        );
+        if (sameDayAllocations.rows.length > 0) {
+            await client.query("ROLLBACK");
+            transactionStarted = false;
+            return res.status(409).json({
+                status: "error",
+                message: "This allocation distribution was already changed today. Allocation history supports calendar dates only, so try again tomorrow.",
+            });
+        }
+
+        const futureAllocations = await client.query(
+            `SELECT allocation_id FROM fund_allocations
+             WHERE account_id = $1 AND effective_from > CURRENT_DATE
+             FOR UPDATE`,
+            [accountId]
+        );
+        if (futureAllocations.rows.length > 0) {
+            await client.query("ROLLBACK");
+            transactionStarted = false;
+            return res.status(409).json({
+                status: "error",
+                message: "A future-effective allocation distribution already exists. It must be resolved before saving a current distribution.",
+            });
+        }
+
+        await client.query(
+            `UPDATE fund_allocations
+             SET effective_to = CURRENT_DATE - 1
+             WHERE account_id = $1
+               AND effective_from < CURRENT_DATE
+               AND (effective_to IS NULL OR effective_to >= CURRENT_DATE)`,
+            [accountId]
+        );
+
+        const savedAllocations = [];
+        for (const allocation of validation.allocations) {
+            const result = await client.query(
+                `INSERT INTO fund_allocations
+                    (account_id, fund_id, percentage, effective_from, effective_to)
+                 VALUES ($1, $2, $3, CURRENT_DATE, NULL)
+                 RETURNING allocation_id, fund_id, percentage AS allocation_percentage,
+                           effective_from, effective_to`,
+                [accountId, allocation.fund_id, allocation.percentage]
+            );
+            savedAllocations.push(result.rows[0]);
+        }
+
+        await writeAuditLog(client, {
+            userId,
+            actionType: "UPDATE",
+            entityName: "FUND_ALLOCATIONS",
+            entityId: accountId,
+        });
+        await client.query("COMMIT");
+        transactionStarted = false;
+
+        return res.status(200).json({ status: "success", data: savedAllocations });
+    } catch (error) {
+        if (client && transactionStarted) {
+            await client.query("ROLLBACK");
+        }
+        console.error("Failed to save worker fund allocation:", error);
+        return res.status(500).json({
+            status: "error",
+            message: "Failed to save your fund allocation due to a server error",
+        });
+    } finally {
+        client?.release();
     }
 }
 
@@ -221,4 +450,13 @@ async function getFundAllocations(req, res) {
     }
 }
 
-module.exports = { createFund, listFunds, getFund, updateFund, getFundAllocations };
+module.exports = {
+    createFund,
+    listFunds,
+    listAvailableFunds,
+    getMyAllocations,
+    replaceMyAllocations,
+    getFund,
+    updateFund,
+    getFundAllocations,
+};

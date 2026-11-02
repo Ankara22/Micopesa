@@ -1,7 +1,7 @@
 .admin-dashboard {
     width: 100%;
-    max-width: 1180px;
-    margin: 0 auto;
+    min-width: 0;
+    margin: 0;
     text-align: left;
 }
 

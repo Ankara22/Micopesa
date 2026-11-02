@@ -1,3 +1,4 @@
+require("./config/loadEnvironment");
 const { assertSafeAuthConfiguration } = require("./utils/authConfiguration");
 assertSafeAuthConfiguration();
 
@@ -20,6 +21,9 @@ const activityRoutes = require("./routes/activityRoutes");
 const fundManagerRoutes = require("./routes/fundManagerRoutes");
 const regulatorRoutes = require("./routes/regulatorRoutes");
 const mpesaRoutes = require("./routes/mpesaRoutes");
+const profileRoutes = require("./routes/profileRoutes");
+const adminOperationalSettingsRoutes = require("./routes/adminOperationalSettingsRoutes");
+const staffOnboardingRoutes = require("./routes/staffOnboardingRoutes");
 const app = express();
 const PORT = process.env.PORT || 5000;
 
@@ -37,12 +41,15 @@ app.use("/api/compliance-reports", complianceReportRoutes);
 app.use("/api/audit-logs", auditLogRoutes);
 app.use("/api/admin/users", adminUserRoutes);
 app.use("/api/admin/settings", systemSettingsRoutes);
+app.use("/api/v1/admin/settings", adminOperationalSettingsRoutes);
+app.use("/api/v1/admin/staff", staffOnboardingRoutes);
 app.use("/api/admin/notifications", notificationRoutes);
 app.use("/api/notifications", workerNotificationRoutes);
 app.use("/api/admin/activity", activityRoutes);
 app.use("/api/fund-manager", fundManagerRoutes);
 app.use("/api/regulator", regulatorRoutes);
 app.use("/api/mpesa", mpesaRoutes);
+app.use("/api/profile", profileRoutes);
 
 app.get("/", (req, res) => {
     res.json({
@@ -58,6 +65,8 @@ app.get("/api/health/db", async (req, res) => {
             message: "PostgreSQL connection is working",
             time: result.rows[0].current_time
         });
+
+
     } catch (error) {
         console.error("Database connection failed:", error);
         res.status(500).json({

@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import Card from "../ui/Card";
 import FormField from "../ui/FormField";
 import Button from "../ui/Button";
@@ -6,16 +7,16 @@ import { useToast } from "../ui/ToastContext";
 import "./retirement.css";
 
 function PlanForm({ plan, projection, onSaved }) {
+    const { t } = useTranslation();
     const toast = useToast();
     const [form, setForm] = useState(() => ({
-        current_age: plan && projection
-            ? String(Number(plan.target_age) - Number(projection.projection_years))
-            : "",
+        current_age: projection?.current_age ?? "",
         target_retirement_age: plan?.target_age ?? "",
         target_amount: plan?.target_amount ?? "",
         monthly_contribution_target: projection?.assumed_contribution ?? "",
     }));
     const [submitting, setSubmitting] = useState(false);
+    const submissionInProgressRef = useRef(false);
 
     function handleChange(event) {
         const { name, value } = event.target;
@@ -24,6 +25,8 @@ function PlanForm({ plan, projection, onSaved }) {
 
     async function handleSubmit(event) {
         event.preventDefault();
+        if (submissionInProgressRef.current) return;
+        submissionInProgressRef.current = true;
         setSubmitting(true);
 
         try {
@@ -33,31 +36,31 @@ function PlanForm({ plan, projection, onSaved }) {
                 target_amount: Number(form.target_amount),
                 monthly_contribution_target: Number(form.monthly_contribution_target),
             });
-            if (result) toast.success("Your retirement plan and projection have been updated.");
-            else toast.error("The plan was saved, but the latest projection could not be refreshed.");
-        } catch (saveError) {
-            toast.error(saveError.message || "Unable to save your retirement plan.");
+            if (result) toast.success(t("worker.retirement.saveSuccess"));
+            else toast.error(t("worker.retirement.saveRefreshError"));
+        } catch {
+            toast.error(t("worker.retirement.saveError"));
         } finally {
+            submissionInProgressRef.current = false;
             setSubmitting(false);
         }
     }
 
     return (
         <Card
-            title={plan ? "Update your retirement plan" : "Create Your Retirement Plan"}
+            title={plan ? t("worker.retirement.formTitleUpdate") : t("worker.retirement.formTitleCreate")}
             className="retirement-card"
         >
             {!plan && (
                 <p className="retirement-intro">
-                    Start planning for the future. Set a savings goal and contribution target to see
-                    how your savings could grow.
+                    {t("worker.retirement.intro")}
                 </p>
             )}
             <form className="retirement-form" onSubmit={handleSubmit}>
                 <div className="retirement-form-grid">
                     <FormField
                         id="current_age"
-                        label="Current age"
+                        label={t("worker.retirement.currentAge")}
                         type="number"
                         min="1"
                         max="99"
@@ -65,10 +68,11 @@ function PlanForm({ plan, projection, onSaved }) {
                         required
                         value={form.current_age}
                         onChange={handleChange}
+                        disabled={submitting}
                     />
                     <FormField
                         id="target_retirement_age"
-                        label="Target retirement age"
+                        label={t("worker.retirement.retirementAge")}
                         type="number"
                         min="2"
                         max="100"
@@ -76,31 +80,36 @@ function PlanForm({ plan, projection, onSaved }) {
                         required
                         value={form.target_retirement_age}
                         onChange={handleChange}
+                        disabled={submitting}
                     />
                     <FormField
                         id="target_amount"
-                        label="Target amount (KES)"
+                        label={t("worker.retirement.goal")}
                         type="number"
                         min="0.01"
+                        max="9999999999.99"
                         step="0.01"
                         required
                         value={form.target_amount}
                         onChange={handleChange}
+                        disabled={submitting}
                     />
                     <FormField
                         id="monthly_contribution_target"
-                        label="Monthly contribution target (KES)"
+                        label={t("worker.retirement.monthlyContribution")}
                         type="number"
                         min="0"
+                        max="9999999999.99"
                         step="0.01"
                         required
                         value={form.monthly_contribution_target}
                         onChange={handleChange}
+                        disabled={submitting}
                     />
                 </div>
                 <div className="form-actions">
                     <Button type="submit" variant="primary" loading={submitting}>
-                        {plan ? "Update plan" : "Create plan"}
+                        {t("worker.retirement.calculate")}
                     </Button>
                 </div>
             </form>

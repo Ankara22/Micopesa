@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import useApi from "../../hooks/useApi";
 import { getPendingClaims, approveClaim, rejectClaim } from "../../services/withdrawalService";
 import DataTable from "../../components/ui/DataTable";
@@ -16,9 +16,11 @@ function WithdrawalRequests() {
     const toast = useToast();
     const [confirming, setConfirming] = useState(null);
     const [processing, setProcessing] = useState(false);
+    const processingRef = useRef(false);
 
     async function handleConfirm() {
-        if (!confirming) return;
+        if (!confirming || processingRef.current) return;
+        processingRef.current = true;
         setProcessing(true);
         try {
             if (confirming.decision === "approve") {
@@ -33,6 +35,7 @@ function WithdrawalRequests() {
         } catch (err) {
             toast.error(err.message || "Failed to update the claim.");
         } finally {
+            processingRef.current = false;
             setProcessing(false);
         }
     }
@@ -76,6 +79,7 @@ function WithdrawalRequests() {
                 rows={claimsApi.data}
                 rowKey="claim_id"
                 loading={claimsApi.loading}
+                refreshing={claimsApi.refreshing}
                 error={claimsApi.error}
                 onRetry={claimsApi.refetch}
                 emptyMessage="There are no pending or approved-unpaid withdrawal claims."
@@ -84,7 +88,9 @@ function WithdrawalRequests() {
             <Modal
                 open={Boolean(confirming)}
                 title={confirming?.decision === "approve" ? "Approve withdrawal claim?" : "Reject or cancel withdrawal claim?"}
-                onClose={() => setConfirming(null)}
+                onClose={() => {
+                    if (!processing) setConfirming(null);
+                }}
             >
                 {confirming && (
                     <p>
@@ -94,7 +100,7 @@ function WithdrawalRequests() {
                     </p>
                 )}
                 <div className="form-actions">
-                    <Button variant="secondary" onClick={() => setConfirming(null)}>
+                    <Button variant="secondary" disabled={processing} onClick={() => setConfirming(null)}>
                         Cancel
                     </Button>
                     <Button

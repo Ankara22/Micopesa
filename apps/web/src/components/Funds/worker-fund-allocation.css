@@ -1,0 +1,200 @@
+.worker-fund-allocation {
+    min-width: 0;
+    margin-top: 20px;
+    padding: 20px;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--bg);
+}
+
+.worker-fund-allocation-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.worker-fund-allocation-heading h2 {
+    margin: 4px 0 0;
+    color: var(--text-h);
+    font-size: 18px;
+}
+
+.worker-fund-allocation > .worker-dashboard-supporting {
+    margin-top: 12px;
+}
+
+.worker-fund-allocation-empty {
+    margin: 16px 0;
+    color: var(--text);
+    line-height: 1.5;
+}
+
+.worker-current-allocation {
+    margin: 18px 0;
+}
+
+.worker-current-allocation h3 {
+    margin: 0 0 8px;
+    color: var(--text-h);
+    font-size: 15px;
+}
+
+.worker-current-allocation ul {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.worker-current-allocation li {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+}
+
+.worker-current-allocation li strong {
+    color: var(--text-h);
+    font-variant-numeric: tabular-nums;
+}
+
+.worker-fund-allocation-options {
+    display: grid;
+    gap: 10px;
+    min-width: 0;
+    margin: 20px 0 14px;
+    padding: 0;
+    border: 0;
+}
+
+.worker-fund-allocation-options legend {
+    margin-bottom: 10px;
+    color: var(--text-h);
+    font-size: 15px;
+    font-weight: 650;
+}
+
+.worker-fund-allocation-option {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(150px, 190px);
+    align-items: center;
+    gap: 14px;
+    min-width: 0;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+}
+
+.worker-fund-allocation-option > label {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    min-width: 0;
+    color: var(--text-h);
+    cursor: pointer;
+}
+
+.worker-fund-allocation-option > label input {
+    width: 18px;
+    height: 18px;
+    margin: 2px 0 0;
+    accent-color: var(--accent);
+    flex: 0 0 auto;
+}
+
+.worker-fund-allocation-option > label span {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+}
+
+.worker-fund-allocation-option strong,
+.worker-fund-allocation-option small {
+    overflow-wrap: anywhere;
+}
+
+.worker-fund-allocation-option small {
+    color: var(--text);
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.worker-fund-allocation-input {
+    display: grid;
+    gap: 5px;
+    color: var(--text);
+    font-size: 12px;
+}
+
+.worker-fund-allocation-input > div {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+}
+
+.worker-fund-allocation-input input {
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
+    min-height: 40px;
+    padding: 7px 9px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--bg);
+    color: var(--text-h);
+    font: inherit;
+}
+
+.worker-fund-allocation-total {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 8px 20px;
+    padding: 12px 0;
+    color: var(--text);
+}
+
+.worker-fund-allocation-total strong {
+    color: var(--text-h);
+    font-variant-numeric: tabular-nums;
+}
+
+.worker-fund-allocation-validation,
+.worker-fund-allocation-error {
+    color: var(--danger-text);
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.worker-fund-allocation-success {
+    color: var(--accent-text);
+    font-size: 13px;
+}
+
+.worker-fund-allocation-note {
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.worker-fund-allocation form > .btn {
+    min-height: 44px;
+}
+
+@media (max-width: 620px) {
+    .worker-fund-allocation {
+        padding: 16px;
+    }
+
+    .worker-fund-allocation-option {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .worker-fund-allocation-input {
+        max-width: 220px;
+        margin-left: 28px;
+    }
+}

@@ -1,9 +1,11 @@
 import { createContext, useCallback, useContext, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import "./ui.css";
 
 const ToastContext = createContext(null);
 
 export function ToastProvider({ children }) {
+    const { t } = useTranslation();
     const [toasts, setToasts] = useState([]);
 
     const dismiss = useCallback((id) => {
@@ -29,7 +31,7 @@ export function ToastProvider({ children }) {
                 {toasts.map((toast) => (
                     <div className={`toast toast-${toast.type}`} key={toast.id} role={toast.type === "error" ? "alert" : "status"}>
                         <span>{toast.message}</span>
-                        <button type="button" aria-label="Dismiss notification" onClick={() => dismiss(toast.id)}>
+                        <button type="button" aria-label={t("accessibility.dismissNotification")} onClick={() => dismiss(toast.id)}>
                             &times;
                         </button>
                     </div>

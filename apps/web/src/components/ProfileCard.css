@@ -16,6 +16,31 @@
         var(--bg);
 }
 
+.profile-avatar-control {
+    position: relative;
+    flex: 0 0 76px;
+}
+
+.profile-avatar-button {
+    display: block;
+    width: 76px;
+    height: 76px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    cursor: pointer;
+}
+
+.profile-avatar-button:focus-visible {
+    outline: 3px solid var(--accent);
+    outline-offset: 3px;
+}
+
+.profile-avatar-button:disabled {
+    cursor: wait;
+}
+
 .profile-avatar {
     width: 76px;
     height: 76px;
@@ -29,6 +54,146 @@
     font-size: 25px;
     font-weight: 700;
     letter-spacing: 0.03em;
+}
+
+.profile-photo-input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+}
+
+.profile-upload-spinner {
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 50%;
+    z-index: 1;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    transform: translateX(-50%);
+    color: var(--accent-text);
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.profile-upload-spinner::before {
+    width: 13px;
+    height: 13px;
+    border: 2px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: profile-spin 0.75s linear infinite;
+}
+
+@keyframes profile-spin {
+    to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .profile-upload-spinner::before {
+        animation-duration: 0.01ms;
+        animation-iteration-count: 1;
+    }
+}
+
+.profile-edit-fields {
+    display: grid;
+    gap: 16px;
+    margin-bottom: 18px;
+}
+
+.profile-edit-field {
+    min-width: 0;
+}
+
+.profile-edit-field > label {
+    display: block;
+    margin-bottom: 6px;
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.profile-input-row {
+    min-width: 0;
+    min-height: 46px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 6px 5px 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg);
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.profile-input-row:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-bg);
+}
+
+.profile-field-value {
+    min-width: 0;
+    flex: 1;
+    color: var(--text-h);
+    font-size: 14px;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+.profile-input-row input {
+    min-width: 0;
+    flex: 1;
+    padding: 5px 0;
+    border: 0;
+    outline: 0;
+    color: var(--text-h);
+    background: transparent;
+    font: inherit;
+}
+
+.profile-edit-toggle {
+    width: 34px;
+    height: 34px;
+    flex: 0 0 34px;
+    display: grid;
+    place-items: center;
+    border: 1px solid var(--accent-border);
+    border-radius: 8px;
+    color: var(--accent-text);
+    background: var(--accent-bg);
+    font: inherit;
+    font-size: 23px;
+    line-height: 1;
+    cursor: pointer;
+    transition: background-color 0.2s, border-color 0.2s;
+}
+
+.profile-edit-toggle:hover:not(:disabled) {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: #fff;
+}
+
+.profile-edit-toggle:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+.profile-edit-toggle:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+}
+
+.profile-field-actions {
+    display: flex;
+    flex: 0 0 auto;
+    gap: 6px;
 }
 
 .profile-hero-copy {
@@ -195,6 +360,13 @@
         font-size: 21px;
     }
 
+    .profile-avatar-control,
+    .profile-avatar-button {
+        width: 60px;
+        height: 60px;
+        flex-basis: 60px;
+    }
+
     .profile-hero-copy {
         flex-basis: calc(100% - 80px);
     }
@@ -206,5 +378,22 @@
 
     .profile-details {
         grid-template-columns: minmax(0, 1fr);
+    }
+
+    .profile-input-row {
+        align-items: stretch;
+        flex-wrap: wrap;
+    }
+
+    .profile-field-actions {
+        width: 100%;
+        justify-content: flex-end;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .profile-input-row,
+    .profile-edit-toggle {
+        transition: none;
     }
 }

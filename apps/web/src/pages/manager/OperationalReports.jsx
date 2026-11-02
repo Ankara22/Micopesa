@@ -4,7 +4,7 @@ function OperationalReports() {
     return (
         <ComplianceReportsPanel
             title="Operational Reports"
-            subtitle="File and review RBA/NSSF/internal operational reports for your funds."
+            subtitle="Create, submit, and track compliance reports for your managed funds."
         />
     );
 }

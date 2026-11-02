@@ -1,53 +1,58 @@
+import { useTranslation } from "react-i18next";
 import useApi from "../../hooks/useApi";
 import { getMyBalance, getMyContributions } from "../../services/accountService";
 import { StatCard } from "../../components/ui/Card";
 import DataTable from "../../components/ui/DataTable";
 import StatusBadge from "../../components/ui/StatusBadge";
-
-function formatCurrency(value) {
-    if (value === undefined || value === null) return "KSh 0.00";
-    return `KSh ${Number(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
-
-const COLUMNS = [
-    { key: "created_at", header: "Date", render: (row) => new Date(row.created_at).toLocaleString() },
-    { key: "transaction_id", header: "Transaction ID" },
-    { key: "amount", header: "Amount", render: (row) => formatCurrency(row.amount) },
-    { key: "channel", header: "Channel" },
-    { key: "contribution_status", header: "Status", render: (row) => <StatusBadge status={row.contribution_status} /> },
-];
+import { formatDateTime, formatKes } from "../../i18n/formatters";
 
 function BalanceHistory() {
+    const { t, i18n } = useTranslation();
     const balanceApi = useApi(getMyBalance, []);
     const historyApi = useApi(getMyContributions, []);
+    const columns = [
+        { key: "created_at", header: t("worker.balance.date"), render: (row) => formatDateTime(row.created_at, i18n.language) },
+        { key: "transaction_id", header: t("worker.balance.transactionId") },
+        { key: "amount", header: t("worker.balance.amount"), render: (row) => formatKes(row.amount, i18n.language) || t("worker.common.notAvailable") },
+        { key: "channel", header: t("worker.balance.channel") },
+        { key: "contribution_status", header: t("worker.balance.status"), render: (row) => <StatusBadge status={row.contribution_status} label={t(`worker.common.statuses.${row.contribution_status}`, { defaultValue: row.contribution_status })} /> },
+    ];
 
     return (
         <div>
             <div className="page-header">
                 <div>
-                    <h1 className="page-title">Balance &amp; Transaction History</h1>
-                    <p className="page-subtitle">Your current pension account balance and full transaction history.</p>
+                    <h1 className="page-title">{t("worker.balance.title")}</h1>
+                    <p className="page-subtitle">{t("worker.balance.subtitle")}</p>
                 </div>
             </div>
 
             <div className="stat-card-grid">
                 <StatCard
-                    label="Current Balance"
-                    value={balanceApi.loading ? "..." : formatCurrency(balanceApi.data?.current_balance)}
-                    hint={balanceApi.data?.account_status}
+                    label={t("worker.balance.currentBalance")}
+                    value={balanceApi.loading ? "..." : formatKes(balanceApi.data?.current_balance, i18n.language) || t("worker.common.notAvailable")}
+                    hint={balanceApi.data?.account_status
+                        ? t(`worker.common.statuses.${balanceApi.data.account_status}`, { defaultValue: balanceApi.data.account_status })
+                        : undefined}
                 />
             </div>
 
             <div className="section">
-                <h2 className="card-title">All transactions</h2>
+                <h2 className="card-title">{t("worker.balance.allTransactions")}</h2>
                 <DataTable
-                    columns={COLUMNS}
+                    columns={columns}
                     rows={historyApi.data}
                     rowKey="contribution_id"
                     loading={historyApi.loading}
-                    error={historyApi.error}
+                    refreshing={historyApi.refreshing}
+                    error={historyApi.error ? t("worker.common.errors.load") : null}
                     onRetry={historyApi.refetch}
-                    emptyMessage="No transactions found."
+                    emptyMessage={t("worker.balance.empty")}
+                    loadingLabel={t("worker.common.loadingRecords")}
+                    refreshingLabel={t("worker.common.refreshingRecords")}
+                    errorTitle={t("worker.common.unableToLoad")}
+                    retryLabel={t("worker.common.tryAgain")}
+                    unexpectedDataMessage={t("worker.common.unexpectedData")}
                 />
             </div>
         </div>

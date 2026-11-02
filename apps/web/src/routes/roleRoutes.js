@@ -20,6 +20,13 @@ export const ROLE_PATH_PREFIX = {
     ADMIN: "/admin",
 };
 
+export const PROFILE_BY_ROLE = {
+    WORKER: "/worker/profile",
+    FUND_MANAGER: "/manager/profile",
+    REGULATOR: "/regulator/profile",
+    ADMIN: "/admin/profile",
+};
+
 export const ROLE_LABEL = {
     WORKER: "Worker",
     FUND_MANAGER: "Fund Manager",
@@ -30,8 +37,9 @@ export const ROLE_LABEL = {
 export const ROLE_NAV = {
     WORKER: [
         { label: "Dashboard", translationKey: "navigation.dashboard", path: "/worker/dashboard" },
-        { label: "Contributions / Deposit", translationKey: "navigation.contributionsDeposit", path: "/worker/contributions" },
-        { label: "Balance & Transaction History", translationKey: "navigation.balanceTransactions", path: "/worker/balance" },
+        { label: "Contributions", translationKey: "navigation.contributions", path: "/worker/contributions" },
+        { label: "Balance History", translationKey: "navigation.balanceHistory", path: "/worker/balance" },
+        { label: "My Funds & Allocation", translationKey: "navigation.myFunds", path: "/worker/funds" },
         { label: "Retirement Plan", translationKey: "navigation.retirementPlan", path: "/worker/retirement-plan" },
         { label: "Retirement Projection", translationKey: "navigation.retirementProjection", path: "/worker/retirement-projection" },
         { label: "Withdrawals", translationKey: "navigation.withdrawals", path: "/worker/withdrawals" },
@@ -41,10 +49,12 @@ export const ROLE_NAV = {
     ],
     FUND_MANAGER: [
         { label: "Dashboard", translationKey: "navigation.dashboard", path: "/manager/dashboard" },
-        { label: "Funds / Fund Performance", translationKey: "navigation.fundsPerformance", path: "/manager/funds" },
+        { label: "Manage Funds", translationKey: "navigation.manageFunds", path: "/manager/funds" },
+        { label: "Fund Analytics", translationKey: "navigation.fundAnalytics", path: "/manager/analytics" },
         { label: "Withdrawal Requests", translationKey: "navigation.withdrawalRequests", path: "/manager/withdrawal-requests" },
         { label: "Operational Reports", translationKey: "navigation.operationalReports", path: "/manager/reports" },
         { label: "Operational Audit Logs", translationKey: "navigation.operationalAuditLogs", path: "/manager/audit-logs" },
+        { label: "Notifications", translationKey: "navigation.notifications", path: "/manager/notifications" },
         { label: "Profile", translationKey: "navigation.profile", path: "/manager/profile" },
     ],
     REGULATOR: [
@@ -52,6 +62,7 @@ export const ROLE_NAV = {
         { label: "Fund Oversight", translationKey: "navigation.fundOversight", path: "/regulator/funds" },
         { label: "Compliance Reports", translationKey: "navigation.complianceReports", path: "/regulator/compliance-reports" },
         { label: "Operational Audit Logs", translationKey: "navigation.operationalAuditLogs", path: "/regulator/audit-logs" },
+        { label: "Notifications", translationKey: "navigation.notifications", path: "/regulator/notifications" },
         { label: "Profile", translationKey: "navigation.profile", path: "/regulator/profile" },
     ],
     ADMIN: [

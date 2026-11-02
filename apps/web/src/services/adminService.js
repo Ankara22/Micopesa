@@ -21,6 +21,31 @@ export async function updateUserStatus(userId, account_status) {
     return res.data.data.user;
 }
 
+export async function deleteUser(userId) {
+    const res = await api.delete(`/api/admin/users/${userId}`);
+    return res.data;
+}
+
+export async function createStaffAccount(payload) {
+    const res = await api.post("/api/v1/admin/staff", payload);
+    return res.data;
+}
+
+export async function resendStaffOnboarding(userId) {
+    const res = await api.post(`/api/v1/admin/staff/${userId}/resend`);
+    return res.data;
+}
+
+export async function getOperationalSettings() {
+    const res = await api.get("/api/v1/admin/settings");
+    return res.data.data.settings;
+}
+
+export async function updateOperationalSettings(settings) {
+    const res = await api.put("/api/v1/admin/settings", { settings });
+    return res.data.data.settings;
+}
+
 // --- System settings ---
 export async function listSettings() {
     const res = await api.get("/api/admin/settings");

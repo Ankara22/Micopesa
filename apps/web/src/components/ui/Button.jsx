@@ -23,6 +23,7 @@ function Button({
             type={type}
             className={classNames}
             disabled={disabled || loading}
+            aria-busy={loading || undefined}
             onClick={onClick}
             {...rest}
         >

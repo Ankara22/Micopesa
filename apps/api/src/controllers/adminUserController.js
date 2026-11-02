@@ -1,9 +1,11 @@
 const pool = require("../db/database");
 const { writeAuditLog } = require("../utils/auditLog");
+const { hashRateKey } = require("../services/authEmailService");
+const { isSafePhotoReference, removeProfilePhoto } = require("../services/profilePhotoStorage");
 
 const VALID_ROLES = ["WORKER", "FUND_MANAGER", "REGULATOR", "ADMIN"];
 const VALID_STATUSES = ["ACTIVE", "INACTIVE", "SUSPENDED"];
-const SAFE_COLUMNS = "user_id, full_name, phone, role, occupation, account_status, created_at, updated_at";
+const SAFE_COLUMNS = "user_id, full_name, phone, role, occupation, account_status, is_temp_password, force_password_change, created_at, updated_at";
 
 /**
  * GET /api/admin/users
@@ -181,4 +183,176 @@ async function updateUserStatus(req, res) {
     }
 }
 
-module.exports = { listUsers, getUser, updateUserRole, updateUserStatus };
+async function deleteUser(req, res) {
+    const actingAdminId = req.user?.userId;
+    const { userId } = req.params;
+    if (typeof userId !== "string" || !/^[A-F0-9]{25}$/.test(userId)) {
+        return res.status(400).json({ status: "error", message: "A valid user ID is required" });
+    }
+    if (userId === actingAdminId) {
+        return res.status(400).json({ status: "error", message: "You cannot delete your own active account" });
+    }
+
+    let client;
+    let transactionOpen = false;
+    let profilePhotoRef;
+    try {
+        client = await pool.connect();
+        await client.query("BEGIN");
+        transactionOpen = true;
+
+        const activeAdmins = await client.query(
+            `SELECT user_id FROM users
+             WHERE role = 'ADMIN' AND account_status = 'ACTIVE'
+             ORDER BY user_id FOR UPDATE`
+        );
+        const targetResult = await client.query(
+            `SELECT user_id, role, account_status, email, pending_email, profile_photo_ref
+             FROM users WHERE user_id = $1 FOR UPDATE`,
+            [userId]
+        );
+        const target = targetResult.rows[0];
+        if (!target) {
+            await client.query("ROLLBACK");
+            transactionOpen = false;
+            return res.status(404).json({ status: "error", message: "User not found" });
+        }
+        if (
+            target.role === "ADMIN" &&
+            target.account_status === "ACTIVE" &&
+            activeAdmins.rows.length <= 1
+        ) {
+            await client.query("ROLLBACK");
+            transactionOpen = false;
+            return res.status(409).json({
+                status: "error",
+                message: "The final active administrator cannot be deleted",
+            });
+        }
+        profilePhotoRef = target.profile_photo_ref;
+        if (profilePhotoRef && !isSafePhotoReference(profilePhotoRef)) {
+            const error = new Error("Stored profile photo reference is not safe to remove");
+            error.code = "PROFILE_PHOTO_REFERENCE_INVALID";
+            throw error;
+        }
+
+        const transactionResult = await client.query(
+            `SELECT t.transaction_id
+             FROM transactions t
+             WHERE EXISTS (
+                 SELECT 1
+                 FROM contributions c
+                 JOIN pension_accounts pa ON pa.account_id = c.account_id
+                 WHERE pa.user_id = $1 AND c.transaction_id = t.transaction_id
+             )
+             OR EXISTS (
+                 SELECT 1
+                 FROM withdrawal_claims wc
+                 JOIN pension_accounts pa ON pa.account_id = wc.account_id
+                 WHERE pa.user_id = $1 AND wc.transaction_id = t.transaction_id
+             )
+             FOR UPDATE OF t`,
+            [userId]
+        );
+        const transactionIds = [...new Set(transactionResult.rows.map((row) => row.transaction_id))];
+        const rateLimitKeys = [];
+        for (const scopeKey of [`ACCOUNT:${userId}`, ...[target.email, target.pending_email]
+            .filter((email) => typeof email === "string" && email.trim())
+            .map((email) => `EMAIL:${email.trim().toLowerCase()}`)]) {
+            rateLimitKeys.push(hashRateKey(scopeKey));
+        }
+
+        await client.query(
+            `UPDATE funds
+             SET managed_by = NULL, administrator_name = 'Unassigned'
+             WHERE managed_by = $1`,
+            [userId]
+        );
+        await client.query(
+            "UPDATE compliance_reports SET generated_by = NULL WHERE generated_by = $1",
+            [userId]
+        );
+        await client.query(
+            "UPDATE audit_logs SET entity_id = 'REDACTED' WHERE entity_id = $1",
+            [userId]
+        );
+        await client.query(
+            `DELETE FROM auth_rate_limits
+             WHERE (scope = 'ACCOUNT' OR scope = 'EMAIL') AND key_hash = ANY($1::char(64)[])`,
+            [rateLimitKeys]
+        );
+        await client.query(
+            `DELETE FROM contributions c
+             USING pension_accounts pa
+             WHERE c.account_id = pa.account_id AND pa.user_id = $1`,
+            [userId]
+        );
+        const deleted = await client.query(
+            "DELETE FROM users WHERE user_id = $1 RETURNING user_id",
+            [userId]
+        );
+        if (!deleted.rows[0]) {
+            throw new Error("Locked user disappeared during deletion");
+        }
+        if (transactionIds.length) {
+            await client.query(
+                `DELETE FROM transactions t
+                 WHERE t.transaction_id = ANY($1::varchar[])
+                   AND NOT EXISTS (
+                       SELECT 1 FROM contributions c WHERE c.transaction_id = t.transaction_id
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM withdrawal_claims wc WHERE wc.transaction_id = t.transaction_id
+                   )`,
+                [transactionIds]
+            );
+        }
+        await writeAuditLog(client, {
+            userId: actingAdminId,
+            actionType: "DELETE",
+            entityName: "USERS_DELETE",
+            entityId: "REDACTED",
+        });
+        await client.query("COMMIT");
+        transactionOpen = false;
+    } catch (error) {
+        if (client && transactionOpen) {
+            await client.query("ROLLBACK").catch(() => {});
+            transactionOpen = false;
+        }
+        if (error.code === "23502" || error.code === "23503") {
+            return res.status(409).json({
+                status: "error",
+                message: "Deletion is blocked by related records or database schema; no changes were made.",
+            });
+        }
+        console.error(JSON.stringify({
+            event: "admin.user_deletion.failed",
+            errorClass: error?.name || "Error",
+            errorCode: typeof error?.code === "string" ? error.code : "ADMIN_USER_DELETION_FAILED",
+        }));
+        return res.status(500).json({
+            status: "error",
+            message: "Unable to delete this user right now. No changes were made.",
+        });
+    } finally {
+        client?.release();
+    }
+
+    try {
+        await removeProfilePhoto(profilePhotoRef);
+    } catch (error) {
+        console.error(JSON.stringify({
+            event: "admin.user_deletion.photo_cleanup_failed",
+            errorClass: error?.name || "Error",
+            errorCode: typeof error?.code === "string" ? error.code : "PROFILE_PHOTO_CLEANUP_FAILED",
+        }));
+        return res.status(500).json({
+            status: "error",
+            message: "The user was deleted, but profile photo cleanup failed. Contact an administrator.",
+        });
+    }
+    return res.status(200).json({ status: "success", message: "User deleted permanently" });
+}
+
+module.exports = { listUsers, getUser, updateUserRole, updateUserStatus, deleteUser };
