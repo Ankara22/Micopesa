@@ -3,7 +3,7 @@ import "./ui.css";
 /**
  * Simple accessible modal/dialog. Renders nothing when `open` is false.
  */
-function Modal({ open, title, children, onClose }) {
+function Modal({ open, title, closeLabel = "Close", children, onClose }) {
     if (!open) return null;
 
     return (
@@ -11,7 +11,7 @@ function Modal({ open, title, children, onClose }) {
             <div className="modal" role="dialog" aria-modal="true" aria-label={title}>
                 <div className="modal-header">
                     <h2>{title}</h2>
-                    <button type="button" className="modal-close" aria-label="Close" onClick={onClose}>
+                    <button type="button" className="modal-close" aria-label={closeLabel} onClick={onClose}>
                         &times;
                     </button>
                 </div>

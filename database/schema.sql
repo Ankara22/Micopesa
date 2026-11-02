@@ -25,16 +25,14 @@
 --     dedicated trigger (enforce_withdrawal_claim_reviewer_role), in addition
 --     to the standard foreign key.
 --   * The FUNDS design rule "only FUND_MANAGER users can be assigned as
---     funds.managed_by" is enforced with a dedicated trigger
+--     non-null funds.managed_by" is enforced with a dedicated trigger
 --     (enforce_fund_manager_role), in addition to the standard foreign key.
 --     WORKER, REGULATOR, and ADMIN users are rejected.
---   * The COMPLIANCE_REPORTS design rule "only FUND_MANAGER and REGULATOR
---     users can generate compliance reports" is enforced with a dedicated
---     trigger (enforce_compliance_report_generator_role), in addition to
---     the standard foreign key. WORKER and ADMIN users are rejected.
---   * This script implements the finalized design in full: all 15 entities
---     (including SYSTEM_SETTINGS), NOTIFICATIONS.created_by, and all three
---     role-enforcement triggers are present and in agreement with
+--   * Only active FUND_MANAGER users can generate compliance reports;
+--     REGULATOR users independently review submitted versions in the review tables.
+--   * This script implements the finalized design in full, including the
+--     compliance submission/review history tables and role-enforcement triggers,
+--     in agreement with
 --     docs/design/database/database-design.md and the diagrams.
 -- =============================================================================
 
@@ -51,6 +49,7 @@ DROP TABLE IF EXISTS compliance_reports CASCADE;
 DROP TABLE IF EXISTS audit_logs CASCADE;
 DROP TABLE IF EXISTS ussd_sessions CASCADE;
 DROP TABLE IF EXISTS notifications CASCADE;
+DROP TABLE IF EXISTS contribution_fund_allocations CASCADE;
 DROP TABLE IF EXISTS fund_allocations CASCADE;
 DROP TABLE IF EXISTS withdrawal_claims CASCADE;
 DROP TABLE IF EXISTS contributions CASCADE;
@@ -99,7 +98,20 @@ CREATE TABLE users (
     user_id         VARCHAR(25)  PRIMARY KEY DEFAULT generate_short_id(),
     full_name       VARCHAR(100) NOT NULL,
     phone           VARCHAR(15)  NOT NULL,
+    email           VARCHAR(254),
+    pending_email   VARCHAR(254),
+    email_verified  BOOLEAN      NOT NULL DEFAULT FALSE,
     password_hash   VARCHAR(255) NOT NULL,
+    is_temp_password BOOLEAN    NOT NULL DEFAULT FALSE,
+    force_password_change BOOLEAN NOT NULL DEFAULT FALSE,
+    failed_login_attempts INTEGER NOT NULL DEFAULT 0
+        CONSTRAINT chk_users_failed_login_attempts_nonnegative CHECK (failed_login_attempts >= 0),
+    locked_until    TIMESTAMP WITH TIME ZONE,
+    auth_version    INTEGER      NOT NULL DEFAULT 0
+        CONSTRAINT chk_users_auth_version_nonnegative CHECK (auth_version >= 0),
+    login_method    VARCHAR(10)  NOT NULL DEFAULT 'PHONE'
+        CONSTRAINT chk_users_login_method CHECK (login_method IN ('EMAIL', 'PHONE')),
+    profile_photo_ref VARCHAR(64),
     role            VARCHAR(20)  NOT NULL
         CHECK (role IN ('WORKER', 'FUND_MANAGER', 'REGULATOR', 'ADMIN')),
     occupation      VARCHAR(50),
@@ -109,6 +121,14 @@ CREATE TABLE users (
     updated_at      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
     CONSTRAINT uq_users_phone UNIQUE (phone)
 );
+
+CREATE UNIQUE INDEX uq_users_email_lower
+    ON users (lower(email))
+    WHERE email IS NOT NULL;
+
+CREATE UNIQUE INDEX uq_users_pending_email_lower
+    ON users (lower(pending_email))
+    WHERE pending_email IS NOT NULL;
 
 CREATE INDEX idx_users_role ON users (role);
 CREATE INDEX idx_users_account_status ON users (account_status);
@@ -174,7 +194,7 @@ CREATE TRIGGER trg_pension_accounts_set_updated_at
 -- -----------------------------------------------------------------------------
 CREATE TABLE funds (
     fund_id             VARCHAR(25)  PRIMARY KEY DEFAULT generate_short_id(),
-    managed_by          VARCHAR(25)  NOT NULL,
+    managed_by          VARCHAR(25),
     fund_name           VARCHAR(50)  NOT NULL,
     administrator_name  VARCHAR(50)  NOT NULL,
     risk_level          VARCHAR(15)  NOT NULL
@@ -185,7 +205,7 @@ CREATE TABLE funds (
     created_at          TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
     updated_at          TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
     CONSTRAINT fk_funds_managed_by FOREIGN KEY (managed_by)
-        REFERENCES users (user_id) ON DELETE RESTRICT
+        REFERENCES users (user_id) ON DELETE SET NULL
 );
 
 CREATE INDEX idx_funds_managed_by ON funds (managed_by);
@@ -203,6 +223,10 @@ RETURNS TRIGGER AS $$
 DECLARE
     manager_role VARCHAR(20);
 BEGIN
+    IF NEW.managed_by IS NULL THEN
+        RETURN NEW;
+    END IF;
+
     SELECT role INTO manager_role FROM users WHERE user_id = NEW.managed_by;
 
     IF manager_role IS NULL THEN
@@ -260,6 +284,11 @@ CREATE TABLE retirement_projections (
     assumed_return        NUMERIC(6,2)  NOT NULL,
     projected_amount      NUMERIC(12,2) NOT NULL CHECK (projected_amount >= 0),
     projection_years      INTEGER      NOT NULL CHECK (projection_years > 0),
+    current_age           INTEGER CHECK (current_age IS NULL OR current_age BETWEEN 1 AND 100),
+    starting_balance      NUMERIC(12,2) CHECK (starting_balance IS NULL OR starting_balance >= 0),
+    yearly_projection     JSONB CHECK (
+        yearly_projection IS NULL OR jsonb_typeof(yearly_projection) = 'array'
+    ),
     projected_at          TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
     created_at            TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
     updated_at            TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
@@ -319,6 +348,7 @@ CREATE TABLE contributions (
     created_at            TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
     updated_at            TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
     CONSTRAINT uq_contributions_transaction_id UNIQUE (transaction_id),
+    CONSTRAINT uq_contributions_id_account UNIQUE (contribution_id, account_id),
     CONSTRAINT fk_contributions_account FOREIGN KEY (account_id)
         REFERENCES pension_accounts (account_id) ON DELETE CASCADE,
     CONSTRAINT fk_contributions_transaction FOREIGN KEY (transaction_id)
@@ -369,6 +399,9 @@ CREATE TABLE withdrawal_claims (
 CREATE INDEX idx_withdrawal_claims_account_id ON withdrawal_claims (account_id);
 CREATE INDEX idx_withdrawal_claims_reviewed_by ON withdrawal_claims (reviewed_by);
 CREATE INDEX idx_withdrawal_claims_claim_status ON withdrawal_claims (claim_status);
+CREATE UNIQUE INDEX uq_withdrawal_claims_one_pending_per_account
+    ON withdrawal_claims (account_id)
+    WHERE claim_status = 'PENDING';
 
 CREATE TRIGGER trg_withdrawal_claims_set_updated_at
     BEFORE UPDATE ON withdrawal_claims
@@ -427,8 +460,55 @@ CREATE TABLE fund_allocations (
     )
 );
 
+-- A contribution's fund distribution is an immutable snapshot of the
+-- account's selected, effective fund-allocation rows at initiation time.
+-- Existing contributions remain intentionally unassigned.
+CREATE TABLE contribution_fund_allocations (
+    contribution_id       VARCHAR(25) NOT NULL,
+    account_id            VARCHAR(25) NOT NULL,
+    fund_id               VARCHAR(25) NOT NULL,
+    fund_name             VARCHAR(50) NOT NULL,
+    allocation_percentage NUMERIC(18,10) NOT NULL
+        CHECK (allocation_percentage > 0 AND allocation_percentage <= 100),
+    allocated_amount      NUMERIC(12,2) NOT NULL CHECK (allocated_amount >= 0),
+    created_at            TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    PRIMARY KEY (contribution_id, fund_id),
+    CONSTRAINT fk_contribution_fund_allocations_contribution
+        FOREIGN KEY (contribution_id, account_id)
+        REFERENCES contributions (contribution_id, account_id) ON DELETE CASCADE,
+    CONSTRAINT fk_contribution_fund_allocations_fund
+        FOREIGN KEY (fund_id) REFERENCES funds (fund_id) ON DELETE RESTRICT
+);
+
+-- Single-use email-verification and password-recovery tokens. Only token
+-- hashes are persisted; rate-limit keys are keyed hashes rather than PII.
+CREATE TABLE auth_tokens (
+    auth_token_id   BIGSERIAL PRIMARY KEY,
+    user_id         VARCHAR(25) NOT NULL REFERENCES users (user_id) ON DELETE CASCADE,
+    purpose         VARCHAR(30) NOT NULL CHECK (purpose IN ('EMAIL_VERIFICATION', 'PASSWORD_RESET')),
+    email_address   VARCHAR(254) NOT NULL,
+    token_hash      CHAR(64) NOT NULL UNIQUE,
+    expires_at      TIMESTAMP WITH TIME ZONE NOT NULL,
+    consumed_at     TIMESTAMP WITH TIME ZONE,
+    created_at      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_auth_tokens_user_purpose_created
+    ON auth_tokens (user_id, purpose, created_at DESC);
+
+CREATE TABLE auth_rate_limits (
+    scope           VARCHAR(20) NOT NULL CHECK (scope IN ('IP', 'EMAIL', 'ACCOUNT')),
+    action          VARCHAR(30) NOT NULL,
+    key_hash        CHAR(64) NOT NULL,
+    window_started_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    request_count   INTEGER NOT NULL CHECK (request_count > 0),
+    PRIMARY KEY (scope, action, key_hash)
+);
+
 CREATE INDEX idx_fund_allocations_account_id ON fund_allocations (account_id);
 CREATE INDEX idx_fund_allocations_fund_id ON fund_allocations (fund_id);
+CREATE INDEX idx_contribution_fund_allocations_fund
+    ON contribution_fund_allocations (fund_id);
 
 CREATE TRIGGER trg_fund_allocations_set_updated_at
     BEFORE UPDATE ON fund_allocations
@@ -500,9 +580,13 @@ CREATE TABLE audit_logs (
     log_id        VARCHAR(25)  PRIMARY KEY DEFAULT generate_short_id(),
     user_id       VARCHAR(25),
     action_type   VARCHAR(20)  NOT NULL
-        CHECK (action_type IN ('CREATE', 'UPDATE', 'DELETE', 'LOGIN', 'LOGOUT', 'APPROVE', 'REJECT')),
+        CHECK (action_type IN (
+            'CREATE', 'UPDATE', 'DELETE', 'LOGIN', 'LOGOUT', 'APPROVE', 'REJECT',
+            'SUBMIT', 'RESUBMIT', 'REQUEST_REVISION'
+        )),
     entity_name   VARCHAR(50)  NOT NULL,
     entity_id     VARCHAR(25)  NOT NULL,
+    details       JSONB,
     "timestamp"   TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
     -- Audit history must outlive the acting user, so the actor reference is
     -- cleared rather than cascading a delete into the audit trail.
@@ -519,44 +603,63 @@ CREATE INDEX idx_audit_logs_entity ON audit_logs (entity_name, entity_id);
 -- -----------------------------------------------------------------------------
 CREATE TABLE compliance_reports (
     report_id       VARCHAR(25) PRIMARY KEY DEFAULT generate_short_id(),
-    generated_by    VARCHAR(25) NOT NULL,
-    report_type     VARCHAR(20) NOT NULL
-        CHECK (report_type IN ('RBA', 'NSSF', 'INTERNAL')),
-    period_start    DATE        NOT NULL,
-    period_end      DATE        NOT NULL,
-    rba_status      VARCHAR(15) NOT NULL DEFAULT 'SUBMITTED'
-        CHECK (rba_status IN ('DRAFT', 'SUBMITTED', 'ACCEPTED', 'REJECTED')),
+    generated_by    VARCHAR(25),
+    fund_id         VARCHAR(25),
+    report_type     VARCHAR(20),
+    period_start    DATE,
+    period_end      DATE,
+    report_content  JSONB,
+    is_legacy       BOOLEAN NOT NULL DEFAULT FALSE,
+    rba_status      VARCHAR(25) NOT NULL DEFAULT 'DRAFT'
+        CHECK (rba_status IN ('DRAFT', 'SUBMITTED', 'REVISION_REQUESTED', 'ACCEPTED', 'REJECTED')),
     generated_at    TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    submitted_at    TIMESTAMP WITH TIME ZONE,
+    last_submitted_at TIMESTAMP WITH TIME ZONE,
     updated_at      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
     CONSTRAINT fk_compliance_reports_generated_by FOREIGN KEY (generated_by)
-        REFERENCES users (user_id) ON DELETE RESTRICT,
-    CONSTRAINT chk_compliance_reports_period CHECK (period_end >= period_start)
+        REFERENCES users (user_id) ON DELETE SET NULL,
+    CONSTRAINT fk_compliance_reports_fund FOREIGN KEY (fund_id)
+        REFERENCES funds (fund_id) ON DELETE RESTRICT,
+    CONSTRAINT chk_compliance_reports_report_type
+        CHECK (report_type IS NULL OR report_type IN ('RBA', 'NSSF', 'INTERNAL')),
+    CONSTRAINT chk_compliance_reports_period
+        CHECK (period_start IS NULL OR period_end IS NULL OR period_end >= period_start)
 );
 
 CREATE INDEX idx_compliance_reports_generated_by ON compliance_reports (generated_by);
 CREATE INDEX idx_compliance_reports_rba_status ON compliance_reports (rba_status);
+CREATE INDEX idx_compliance_reports_fund ON compliance_reports (fund_id);
+CREATE INDEX idx_compliance_reports_submitted ON compliance_reports (rba_status, submitted_at DESC);
 
 CREATE TRIGGER trg_compliance_reports_set_updated_at
     BEFORE UPDATE ON compliance_reports
     FOR EACH ROW
     EXECUTE FUNCTION set_updated_at();
 
--- Enforces the design rule: "Only FUND_MANAGER and REGULATOR users can
--- generate compliance reports." WORKER and ADMIN users must be rejected.
+-- Enforces the design rule: only FUND_MANAGER users submit compliance reports.
 CREATE OR REPLACE FUNCTION enforce_compliance_report_generator_role()
 RETURNS TRIGGER AS $$
 DECLARE
     generator_role VARCHAR(20);
+    generator_status VARCHAR(15);
 BEGIN
-    SELECT role INTO generator_role FROM users WHERE user_id = NEW.generated_by;
-
-    IF generator_role IS NULL THEN
-        RAISE EXCEPTION 'generated_by user % does not exist', NEW.generated_by;
+    IF TG_OP = 'INSERT' AND NEW.generated_by IS NULL THEN
+        RAISE EXCEPTION 'new compliance reports require a submitting fund manager';
+    END IF;
+    IF NEW.generated_by IS NULL THEN
+        RETURN NEW;
     END IF;
 
-    IF generator_role NOT IN ('FUND_MANAGER', 'REGULATOR') THEN
-        RAISE EXCEPTION 'generated_by user % must have role FUND_MANAGER or REGULATOR, found %',
-            NEW.generated_by, generator_role;
+    SELECT role, account_status
+    INTO generator_role, generator_status
+    FROM users
+    WHERE user_id = NEW.generated_by;
+
+    IF generator_role IS DISTINCT FROM 'FUND_MANAGER'
+       OR generator_status IS DISTINCT FROM 'ACTIVE' THEN
+        RAISE EXCEPTION
+            'generated_by user % must be an active FUND_MANAGER (found role %, status %)',
+            NEW.generated_by, generator_role, generator_status;
     END IF;
 
     RETURN NEW;
@@ -567,6 +670,358 @@ CREATE TRIGGER trg_compliance_reports_enforce_generator_role
     BEFORE INSERT OR UPDATE OF generated_by ON compliance_reports
     FOR EACH ROW
     EXECUTE FUNCTION enforce_compliance_report_generator_role();
+
+CREATE TABLE compliance_report_submissions (
+    submission_id VARCHAR(25) PRIMARY KEY DEFAULT generate_short_id(),
+    report_id VARCHAR(25) NOT NULL
+        REFERENCES compliance_reports (report_id) ON DELETE RESTRICT,
+    version INTEGER NOT NULL CHECK (version > 0),
+    submitted_by VARCHAR(25) NOT NULL,
+    submitted_by_name VARCHAR(100) NOT NULL,
+    submitted_by_role VARCHAR(20) NOT NULL
+        CHECK (submitted_by_role = 'FUND_MANAGER'),
+    report_content JSONB NOT NULL,
+    report_type VARCHAR(20) NOT NULL
+        CHECK (report_type IN ('RBA', 'NSSF', 'INTERNAL')),
+    period_start DATE NOT NULL,
+    period_end DATE NOT NULL,
+    submitted_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    CONSTRAINT uq_compliance_report_submission_version UNIQUE (report_id, version),
+    CONSTRAINT uq_compliance_report_submission_id_report UNIQUE (submission_id, report_id),
+    CONSTRAINT chk_compliance_report_submission_period CHECK (period_end >= period_start)
+);
+
+CREATE INDEX idx_compliance_report_submissions_report
+    ON compliance_report_submissions (report_id, version DESC);
+
+CREATE TABLE compliance_report_reviews (
+    review_id VARCHAR(25) PRIMARY KEY DEFAULT generate_short_id(),
+    report_id VARCHAR(25) NOT NULL,
+    submission_id VARCHAR(25) NOT NULL,
+    reviewed_by VARCHAR(25) NOT NULL,
+    reviewed_by_name VARCHAR(100) NOT NULL,
+    reviewed_by_role VARCHAR(20) NOT NULL
+        CHECK (reviewed_by_role = 'REGULATOR'),
+    decision VARCHAR(25) NOT NULL
+        CHECK (decision IN ('ACCEPTED', 'REJECTED', 'REVISION_REQUESTED')),
+    reason TEXT,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    CONSTRAINT fk_compliance_report_reviews_submission_report
+        FOREIGN KEY (submission_id, report_id)
+        REFERENCES compliance_report_submissions (submission_id, report_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT uq_compliance_report_reviews_submission UNIQUE (submission_id),
+    CONSTRAINT chk_compliance_report_review_reason
+        CHECK (decision = 'ACCEPTED' OR (reason IS NOT NULL AND length(trim(reason)) >= 10))
+);
+
+CREATE INDEX idx_compliance_report_reviews_report
+    ON compliance_report_reviews (report_id, created_at DESC);
+CREATE INDEX idx_compliance_report_reviews_submission
+    ON compliance_report_reviews (submission_id, created_at DESC);
+
+CREATE OR REPLACE FUNCTION prevent_compliance_history_mutation()
+RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION USING
+        ERRCODE = '55000',
+        MESSAGE = format('%I history is append-only', TG_TABLE_NAME);
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_compliance_report_submissions_immutable
+    BEFORE UPDATE OR DELETE ON compliance_report_submissions
+    FOR EACH ROW
+    EXECUTE FUNCTION prevent_compliance_history_mutation();
+
+CREATE TRIGGER trg_compliance_report_reviews_immutable
+    BEFORE UPDATE OR DELETE ON compliance_report_reviews
+    FOR EACH ROW
+    EXECUTE FUNCTION prevent_compliance_history_mutation();
+
+CREATE TRIGGER trg_compliance_report_submissions_no_truncate
+    BEFORE TRUNCATE ON compliance_report_submissions
+    FOR EACH STATEMENT
+    EXECUTE FUNCTION prevent_compliance_history_mutation();
+
+CREATE TRIGGER trg_compliance_report_reviews_no_truncate
+    BEFORE TRUNCATE ON compliance_report_reviews
+    FOR EACH STATEMENT
+    EXECUTE FUNCTION prevent_compliance_history_mutation();
+
+CREATE OR REPLACE FUNCTION enforce_compliance_report_fund_owner()
+RETURNS TRIGGER AS $$
+DECLARE
+    fund_manager VARCHAR(25);
+BEGIN
+    IF TG_OP = 'INSERT' AND (NEW.fund_id IS NULL OR NEW.generated_by IS NULL) THEN
+        RAISE EXCEPTION 'new compliance reports require a fund and submitting fund manager';
+    END IF;
+    IF NEW.fund_id IS NULL OR NEW.generated_by IS NULL THEN
+        RETURN NEW;
+    END IF;
+    SELECT managed_by INTO fund_manager FROM funds WHERE fund_id = NEW.fund_id;
+    IF fund_manager IS NULL OR fund_manager <> NEW.generated_by THEN
+        RAISE EXCEPTION 'compliance report fund must be managed by its submitting fund manager';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_compliance_reports_fund_owner
+    BEFORE INSERT OR UPDATE OF fund_id, generated_by ON compliance_reports
+    FOR EACH ROW
+    EXECUTE FUNCTION enforce_compliance_report_fund_owner();
+
+CREATE OR REPLACE FUNCTION enforce_compliance_report_submission_role()
+RETURNS TRIGGER AS $$
+DECLARE
+    actor_role VARCHAR(20);
+    actor_name VARCHAR(100);
+    actor_status VARCHAR(15);
+BEGIN
+    SELECT role, full_name, account_status
+    INTO actor_role, actor_name, actor_status
+    FROM users WHERE user_id = NEW.submitted_by;
+    IF actor_role IS DISTINCT FROM 'FUND_MANAGER' OR actor_status IS DISTINCT FROM 'ACTIVE' THEN
+        RAISE EXCEPTION 'compliance report submissions must be made by a FUND_MANAGER';
+    END IF;
+    IF NEW.submitted_by_name IS DISTINCT FROM actor_name
+       OR NEW.submitted_by_role IS DISTINCT FROM actor_role THEN
+        RAISE EXCEPTION 'compliance report submission identity must match the database user';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_compliance_report_submissions_manager
+    BEFORE INSERT OR UPDATE OF submitted_by, submitted_by_name, submitted_by_role
+    ON compliance_report_submissions
+    FOR EACH ROW
+    EXECUTE FUNCTION enforce_compliance_report_submission_role();
+
+CREATE OR REPLACE FUNCTION enforce_compliance_report_review_role()
+RETURNS TRIGGER AS $$
+DECLARE
+    actor_role VARCHAR(20);
+    actor_name VARCHAR(100);
+    actor_status VARCHAR(15);
+BEGIN
+    SELECT role, full_name, account_status
+    INTO actor_role, actor_name, actor_status
+    FROM users WHERE user_id = NEW.reviewed_by;
+    IF actor_role IS DISTINCT FROM 'REGULATOR' OR actor_status IS DISTINCT FROM 'ACTIVE' THEN
+        RAISE EXCEPTION 'compliance report reviews must be made by a REGULATOR';
+    END IF;
+    IF NEW.reviewed_by_name IS DISTINCT FROM actor_name
+       OR NEW.reviewed_by_role IS DISTINCT FROM actor_role THEN
+        RAISE EXCEPTION 'compliance report review identity must match the database user';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_compliance_report_reviews_regulator
+    BEFORE INSERT OR UPDATE OF reviewed_by, reviewed_by_name, reviewed_by_role
+    ON compliance_report_reviews
+    FOR EACH ROW
+    EXECUTE FUNCTION enforce_compliance_report_review_role();
+
+CREATE OR REPLACE FUNCTION enforce_compliance_report_review_state()
+RETURNS TRIGGER AS $$
+DECLARE
+    report_status VARCHAR(25);
+    report_is_legacy BOOLEAN;
+    report_submitted_at TIMESTAMP WITH TIME ZONE;
+    report_last_submitted_at TIMESTAMP WITH TIME ZONE;
+    latest_submission_id VARCHAR(25);
+BEGIN
+    SELECT rba_status, is_legacy, submitted_at, last_submitted_at
+    INTO report_status, report_is_legacy, report_submitted_at, report_last_submitted_at
+    FROM compliance_reports
+    WHERE report_id = NEW.report_id
+    FOR UPDATE;
+
+    IF NOT FOUND
+       OR report_status <> 'SUBMITTED'
+       OR report_is_legacy
+       OR report_submitted_at IS NULL
+       OR report_last_submitted_at IS NULL THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'compliance decisions require a complete, non-legacy submitted report';
+    END IF;
+
+    SELECT submission_id
+    INTO latest_submission_id
+    FROM compliance_report_submissions
+    WHERE report_id = NEW.report_id
+    ORDER BY version DESC
+    LIMIT 1;
+
+    IF latest_submission_id IS DISTINCT FROM NEW.submission_id THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'compliance decisions must reference the latest report submission';
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_compliance_report_reviews_submitted_state
+    BEFORE INSERT ON compliance_report_reviews
+    FOR EACH ROW
+    EXECUTE FUNCTION enforce_compliance_report_review_state();
+
+CREATE OR REPLACE FUNCTION enforce_compliance_report_status_transition()
+RETURNS TRIGGER AS $$
+DECLARE
+    latest_submission_id VARCHAR(25);
+    latest_submission_at TIMESTAMP WITH TIME ZONE;
+BEGIN
+    IF NEW.rba_status IS NOT DISTINCT FROM OLD.rba_status THEN
+        RETURN NEW;
+    END IF;
+
+    IF NEW.is_legacy THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'legacy compliance reports cannot enter the workflow';
+    END IF;
+
+    IF OLD.rba_status IN ('DRAFT', 'REVISION_REQUESTED')
+       AND NEW.rba_status = 'SUBMITTED' THEN
+        SELECT submission_id, submitted_at
+        INTO latest_submission_id, latest_submission_at
+        FROM compliance_report_submissions
+        WHERE report_id = NEW.report_id
+        ORDER BY version DESC
+        LIMIT 1;
+
+        IF NOT FOUND
+           OR NEW.submitted_at IS NULL
+           OR NEW.last_submitted_at IS NULL
+           OR NEW.last_submitted_at IS NOT DISTINCT FROM OLD.last_submitted_at
+           OR NEW.last_submitted_at IS DISTINCT FROM latest_submission_at THEN
+            RAISE EXCEPTION USING
+                ERRCODE = '23514',
+                MESSAGE = 'a report can be submitted only with a new matching submission history row';
+        END IF;
+
+        RETURN NEW;
+    END IF;
+
+    IF OLD.rba_status = 'SUBMITTED'
+       AND NEW.rba_status IN ('ACCEPTED', 'REJECTED', 'REVISION_REQUESTED') THEN
+        SELECT submission_id
+        INTO latest_submission_id
+        FROM compliance_report_submissions
+        WHERE report_id = NEW.report_id
+        ORDER BY version DESC
+        LIMIT 1;
+
+        IF NOT FOUND OR NOT EXISTS (
+            SELECT 1
+            FROM compliance_report_reviews
+            WHERE report_id = NEW.report_id
+              AND submission_id = latest_submission_id
+              AND decision = NEW.rba_status
+        ) THEN
+            RAISE EXCEPTION USING
+                ERRCODE = '23514',
+                MESSAGE = 'a report decision status requires a matching review of its latest submission';
+        END IF;
+
+        RETURN NEW;
+    END IF;
+
+    RAISE EXCEPTION USING
+        ERRCODE = '23514',
+        MESSAGE = format(
+            'invalid compliance report status transition from %s to %s',
+            OLD.rba_status,
+            NEW.rba_status
+        );
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_compliance_reports_status_transition
+    BEFORE UPDATE OF rba_status ON compliance_reports
+    FOR EACH ROW
+    EXECUTE FUNCTION enforce_compliance_report_status_transition();
+
+CREATE OR REPLACE FUNCTION enforce_compliance_submission_status_at_commit()
+RETURNS TRIGGER AS $$
+DECLARE
+    report_status VARCHAR(25);
+    report_last_submitted_at TIMESTAMP WITH TIME ZONE;
+    latest_submission_id VARCHAR(25);
+BEGIN
+    SELECT rba_status, last_submitted_at
+    INTO report_status, report_last_submitted_at
+    FROM compliance_reports
+    WHERE report_id = NEW.report_id;
+
+    SELECT submission_id
+    INTO latest_submission_id
+    FROM compliance_report_submissions
+    WHERE report_id = NEW.report_id
+    ORDER BY version DESC
+    LIMIT 1;
+
+    IF report_status IS DISTINCT FROM 'SUBMITTED'
+       OR report_last_submitted_at IS DISTINCT FROM NEW.submitted_at
+       OR latest_submission_id IS DISTINCT FROM NEW.submission_id THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'submission history must be committed with its submitted report state';
+    END IF;
+
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE CONSTRAINT TRIGGER trg_compliance_report_submissions_status_at_commit
+    AFTER INSERT ON compliance_report_submissions
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW
+    EXECUTE FUNCTION enforce_compliance_submission_status_at_commit();
+
+CREATE OR REPLACE FUNCTION enforce_compliance_review_status_at_commit()
+RETURNS TRIGGER AS $$
+DECLARE
+    report_status VARCHAR(25);
+    latest_submission_id VARCHAR(25);
+BEGIN
+    SELECT rba_status
+    INTO report_status
+    FROM compliance_reports
+    WHERE report_id = NEW.report_id;
+
+    SELECT submission_id
+    INTO latest_submission_id
+    FROM compliance_report_submissions
+    WHERE report_id = NEW.report_id
+    ORDER BY version DESC
+    LIMIT 1;
+
+    IF report_status IS DISTINCT FROM NEW.decision
+       OR latest_submission_id IS DISTINCT FROM NEW.submission_id THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'review history must be committed with its matching report decision';
+    END IF;
+
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE CONSTRAINT TRIGGER trg_compliance_report_reviews_status_at_commit
+    AFTER INSERT ON compliance_report_reviews
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW
+    EXECUTE FUNCTION enforce_compliance_review_status_at_commit();
 
 -- -----------------------------------------------------------------------------
 -- SYSTEM_SETTINGS
@@ -585,6 +1040,13 @@ CREATE TABLE system_settings (
     CONSTRAINT fk_system_settings_updated_by FOREIGN KEY (updated_by)
         REFERENCES users (user_id) ON DELETE SET NULL
 );
+
+INSERT INTO system_settings (setting_key, setting_value, description) VALUES
+    ('assumed_yearly_growth', '8', 'Annual growth assumption used by retirement projections (percent).'),
+    ('max_failed_login_attempts', '5', 'Failed login attempts before a temporary account lockout.'),
+    ('account_lockout_duration_minutes', '15', 'Duration of a temporary account lockout (minutes).'),
+    ('require_otp_on_withdrawal', 'true', 'Require OTP verification before future payout dispatch. M-Pesa payout dispatch is currently disabled.')
+ON CONFLICT (setting_key) DO NOTHING;
 
 CREATE INDEX idx_system_settings_updated_by ON system_settings (updated_by);
 

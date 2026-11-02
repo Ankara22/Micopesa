@@ -1,4 +1,10 @@
 const pool = require("../db/database");
+const MANAGED_SETTINGS = new Set([
+    "assumed_yearly_growth",
+    "max_failed_login_attempts",
+    "account_lockout_duration_minutes",
+    "require_otp_on_withdrawal",
+]);
 
 /**
  * GET /api/admin/settings
@@ -59,6 +65,12 @@ async function createSetting(req, res) {
     if (!setting_key || setting_value === undefined) {
         return res.status(400).json({ status: "error", message: "setting_key and setting_value are required" });
     }
+    if (MANAGED_SETTINGS.has(setting_key)) {
+        return res.status(409).json({
+            status: "error",
+            message: "Managed operational settings must be changed through the validated settings endpoint",
+        });
+    }
 
     try {
         const existing = await pool.query(
@@ -100,6 +112,13 @@ async function updateSetting(req, res) {
     const { key } = req.params;
     const { setting_value, description } = req.body;
 
+    if (MANAGED_SETTINGS.has(key)) {
+        return res.status(409).json({
+            status: "error",
+            message: "Managed operational settings must be changed through the validated settings endpoint",
+        });
+    }
+
     if (setting_value === undefined) {
         return res.status(400).json({ status: "error", message: "setting_value is required" });
     }
@@ -137,6 +156,13 @@ async function updateSetting(req, res) {
  */
 async function deleteSetting(req, res) {
     const { key } = req.params;
+
+    if (MANAGED_SETTINGS.has(key)) {
+        return res.status(409).json({
+            status: "error",
+            message: "Managed operational settings cannot be deleted",
+        });
+    }
 
     try {
         const result = await pool.query(

@@ -10,7 +10,10 @@ function AppLayout() {
 
     return (
         <div className="app-shell">
-            <Header onToggleSidebar={() => setSidebarOpen((prev) => !prev)} />
+            <Header
+                sidebarOpen={sidebarOpen}
+                onToggleSidebar={() => setSidebarOpen((prev) => !prev)}
+            />
             <div className="app-body">
                 <Sidebar open={sidebarOpen} onNavigate={() => setSidebarOpen(false)} />
                 <main className="app-main">

@@ -1,191 +1,269 @@
-import { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { useAuth } from "../../context/AuthContext";
-import { DASHBOARD_BY_ROLE } from "../../routes/roleRoutes";
+import { requestEmailVerificationForAddress } from "../../services/authEmailApi";
+import AuthLayout from "./AuthLayout";
+import { useTranslation } from "react-i18next";
 import "./auth.css";
 
 const MIN_PASSWORD_LENGTH = 8;
 
-// LOCAL DEVELOPMENT ONLY. Must match the backend's ALLOW_PRIVILEGED_SIGNUP
-// flag. Never true in a production build.
-const PRIVILEGED_SIGNUP_ENABLED = import.meta.env.VITE_ALLOW_PRIVILEGED_SIGNUP === "true";
-const PRIVILEGED_ROLES = ["WORKER", "FUND_MANAGER", "REGULATOR", "ADMIN"];
-
 function Register() {
     const { register } = useAuth();
-    const navigate = useNavigate();
+    const { t } = useTranslation();
 
     const [fullName, setFullName] = useState("");
+    const [email, setEmail] = useState("");
     const [phone, setPhone] = useState("");
     const [occupation, setOccupation] = useState("");
-    const [role, setRole] = useState("WORKER");
     const [password, setPassword] = useState("");
     const [confirmPassword, setConfirmPassword] = useState("");
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [formError, setFormError] = useState("");
+    const [fieldErrors, setFieldErrors] = useState({});
+    const [registeredEmail, setRegisteredEmail] = useState("");
+    const [verificationEmailSent, setVerificationEmailSent] = useState(null);
+    const [verificationMessage, setVerificationMessage] = useState("");
+    const [verificationError, setVerificationError] = useState("");
+    const [isResending, setIsResending] = useState(false);
+    const submissionInProgress = useRef(false);
 
-    // Occupation is only required for WORKER accounts (they're the only
-    // role that gets a pension account). In privileged dev-only signup
-    // mode, a non-WORKER role makes occupation optional.
-    const occupationRequired = !PRIVILEGED_SIGNUP_ENABLED || role === "WORKER";
+    function validateEmail(value) {
+        const normalized = value.trim().toLowerCase();
+        return normalized.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)
+            ? ""
+            : "auth.register.invalidEmail";
+    }
 
     async function handleSubmit(event) {
         event.preventDefault();
+        if (submissionInProgress.current) return;
         setFormError("");
 
-        if (!fullName || !phone || !password || !confirmPassword) {
-            setFormError("Full name, phone number, and password are required.");
+        const normalizedName = fullName.trim();
+        const normalizedEmail = email.trim().toLowerCase();
+        const normalizedPhone = phone.trim();
+        const nextFieldErrors = {};
+        if (!normalizedName) nextFieldErrors.fullName = "auth.register.nameRequired";
+        if (!normalizedEmail) nextFieldErrors.email = "auth.register.emailRequired";
+        else nextFieldErrors.email = validateEmail(normalizedEmail);
+        if (!normalizedPhone) nextFieldErrors.phone = "auth.register.phoneRequired";
+        setFieldErrors(nextFieldErrors);
+        if (Object.values(nextFieldErrors).some(Boolean) || !password || !confirmPassword) {
+            setFormError(!password || !confirmPassword ? "auth.register.passwordRequired" : "");
             return;
         }
 
-        if (occupationRequired && !occupation) {
-            setFormError("Occupation is required.");
+        if (!occupation) {
+            setFormError("auth.register.occupationRequired");
             return;
         }
 
         if (password.length < MIN_PASSWORD_LENGTH) {
-            setFormError(`Password must be at least ${MIN_PASSWORD_LENGTH} characters long.`);
+            setFormError("auth.register.passwordTooShort");
             return;
         }
 
         if (password !== confirmPassword) {
-            setFormError("Passwords do not match.");
+            setFormError("auth.register.passwordMismatch");
             return;
         }
 
+        submissionInProgress.current = true;
         setIsSubmitting(true);
-        const result = await register(
-            fullName.trim(),
-            phone.trim(),
-            password,
-            occupation,
-            PRIVILEGED_SIGNUP_ENABLED ? role : undefined
-        );
-        setIsSubmitting(false);
-
-        if (!result.success) {
-            setFormError(result.message || "Registration failed. Please try again.");
-            return;
+        try {
+            const result = await register(normalizedName, normalizedEmail, normalizedPhone, password, occupation);
+            if (!result.success) {
+                setFormError("auth.register.createError");
+                return;
+            }
+            setRegisteredEmail(normalizedEmail);
+            setVerificationEmailSent(
+                typeof result.verificationEmailSent === "boolean" ? result.verificationEmailSent : null,
+            );
+        } catch {
+            setFormError("auth.register.genericError");
+        } finally {
+            submissionInProgress.current = false;
+            setIsSubmitting(false);
         }
+    }
 
-        const redirectTo = DASHBOARD_BY_ROLE[result.user.role] || "/";
-        navigate(redirectTo, { replace: true });
+    async function handleResendVerification() {
+        if (isResending || !registeredEmail) return;
+        setIsResending(true);
+        setVerificationMessage("");
+        setVerificationError("");
+        try {
+            await requestEmailVerificationForAddress(registeredEmail);
+            setVerificationMessage("auth.register.verificationRequestAccepted");
+        } catch {
+            setVerificationError("auth.register.verificationRequestError");
+        } finally {
+            setIsResending(false);
+        }
     }
 
     return (
-        <div className="auth-page">
-            <form className="auth-card" onSubmit={handleSubmit} noValidate>
-                <h1>Create your MicoPesa account</h1>
-                <p className="auth-subtitle">Start saving toward your retirement</p>
+        <AuthLayout>
+            <div className="auth-card auth-card-register">
+                <p className="auth-eyebrow auth-card-eyebrow">{t("auth.register.eyebrow")}</p>
+                <h1>{registeredEmail ? t("auth.register.verifyTitle") : t("auth.register.title")}</h1>
+                <p className="auth-subtitle">
+                    {registeredEmail
+                        ? t("auth.register.verifyDescription", { email: registeredEmail })
+                        : t("auth.register.description")}
+                </p>
 
-                {formError && (
-                    <div className="auth-error" role="alert">
-                        {formError}
+                {!registeredEmail && formError && (
+                    <div className="auth-error" id="register-error" role="alert">
+                        {t(formError, { count: MIN_PASSWORD_LENGTH })}
                     </div>
                 )}
 
-                <label htmlFor="full_name">Full name</label>
-                <input
-                    id="full_name"
-                    name="full_name"
-                    type="text"
-                    autoComplete="name"
-                    value={fullName}
-                    onChange={(e) => setFullName(e.target.value)}
-                    disabled={isSubmitting}
-                    required
-                />
-
-                <label htmlFor="phone">Phone number</label>
-                <input
-                    id="phone"
-                    name="phone"
-                    type="tel"
-                    autoComplete="tel"
-                    placeholder="+254700000000"
-                    value={phone}
-                    onChange={(e) => setPhone(e.target.value)}
-                    disabled={isSubmitting}
-                    required
-                />
-
-                {PRIVILEGED_SIGNUP_ENABLED && (
-                    <>
-                        <label htmlFor="role">
-                            Role <span className="auth-dev-badge">Local dev only</span>
-                        </label>
-                        <select
-                            id="role"
-                            name="role"
-                            value={role}
-                            onChange={(e) => setRole(e.target.value)}
+                {registeredEmail ? (
+                    <section className="auth-form" aria-label={t("auth.register.verificationInstructions")}>
+                        {verificationEmailSent === false ? (
+                            <div className="auth-error" role="alert">
+                                {t("auth.register.deliveryFailed")}
+                            </div>
+                        ) : (
+                            <div className="auth-success" role="status">
+                                {verificationEmailSent === true
+                                    ? t("auth.register.emailSent")
+                                    : t("auth.register.checkInbox")}
+                            </div>
+                        )}
+                        {verificationError && <div className="auth-error" role="alert">{t(verificationError)}</div>}
+                        {verificationMessage && <div className="auth-success" role="status">{t(verificationMessage)}</div>}
+                        <button className="auth-submit" type="button" onClick={handleResendVerification} disabled={isResending}>
+                            {isResending ? t("auth.register.requesting") : t("auth.register.resend")}
+                        </button>
+                        <p className="auth-footer"><Link to="/login">{t("auth.register.continueSignIn")}</Link></p>
+                    </section>
+                ) : <form className="auth-form auth-register-form" onSubmit={handleSubmit} noValidate aria-busy={isSubmitting}>
+                    <div className="auth-field">
+                        <label htmlFor="register-full-name">{t("auth.register.fullName")}</label>
+                        <input
+                            id="register-full-name"
+                            name="full_name"
+                            type="text"
+                            autoComplete="name"
+                            value={fullName}
+                            onChange={(e) => setFullName(e.target.value)}
                             disabled={isSubmitting}
+                            aria-invalid={Boolean(fieldErrors.fullName)}
+                            aria-describedby={fieldErrors.fullName ? "register-full-name-error" : undefined}
+                            required
+                        />
+                        {fieldErrors.fullName && <span id="register-full-name-error" className="auth-field-hint" role="alert">{t(fieldErrors.fullName)}</span>}
+                    </div>
+                    <div className="auth-field">
+                        <label htmlFor="register-email">{t("auth.register.email")}</label>
+                        <input
+                            id="register-email"
+                            name="email"
+                            type="email"
+                            autoComplete="email"
+                            inputMode="email"
+                            value={email}
+                            onChange={(event) => {
+                                setEmail(event.target.value);
+                                setFieldErrors((current) => ({ ...current, email: "" }));
+                            }}
+                            onBlur={() => setFieldErrors((current) => ({
+                                ...current,
+                                email: email.trim() ? validateEmail(email) : "auth.register.emailRequired",
+                            }))}
+                            disabled={isSubmitting}
+                            aria-invalid={Boolean(fieldErrors.email)}
+                            aria-describedby={fieldErrors.email ? "register-email-error" : undefined}
+                            required
+                        />
+                        {fieldErrors.email && <span id="register-email-error" className="auth-field-hint" role="alert">{t(fieldErrors.email)}</span>}
+                    </div>
+                    <div className="auth-field">
+                        <label htmlFor="register-phone">{t("auth.register.phone")}</label>
+                        <input
+                            id="register-phone"
+                            name="phone"
+                            type="tel"
+                            autoComplete="tel"
+                            inputMode="tel"
+                            placeholder={t("auth.register.phonePlaceholder")}
+                            value={phone}
+                            onChange={(e) => setPhone(e.target.value)}
+                            disabled={isSubmitting}
+                            aria-invalid={Boolean(fieldErrors.phone)}
+                            aria-describedby={fieldErrors.phone ? "register-phone-error" : undefined}
+                            required
+                        />
+                        {fieldErrors.phone && <span id="register-phone-error" className="auth-field-hint" role="alert">{t(fieldErrors.phone)}</span>}
+                    </div>
+                    <div className="auth-field">
+                        <label htmlFor="register-occupation">{t("auth.register.occupation")}</label>
+                        <select
+                            id="register-occupation"
+                            name="occupation"
+                            value={occupation}
+                            onChange={(e) => setOccupation(e.target.value)}
+                            disabled={isSubmitting}
+                            aria-describedby={formError ? "register-error" : undefined}
+                            required
                         >
-                            {PRIVILEGED_ROLES.map((r) => (
-                                <option key={r} value={r}>
-                                    {r}
-                                </option>
-                            ))}
+                            <option value="">{t("auth.register.selectOccupation")}</option>
+                            <option value="BODA_BODA_OPERATOR">{t("auth.register.occupations.BODA_BODA_OPERATOR")}</option>
+                            <option value="MARKET_VENDOR">{t("auth.register.occupations.MARKET_VENDOR")}</option>
+                            <option value="JUA_KALI_ARTISAN">{t("auth.register.occupations.JUA_KALI_ARTISAN")}</option>
+                            <option value="DOMESTIC_WORKER">{t("auth.register.occupations.DOMESTIC_WORKER")}</option>
+                            <option value="CASUAL_LABOURER">{t("auth.register.occupations.CASUAL_LABOURER")}</option>
+                            <option value="SMALL_SCALE_FARMER">{t("auth.register.occupations.SMALL_SCALE_FARMER")}</option>
+                            <option value="OTHER_INFORMAL_WORKER">{t("auth.register.occupations.OTHER_INFORMAL_WORKER")}</option>
                         </select>
-                    </>
-                )}
+                    </div>
+                    <div className="auth-field">
+                        <label htmlFor="register-password">{t("auth.register.password")}</label>
+                        <input
+                            id="register-password"
+                            name="password"
+                            type="password"
+                            autoComplete="new-password"
+                            value={password}
+                            onChange={(e) => setPassword(e.target.value)}
+                            disabled={isSubmitting}
+                            aria-describedby={formError ? "register-error" : "password-help"}
+                            required
+                            minLength={MIN_PASSWORD_LENGTH}
+                        />
+                        <span id="password-help" className="auth-field-hint">
+                            {t("auth.register.passwordHint", { count: MIN_PASSWORD_LENGTH })}
+                        </span>
+                    </div>
+                    <div className="auth-field">
+                        <label htmlFor="register-confirm-password">{t("auth.register.confirmPassword")}</label>
+                        <input
+                            id="register-confirm-password"
+                            name="confirm_password"
+                            type="password"
+                            autoComplete="new-password"
+                            value={confirmPassword}
+                            onChange={(e) => setConfirmPassword(e.target.value)}
+                            disabled={isSubmitting}
+                            aria-describedby={formError ? "register-error" : undefined}
+                            required
+                            minLength={MIN_PASSWORD_LENGTH}
+                        />
+                    </div>
+                    <button type="submit" className="auth-submit" disabled={isSubmitting} aria-busy={isSubmitting}>
+                        {isSubmitting ? t("auth.register.submitting") : t("auth.register.create")}
+                    </button>
+                </form>}
 
-                <label htmlFor="occupation">
-                    Occupation{!occupationRequired && " (optional)"}
-                </label>
-                <select
-                    id="occupation"
-                    name="occupation"
-                    value={occupation}
-                    onChange={(e) => setOccupation(e.target.value)}
-                    disabled={isSubmitting}
-                    required={occupationRequired}
-                >
-                    <option value="">Select your occupation</option>
-                    <option value="BODA_BODA_OPERATOR">Boda boda operator</option>
-                    <option value="MARKET_VENDOR">Market vendor</option>
-                    <option value="JUA_KALI_ARTISAN">Jua kali artisan</option>
-                    <option value="DOMESTIC_WORKER">Domestic worker</option>
-                    <option value="CASUAL_LABOURER">Casual labourer</option>
-                    <option value="SMALL_SCALE_FARMER">Small-scale farmer</option>
-                    <option value="OTHER_INFORMAL_WORKER">Other informal worker</option>
-                </select>
-
-                <label htmlFor="password">Password</label>
-                <input
-                    id="password"
-                    name="password"
-                    type="password"
-                    autoComplete="new-password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    disabled={isSubmitting}
-                    required
-                    minLength={MIN_PASSWORD_LENGTH}
-                />
-
-                <label htmlFor="confirm_password">Confirm password</label>
-                <input
-                    id="confirm_password"
-                    name="confirm_password"
-                    type="password"
-                    autoComplete="new-password"
-                    value={confirmPassword}
-                    onChange={(e) => setConfirmPassword(e.target.value)}
-                    disabled={isSubmitting}
-                    required
-                    minLength={MIN_PASSWORD_LENGTH}
-                />
-
-                <button type="submit" className="auth-submit" disabled={isSubmitting}>
-                    {isSubmitting ? "Creating account..." : "Create account"}
-                </button>
-
-                <p className="auth-footer">
-                    Already have an account? <Link to="/login">Sign in</Link>
-                </p>
-            </form>
-        </div>
+                {!registeredEmail && <p className="auth-footer">
+                    {t("auth.register.alreadyRegistered")} <Link to="/login">{t("auth.register.signIn")}</Link>
+                </p>}
+            </div>
+        </AuthLayout>
     );
 }
 

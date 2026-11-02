@@ -1,53 +1,89 @@
 import { Link } from "react-router-dom";
 import useApi from "../../hooks/useApi";
-import { listFunds } from "../../services/fundService";
-import { getPendingClaims } from "../../services/withdrawalService";
-import { listReports } from "../../services/complianceReportService";
+import { getFundPerformance } from "../../services/fundManagerApi";
+import { useAuth } from "../../context/AuthContext";
 import { StatCard } from "../../components/ui/Card";
-import LoadingState from "../../components/ui/LoadingState";
+import SkeletonLoader from "../../components/ui/SkeletonLoader";
 import ErrorState from "../../components/ui/ErrorState";
-import Button from "../../components/ui/Button";
+import LoadingState from "../../components/ui/LoadingState";
+import "./fund-manager-dashboard.css";
 
-function ManagerDashboard() {
-    const fundsApi = useApi(listFunds, []);
-    const pendingApi = useApi(getPendingClaims, []);
-    const reportsApi = useApi(listReports, []);
+const MANAGER_LINKS = [
+    { label: "Manage Funds", description: "Create and manage your fund records.", to: "/manager/funds" },
+    { label: "Fund Analytics", description: "Review current allocation shares and dated history.", to: "/manager/analytics" },
+    { label: "Withdrawal Requests", description: "Review worker withdrawal requests.", to: "/manager/withdrawal-requests" },
+    { label: "Reports", description: "Open operational reports.", to: "/manager/reports" },
+    { label: "Audit Logs", description: "Review recorded operational actions.", to: "/manager/audit-logs" },
+    { label: "Profile", description: "View your manager profile.", to: "/manager/profile" },
+];
 
-    const loading = fundsApi.loading || pendingApi.loading || reportsApi.loading;
-    if (loading) return <LoadingState message="Loading your dashboard..." />;
-    if (fundsApi.error) return <ErrorState message={fundsApi.error} onRetry={fundsApi.refetch} />;
+function formatCurrency(value) {
+    if (value === undefined || value === null || value === "" || !Number.isFinite(Number(value))) return "Unavailable";
+    return `KSh ${Number(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function formatCount(value) {
+    return value !== undefined && value !== null && Number.isFinite(Number(value))
+        ? Number(value).toLocaleString()
+        : "Unavailable";
+}
+
+function formatPercentage(value) {
+    if (value === undefined || value === null || value === "" || !Number.isFinite(Number(value))) return "Unavailable";
+    return `${Number(value).toFixed(2)}%`;
+}
+
+function FundManagerDashboard() {
+    const { user } = useAuth();
+    const performanceApi = useApi(getFundPerformance, []);
+    const performance = performanceApi.data;
+    const firstName = user?.full_name?.trim().split(/\s+/)[0];
 
     return (
-        <div>
-            <div className="page-header">
+        <div className="fund-manager-dashboard">
+            <header className="page-header fund-manager-dashboard-header">
                 <div>
-                    <h1 className="page-title">Fund Manager Dashboard</h1>
-                    <p className="page-subtitle">Overview of your funds and pending work.</p>
+                    <p className="fund-manager-eyebrow">Fund management</p>
+                    <h1 className="page-title">{firstName ? `Welcome, ${firstName}` : "Fund Manager Dashboard"}</h1>
+                    <p className="page-subtitle">A concise overview of managed funds and pension accounts.</p>
                 </div>
-            </div>
+            </header>
 
-            <div className="stat-card-grid">
-                <StatCard label="Funds Managed" value={(fundsApi.data || []).length} />
-                <StatCard label="Pending Withdrawal Requests" value={(pendingApi.data || []).length} />
-                <StatCard label="Compliance Reports Filed" value={(reportsApi.data || []).length} />
-            </div>
+            <section aria-label="Fund management summary">
+                {performanceApi.refreshing && <LoadingState message="Refreshing fund summary..." />}
+                {performanceApi.loading && performanceApi.data === null ? (
+                    <SkeletonLoader variant="metrics" count={4} label="Loading fund summary" />
+                ) : performanceApi.error && performanceApi.data === null ? (
+                    <ErrorState message={performanceApi.error} onRetry={performanceApi.refetch} />
+                ) : (
+                    <>
+                        {performanceApi.error && <ErrorState message={performanceApi.error} onRetry={performanceApi.refetch} />}
+                        <div className="stat-card-grid fund-manager-summary">
+                            <StatCard label="Total pension account balances" value={formatCurrency(performance?.total_assets)} hint="Across all pension accounts" />
+                            <StatCard label="Active pension accounts" value={formatCount(performance?.active_accounts)} />
+                            <StatCard label="Managed funds" value={formatCount(performance?.funds_managed)} />
+                            <StatCard label="Average expected return" value={formatPercentage(performance?.average_yield)} hint="Configured average for active managed funds" />
+                        </div>
+                    </>
+                )}
+            </section>
 
-            <div className="section card">
-                <h2 className="card-title">Quick actions</h2>
-                <div className="form-actions" style={{ justifyContent: "flex-start", flexWrap: "wrap" }}>
-                    <Link to="/manager/withdrawal-requests">
-                        <Button variant="primary">Review Withdrawal Requests</Button>
-                    </Link>
-                    <Link to="/manager/funds">
-                        <Button variant="secondary">Manage Funds</Button>
-                    </Link>
-                    <Link to="/manager/reports">
-                        <Button variant="secondary">File a Report</Button>
-                    </Link>
-                </div>
-            </div>
+            <nav className="fund-manager-dashboard-section fund-manager-quick-links" aria-label="Fund Manager features">
+                <p className="fund-manager-eyebrow">Your workspace</p>
+                <h2>Go to a feature</h2>
+                <ul>
+                    {MANAGER_LINKS.map((item) => (
+                        <li key={item.to}>
+                            <Link to={item.to}>
+                                <span>{item.label}</span>
+                                <small>{item.description}</small>
+                            </Link>
+                        </li>
+                    ))}
+                </ul>
+            </nav>
         </div>
     );
 }
 
-export default ManagerDashboard;
+export default FundManagerDashboard;

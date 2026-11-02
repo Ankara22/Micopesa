@@ -33,6 +33,7 @@ function AuditLogsPanel({ title, subtitle, fetcher }) {
                 rows={logsApi.data}
                 rowKey="log_id"
                 loading={logsApi.loading}
+                refreshing={logsApi.refreshing}
                 error={logsApi.error}
                 onRetry={logsApi.refetch}
                 emptyMessage="No audit log entries found."

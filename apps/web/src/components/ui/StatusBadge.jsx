@@ -11,6 +11,7 @@ const COLOR_MAP = {
 
     PENDING: "yellow",
     SUBMITTED: "yellow",
+    TIMED_OUT: "yellow",
 
     REJECTED: "red",
     FAILED: "red",
@@ -24,10 +25,10 @@ const COLOR_MAP = {
 };
 
 /** Renders a colored pill for any of the app's *_status enum values. */
-function StatusBadge({ status }) {
+function StatusBadge({ status, label }) {
     if (!status) return null;
     const color = COLOR_MAP[status] || "gray";
-    return <span className={`badge badge-${color}`}>{status}</span>;
+    return <span className={`badge badge-${color}`}>{label || status}</span>;
 }
 
 export default StatusBadge;

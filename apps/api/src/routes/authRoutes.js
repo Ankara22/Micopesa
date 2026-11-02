@@ -1,11 +1,28 @@
 ﻿const express = require("express");
-const { register, login, logout, getMe } = require("../controllers/authController");
+const {
+    register,
+    login,
+    logout,
+    getMe,
+    requestPasswordReset,
+    requestPublicEmailVerification,
+    resetPassword,
+    changeTemporaryPassword,
+    verifyEmail,
+    resendEmailVerification,
+} = require("../controllers/authController");
 const { requireAuth, requireRole } = require("../middleware/authMiddleware");
 
 const router = express.Router();
 
 router.post("/register", register);
 router.post("/login", login);
+router.post("/password-reset/request", requestPasswordReset);
+router.post("/email/verification-request/public", requestPublicEmailVerification);
+router.post("/password-reset", resetPassword);
+router.post("/change-password", requireAuth, changeTemporaryPassword);
+router.post("/email/verify", verifyEmail);
+router.post("/email/verification-request", requireAuth, resendEmailVerification);
 router.post("/logout", requireAuth, logout);
 router.get("/me", requireAuth, getMe);
 

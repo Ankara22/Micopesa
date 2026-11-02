@@ -1,0 +1,104 @@
+.financial-literacy-page {
+    min-width: 0;
+}
+
+.financial-literacy-page .page-header,
+.financial-literacy-page .worker-dashboard-literacy {
+    width: 100%;
+    min-width: 0;
+}
+
+.financial-literacy-page .worker-dashboard-literacy {
+    margin-top: 0;
+}
+
+.financial-literacy-articles {
+    min-width: 0;
+    margin-bottom: 24px;
+    padding: 20px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--bg);
+}
+
+.financial-literacy-articles h2,
+.financial-literacy-article h3 {
+    overflow-wrap: anywhere;
+}
+
+.financial-literacy-articles > header p,
+.financial-literacy-article p {
+    color: var(--text);
+}
+
+.financial-literacy-filters {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
+    gap: 12px;
+    margin: 16px 0;
+}
+
+.financial-literacy-filters label {
+    display: grid;
+    gap: 6px;
+    min-width: 0;
+}
+
+.financial-literacy-filters input,
+.financial-literacy-filters select {
+    width: 100%;
+    min-width: 0;
+    min-height: 42px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text-h);
+    background: var(--bg);
+    font: inherit;
+}
+
+.financial-literacy-article-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+    gap: 14px;
+}
+
+.financial-literacy-article {
+    min-width: 0;
+    padding: 16px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+}
+
+.financial-literacy-category {
+    color: var(--text);
+    font-size: 0.85rem;
+}
+
+.financial-literacy-article button {
+    min-height: 40px;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text-h);
+    background: var(--bg);
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.financial-literacy-article button:focus-visible,
+.financial-literacy-filters :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+.financial-literacy-article-body {
+    margin-top: 12px;
+    line-height: 1.65;
+    overflow-wrap: anywhere;
+}
+
+.financial-literacy-empty {
+    padding: 16px;
+}

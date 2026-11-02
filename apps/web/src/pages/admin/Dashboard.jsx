@@ -1,54 +1,82 @@
 import { Link } from "react-router-dom";
 import useApi from "../../hooks/useApi";
 import { getActivitySummary } from "../../services/adminService";
+import { useAuth } from "../../context/AuthContext";
 import { StatCard } from "../../components/ui/Card";
+import SkeletonLoader from "../../components/ui/SkeletonLoader";
 import LoadingState from "../../components/ui/LoadingState";
 import ErrorState from "../../components/ui/ErrorState";
-import Button from "../../components/ui/Button";
+import "./admin-dashboard.css";
+
+const ADMIN_LINKS = [
+    { label: "User Management", description: "Review accounts and update status.", to: "/admin/users" },
+    { label: "Roles & Permissions", description: "Manage user roles and access.", to: "/admin/roles" },
+    { label: "System Settings", description: "Manage configured platform settings.", to: "/admin/settings" },
+    { label: "Notifications", description: "Compose and review notifications.", to: "/admin/notifications" },
+    { label: "System Activity", description: "Review recorded activity and sessions.", to: "/admin/activity" },
+    { label: "Audit Logs", description: "Review recorded system actions.", to: "/admin/audit-logs" },
+    { label: "Profile", description: "View your administrator profile.", to: "/admin/profile" },
+];
+
+function getCount(value) {
+    const count = Number(value);
+    return Number.isFinite(count) ? count : 0;
+}
 
 function AdminDashboard() {
+    const { user } = useAuth();
     const summaryApi = useApi(getActivitySummary, []);
-
-    if (summaryApi.loading) return <LoadingState message="Loading system overview..." />;
-    if (summaryApi.error) return <ErrorState message={summaryApi.error} onRetry={summaryApi.refetch} />;
-
-    const summary = summaryApi.data || {};
-    const activeUsers = (summary.users_by_status || []).find((s) => s.account_status === "ACTIVE")?.count || 0;
-    const totalUsers = (summary.users_by_status || []).reduce((sum, s) => sum + s.count, 0);
+    const summary = summaryApi.data;
+    const usersByStatus = summary?.users_by_status || [];
+    const totalUsers = usersByStatus.reduce((total, item) => total + getCount(item.count), 0);
+    const activeUsers = getCount(usersByStatus.find((item) => item.account_status === "ACTIVE")?.count);
+    const auditActionCount = (summary?.audit_actions_last_24h || [])
+        .reduce((total, item) => total + getCount(item.count), 0);
+    const firstName = user?.full_name?.trim().split(/\s+/)[0];
 
     return (
-        <div>
-            <div className="page-header">
+        <div className="admin-dashboard">
+            <header className="page-header admin-dashboard-header">
                 <div>
-                    <h1 className="page-title">Admin Dashboard</h1>
-                    <p className="page-subtitle">Platform-wide system overview.</p>
+                    <p className="admin-dashboard-eyebrow">Administration</p>
+                    <h1 className="page-title">{firstName ? `Welcome, ${firstName}` : "Admin Dashboard"}</h1>
+                    <p className="page-subtitle">A concise overview of platform accounts and recorded activity.</p>
                 </div>
-            </div>
+            </header>
 
-            <div className="stat-card-grid">
-                <StatCard label="Total Users" value={totalUsers} />
-                <StatCard label="Active Users" value={activeUsers} />
-                <StatCard label="Active USSD Sessions" value={summary.active_sessions ?? 0} />
-                <StatCard
-                    label="Audit Actions (24h)"
-                    value={(summary.audit_actions_last_24h || []).reduce((sum, a) => sum + a.count, 0)}
-                />
-            </div>
+            <section className="admin-dashboard-section" aria-label="Platform summary">
+                {summaryApi.refreshing && <LoadingState message="Refreshing platform summary..." />}
+                {summaryApi.loading && summaryApi.data === null ? (
+                    <SkeletonLoader variant="metrics" count={4} label="Loading platform summary" />
+                ) : summaryApi.error && summaryApi.data === null ? (
+                    <ErrorState message={summaryApi.error} onRetry={summaryApi.refetch} />
+                ) : (
+                    <>
+                        {summaryApi.error && <ErrorState message={summaryApi.error} onRetry={summaryApi.refetch} />}
+                        <div className="stat-card-grid admin-dashboard-stats">
+                            <StatCard label="Total users" value={totalUsers} />
+                            <StatCard label="Active users" value={activeUsers} />
+                            <StatCard label="Active USSD sessions" value={getCount(summary?.active_sessions)} />
+                            <StatCard label="Audit actions (24 hours)" value={auditActionCount} />
+                        </div>
+                    </>
+                )}
+            </section>
 
-            <div className="section card">
-                <h2 className="card-title">Quick actions</h2>
-                <div className="form-actions" style={{ justifyContent: "flex-start", flexWrap: "wrap" }}>
-                    <Link to="/admin/users">
-                        <Button variant="primary">Manage Users</Button>
-                    </Link>
-                    <Link to="/admin/settings">
-                        <Button variant="secondary">System Settings</Button>
-                    </Link>
-                    <Link to="/admin/notifications">
-                        <Button variant="secondary">Send Notification</Button>
-                    </Link>
-                </div>
-            </div>
+            <nav className="admin-dashboard-card admin-dashboard-navigation" aria-label="Administration pages">
+                <p className="admin-dashboard-eyebrow">Administration</p>
+                <h2>Go to a feature</h2>
+                <ul>
+                    {ADMIN_LINKS.map((item) => (
+                        <li key={item.to}>
+                            <Link to={item.to}>
+                                <span>{item.label}</span>
+                                <small>{item.description}</small>
+                            </Link>
+                        </li>
+                    ))}
+                </ul>
+            </nav>
         </div>
     );
 }

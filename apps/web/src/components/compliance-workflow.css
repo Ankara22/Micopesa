@@ -1,0 +1,81 @@
+.compliance-workflow {
+    min-width: 0;
+}
+
+.compliance-actions,
+.compliance-filter-actions,
+.compliance-period-fields,
+.compliance-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+}
+
+.compliance-filters {
+    align-items: end;
+    margin: 0 0 1.25rem;
+    padding: 1rem;
+    border: 1px solid var(--border-color, #dce3ea);
+    border-radius: 0.75rem;
+    background: var(--surface-color, #fff);
+}
+
+.compliance-filters > .form-field {
+    flex: 1 1 12rem;
+    min-width: 10rem;
+}
+
+.compliance-period-fields {
+    flex: 1 1 100%;
+}
+
+.compliance-period-fields > .form-field {
+    flex: 1 1 11rem;
+}
+
+.compliance-filter-actions {
+    align-items: center;
+}
+
+.compliance-evidence-note {
+    margin: 0;
+    color: var(--text-muted, #566273);
+}
+
+.compliance-report-detail {
+    display: grid;
+    gap: 1rem;
+    overflow-wrap: anywhere;
+}
+
+.compliance-report-detail h3,
+.compliance-report-detail h4,
+.compliance-report-detail p {
+    margin-top: 0;
+}
+
+.compliance-report-summary,
+.compliance-content-section,
+.compliance-history-item,
+.compliance-decision {
+    padding: 0.9rem;
+    border: 1px solid var(--border-color, #dce3ea);
+    border-radius: 0.65rem;
+}
+
+.compliance-report-summary p:last-child,
+.compliance-content-section p:last-child,
+.compliance-history-item p:last-child {
+    margin-bottom: 0;
+}
+
+.compliance-history-item small {
+    color: var(--text-muted, #566273);
+}
+
+@media (max-width: 600px) {
+    .compliance-actions > .btn,
+    .compliance-filter-actions > .btn {
+        flex: 1 1 auto;
+    }
+}

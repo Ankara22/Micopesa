@@ -84,6 +84,7 @@ async function listNotifications(req, res) {
 /**
  * GET /api/notifications/my
  * Returns only notifications addressed to the authenticated user.
+ * Workers, fund managers, and regulators share this recipient-scoped inbox.
  */
 async function getMyNotifications(req, res) {
     try {
@@ -98,7 +99,7 @@ async function getMyNotifications(req, res) {
 
         return res.status(200).json({ status: "success", data: result.rows });
     } catch (error) {
-        console.error("Failed to fetch worker notifications:", error);
+        console.error("Failed to fetch user notifications:", error);
         return res.status(500).json({
             status: "error",
             message: "Failed to fetch notifications due to a server error",

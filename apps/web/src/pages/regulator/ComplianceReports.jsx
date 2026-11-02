@@ -1,12 +1,7 @@
-import ComplianceReportsPanel from "../../components/ComplianceReportsPanel";
+import ComplianceReview from "./ComplianceReview";
 
 function ComplianceReports() {
-    return (
-        <ComplianceReportsPanel
-            title="Compliance Reports"
-            subtitle="Review and file RBA/NSSF compliance reports."
-        />
-    );
+    return <ComplianceReview />;
 }
 
 export default ComplianceReports;

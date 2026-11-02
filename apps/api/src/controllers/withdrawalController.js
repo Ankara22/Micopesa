@@ -1,4 +1,9 @@
 const pool = require("../db/database");
+const {
+    calculateAvailableBalance,
+    getWithdrawalAvailability,
+    reviewWithdrawalClaim: reviewClaimTransaction,
+} = require("../services/withdrawalService");
 
 const ELIGIBLE_ACCOUNT_STATUSES = ["ACTIVE"];
 
@@ -45,13 +50,15 @@ async function checkEligibility(req, res) {
 
         const balance = Number(account.current_balance);
         const pendingExists = await hasPendingClaim(account.account_id);
+        const reservedAmount = Number(await getWithdrawalAvailability(pool, account.account_id));
+        const availableBalance = calculateAvailableBalance(balance, reservedAmount);
 
         const reasons = [];
         if (!ELIGIBLE_ACCOUNT_STATUSES.includes(account.account_status)) {
             reasons.push(`Account status is ${account.account_status}, must be ACTIVE`);
         }
-        if (balance <= 0) {
-            reasons.push("Account balance must be greater than zero");
+        if (availableBalance <= 0) {
+            reasons.push("Available balance must be greater than zero");
         }
         if (pendingExists) {
             reasons.push("An existing withdrawal claim is already pending review");
@@ -63,6 +70,8 @@ async function checkEligibility(req, res) {
                 eligible: reasons.length === 0,
                 reasons,
                 current_balance: account.current_balance,
+                reserved_withdrawal_amount: reservedAmount,
+                available_balance: availableBalance,
                 account_status: account.account_status,
             },
         });
@@ -77,19 +86,27 @@ async function checkEligibility(req, res) {
 
 /**
  * POST /api/withdrawals
- * WORKER only. Body: { amount_requested, destination_phone }
+ * WORKER only. Body: { amount_requested, destination_phone, withdrawal_reason }
  * Identity/account is derived strictly from req.user.userId.
  */
 async function submitClaim(req, res) {
     const { userId } = req.user;
-    const { amount_requested, destination_phone } = req.body;
+    const { amount_requested, destination_phone, withdrawal_reason } = req.body;
     const amount = Number(amount_requested);
 
-    if (amount_requested === undefined || !destination_phone) {
+    if (amount_requested === undefined || !destination_phone || !withdrawal_reason) {
         return res.status(400).json({
             status: "error",
-            message: "amount_requested and destination_phone are required",
+            message: "amount_requested, destination_phone, and withdrawal_reason are required",
         });
+    }
+
+    if (typeof destination_phone !== "string" || destination_phone.trim().length === 0 || destination_phone.trim().length > 15) {
+        return res.status(400).json({ status: "error", message: "destination_phone must be a valid phone number" });
+    }
+
+    if (typeof withdrawal_reason !== "string" || withdrawal_reason.trim().length < 3 || withdrawal_reason.trim().length > 255) {
+        return res.status(400).json({ status: "error", message: "withdrawal_reason must be between 3 and 255 characters" });
     }
 
     if (!Number.isFinite(amount) || amount <= 0) {
@@ -99,10 +116,17 @@ async function submitClaim(req, res) {
         });
     }
 
+    const client = await pool.connect();
     try {
-        const account = await findAccountForUser(userId);
+        await client.query("BEGIN");
+        const accountResult = await client.query(
+            "SELECT account_id, current_balance, account_status FROM pension_accounts WHERE user_id = $1 FOR UPDATE",
+            [userId]
+        );
+        const account = accountResult.rows[0] || null;
 
         if (!account) {
+            await client.query("ROLLBACK");
             return res.status(404).json({
                 status: "error",
                 message: "No pension account found for this user yet",
@@ -110,45 +134,59 @@ async function submitClaim(req, res) {
         }
 
         if (account.account_status !== "ACTIVE") {
+            await client.query("ROLLBACK");
             return res.status(403).json({
                 status: "error",
                 message: `Cannot submit a withdrawal claim: account status is ${account.account_status}`,
             });
         }
 
-        const balance = Number(account.current_balance);
-        if (amount > balance) {
+        const reservedAmount = Number(await getWithdrawalAvailability(client, account.account_id));
+        const availableBalance = calculateAvailableBalance(account.current_balance, reservedAmount);
+        if (amount > availableBalance) {
+            await client.query("ROLLBACK");
             return res.status(400).json({
                 status: "error",
-                message: "amount_requested cannot exceed the current account balance",
+                message: "amount_requested cannot exceed the available balance after approved withdrawals",
             });
         }
 
-        if (await hasPendingClaim(account.account_id)) {
+        const pending = await client.query(
+            "SELECT 1 FROM withdrawal_claims WHERE account_id = $1 AND claim_status = 'PENDING' LIMIT 1",
+            [account.account_id]
+        );
+        if (pending.rows.length > 0) {
+            await client.query("ROLLBACK");
             return res.status(409).json({
                 status: "error",
                 message: "A withdrawal claim is already pending review for this account",
             });
         }
 
-        const result = await pool.query(
-            `INSERT INTO withdrawal_claims (account_id, amount_requested, destination_phone)
-             VALUES ($1, $2, $3)
-             RETURNING claim_id, account_id, amount_requested, destination_phone, claim_status, requested_at`,
-            [account.account_id, amount, destination_phone]
+        const result = await client.query(
+            `INSERT INTO withdrawal_claims
+                (account_id, amount_requested, destination_phone, withdrawal_reason)
+             VALUES ($1, $2, $3, $4)
+             RETURNING claim_id, account_id, amount_requested, destination_phone,
+                       withdrawal_reason, claim_status, requested_at`,
+            [account.account_id, amount, destination_phone.trim(), withdrawal_reason.trim()]
         );
 
+        await client.query("COMMIT");
         return res.status(201).json({
             status: "success",
             message: "Withdrawal claim submitted successfully",
-            data: { claim: result.rows[0] },
+            data: { claim: result.rows[0], available_balance: availableBalance },
         });
     } catch (error) {
+        await client.query("ROLLBACK");
         console.error("Failed to submit withdrawal claim:", error);
         return res.status(500).json({
             status: "error",
             message: "Failed to submit withdrawal claim due to a server error",
         });
+    } finally {
+        client.release();
     }
 }
 
@@ -171,7 +209,7 @@ async function getMyClaims(req, res) {
 
         const result = await pool.query(
             `SELECT claim_id, account_id, reviewed_by, transaction_id, amount_requested,
-                    destination_phone, claim_status, requested_at, reviewed_at, processed_at
+                    destination_phone, withdrawal_reason, claim_status, requested_at, reviewed_at, processed_at
              FROM withdrawal_claims
              WHERE account_id = $1
              ORDER BY requested_at DESC`,
@@ -190,17 +228,18 @@ async function getMyClaims(req, res) {
 
 /**
  * GET /api/withdrawals/pending
- * FUND_MANAGER only. All claims awaiting review, oldest first (FIFO queue).
+ * FUND_MANAGER only. Pending claims and approved unpaid reservations, oldest first.
  */
 async function getPendingClaims(req, res) {
     try {
         const result = await pool.query(
             `SELECT wc.claim_id, wc.account_id, pa.user_id, u.full_name, u.phone,
-                    wc.amount_requested, wc.destination_phone, wc.claim_status, wc.requested_at
+                    wc.amount_requested, wc.destination_phone, wc.withdrawal_reason,
+                    wc.claim_status, wc.requested_at
              FROM withdrawal_claims wc
              JOIN pension_accounts pa ON pa.account_id = wc.account_id
              JOIN users u ON u.user_id = pa.user_id
-             WHERE wc.claim_status = 'PENDING'
+             WHERE wc.claim_status IN ('PENDING', 'APPROVED')
              ORDER BY wc.requested_at ASC`
         );
 
@@ -225,45 +264,29 @@ async function reviewClaim(req, res, decision) {
     const { userId } = req.user;
     const { claimId } = req.params;
 
+    const client = await pool.connect();
     try {
-        const claimResult = await pool.query(
-            "SELECT claim_id, claim_status FROM withdrawal_claims WHERE claim_id = $1",
-            [claimId]
-        );
-
-        if (claimResult.rows.length === 0) {
-            return res.status(404).json({ status: "error", message: "Withdrawal claim not found" });
-        }
-
-        if (claimResult.rows[0].claim_status !== "PENDING") {
-            return res.status(409).json({
-                status: "error",
-                message: `Claim has already been ${claimResult.rows[0].claim_status.toLowerCase()}`,
-            });
-        }
-
+        await client.query("BEGIN");
         const newStatus = decision === "approve" ? "APPROVED" : "REJECTED";
-
-        const result = await pool.query(
-            `UPDATE withdrawal_claims
-             SET reviewed_by = $1, claim_status = $2, reviewed_at = now()
-             WHERE claim_id = $3
-             RETURNING claim_id, account_id, reviewed_by, amount_requested, destination_phone,
-                       claim_status, requested_at, reviewed_at`,
-            [userId, newStatus, claimId]
-        );
-
+        const claim = await reviewClaimTransaction(client, { userId, claimId, decision: newStatus });
+        await client.query("COMMIT");
         return res.status(200).json({
             status: "success",
             message: `Claim ${newStatus.toLowerCase()} successfully`,
-            data: { claim: result.rows[0] },
+            data: { claim },
         });
     } catch (error) {
+        await client.query("ROLLBACK");
+        if (error.statusCode) {
+            return res.status(error.statusCode).json({ status: "error", message: error.message });
+        }
         console.error("Failed to review withdrawal claim:", error);
         return res.status(500).json({
             status: "error",
             message: "Failed to review withdrawal claim due to a server error",
         });
+    } finally {
+        client.release();
     }
 }
 
