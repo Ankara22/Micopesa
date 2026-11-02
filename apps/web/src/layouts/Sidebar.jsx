@@ -1,6 +1,7 @@
 import { NavLink } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { ROLE_NAV } from "../routes/roleRoutes";
+import { useTranslation } from "react-i18next";
 import "./layout.css";
 
 /**
@@ -10,11 +11,12 @@ import "./layout.css";
  */
 function Sidebar({ open, onNavigate }) {
     const { user } = useAuth();
+    const { t } = useTranslation();
     const items = ROLE_NAV[user?.role] || [];
 
     return (
         <aside className={`app-sidebar ${open ? "open" : ""}`.trim()}>
-            <nav aria-label="Main navigation">
+            <nav aria-label={t("navigation.mainNavigation")}>
                 <ul>
                     {items.map((item) => (
                         <li key={item.path}>
@@ -24,7 +26,7 @@ function Sidebar({ open, onNavigate }) {
                                 onClick={onNavigate}
                                 end
                             >
-                                {item.label}
+                                {t(item.translationKey, { defaultValue: item.label })}
                             </NavLink>
                         </li>
                     ))}

@@ -3,10 +3,12 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../../context/AuthContext";
 import { DASHBOARD_BY_ROLE, ROLE_PATH_PREFIX } from "../../routes/roleRoutes";
 import AuthLayout from "./AuthLayout";
+import { useTranslation } from "react-i18next";
 import "./auth.css";
 
 function Login() {
     const { login } = useAuth();
+    const { t } = useTranslation();
     const navigate = useNavigate();
     const location = useLocation();
 
@@ -23,7 +25,7 @@ function Login() {
 
         const normalizedPhone = phone.trim();
         if (!normalizedPhone || !password) {
-            setFormError("Phone number and password are required.");
+            setFormError("auth.login.phoneRequired");
             return;
         }
 
@@ -32,7 +34,7 @@ function Login() {
         try {
             const result = await login(normalizedPhone, password);
             if (!result.success) {
-                setFormError("We couldn't sign you in. Check your details or try again later.");
+                setFormError("auth.login.invalidCredentials");
                 return;
             }
 
@@ -48,7 +50,7 @@ function Login() {
                 "/";
             navigate(redirectTo, { replace: true });
         } catch {
-            setFormError("Unable to sign in right now. Please try again.");
+            setFormError("auth.login.genericError");
         } finally {
             submissionInProgress.current = false;
             setIsSubmitting(false);
@@ -58,26 +60,26 @@ function Login() {
     return (
         <AuthLayout>
             <div className="auth-card">
-                <p className="auth-eyebrow auth-card-eyebrow">Welcome back</p>
-                <h1>Sign in</h1>
-                <p className="auth-subtitle">Use your registered phone number to continue.</p>
+                <p className="auth-eyebrow auth-card-eyebrow">{t("auth.login.welcome")}</p>
+                <h1>{t("auth.login.title")}</h1>
+                <p className="auth-subtitle">{t("auth.login.phonePrompt")}</p>
 
                 {formError && (
                     <div className="auth-error" id="login-error" role="alert">
-                        {formError}
+                        {t(formError)}
                     </div>
                 )}
 
                 <form className="auth-form" onSubmit={handleSubmit} noValidate>
                     <div className="auth-field">
-                        <label htmlFor="login-phone">Phone number</label>
+                        <label htmlFor="login-phone">{t("auth.login.phone")}</label>
                         <input
                             id="login-phone"
                             name="phone"
                             type="tel"
                             autoComplete="tel"
                             inputMode="tel"
-                            placeholder="+254 700 000 000"
+                            placeholder={t("auth.login.phonePlaceholder")}
                             value={phone}
                             onChange={(e) => setPhone(e.target.value)}
                             disabled={isSubmitting}
@@ -86,7 +88,7 @@ function Login() {
                         />
                     </div>
                     <div className="auth-field">
-                        <label htmlFor="login-password">Password</label>
+                        <label htmlFor="login-password">{t("auth.login.password")}</label>
                         <input
                             id="login-password"
                             name="password"
@@ -100,12 +102,12 @@ function Login() {
                         />
                     </div>
                     <button type="submit" className="auth-submit" disabled={isSubmitting}>
-                        {isSubmitting ? "Signing in…" : "Sign in"}
+                        {isSubmitting ? t("auth.login.submitting") : t("auth.login.signIn")}
                     </button>
                 </form>
 
                 <p className="auth-footer">
-                    New to MicoPesa? <Link to="/register">Create an account</Link>
+                    {t("auth.login.newToMicoPesa")} <Link to="/register">{t("auth.login.createAccount")}</Link>
                 </p>
             </div>
         </AuthLayout>

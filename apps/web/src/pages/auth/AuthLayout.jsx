@@ -1,7 +1,13 @@
+import { useTranslation } from "react-i18next";
+import LanguageSwitcher from "../../components/LanguageSwitcher";
+
 function AuthLayout({ children }) {
+    const { t } = useTranslation();
+
     return (
         <main className="auth-page">
             <div className="auth-decoration" aria-hidden="true" />
+            <LanguageSwitcher className="auth-language-switcher" />
             <div className="auth-shell">
                 <aside className="auth-intro">
                     <div className="auth-brand" aria-label="MicoPesa">
@@ -14,18 +20,17 @@ function AuthLayout({ children }) {
                         <span>MicoPesa</span>
                     </div>
                     <div className="auth-intro-copy">
-                        <p className="auth-eyebrow">Micro-pension account</p>
-                        <h2>Make room for your future.</h2>
+                        <p className="auth-eyebrow">{t("auth.layout.eyebrow")}</p>
+                        <h2>{t("auth.layout.headline")}</h2>
                         <p>
-                            Sign in to manage your MicoPesa account, or register to
-                            get started with your micro-pension journey.
+                            {t("auth.layout.description")}
                         </p>
                     </div>
                     <p className="auth-intro-footnote">
-                        A clear view of your account, contributions and retirement plan.
+                        {t("auth.layout.footnote")}
                     </p>
                 </aside>
-                <section className="auth-panel" aria-label="Account access">
+                <section className="auth-panel" aria-label={t("auth.layout.accountAccess")}>
                     {children}
                 </section>
             </div>
