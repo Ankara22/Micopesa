@@ -9,6 +9,9 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      TEST_DATABASE_URL: postgresql://test-user:test-password@127.0.0.1:5432/micopesa_test
+      TEST_DATABASE_ADMIN_URL: postgresql://test-user:test-password@127.0.0.1:5432/postgres
     services:
       postgres:
         image: postgres:16
@@ -34,7 +37,6 @@ jobs:
             apps/web/package-lock.json
       - run: npm ci --prefix apps/api
       - run: npm ci --prefix apps/web
-      - run: npm run db:test:setup
       - run: npm run lint
       - run: npm run test:coverage
       - uses: actions/upload-artifact@v4
