@@ -1,5 +1,6 @@
 import { lazy, Suspense } from "react";
 import { Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import useApi from "../../hooks/useApi";
 import { getComplianceOverview, getComplianceReports } from "../../services/regulatorApi";
 import { getOperationalLogs } from "../../services/auditLogService";
@@ -22,23 +23,19 @@ const REGULATOR_LINKS = [
 ];
 
 function getFundOverview() {
-    return listFunds().then(async (funds) => {
-        const allocations = await Promise.all(
-            funds.map(async (fund) => ({
-                fund,
-                allocationCount: (await getFundAllocations(fund.fund_id)).length,
-            }))
-        );
-        return allocations;
-    });
+    return listFunds().then(async (funds) => Promise.all(
+        funds.map(async (fund) => ({
+            fund,
+            allocationCount: (await getFundAllocations(fund.fund_id)).length,
+        }))
+    ));
 }
 
-function formatDate(value, includeTime = false) {
+function formatDate(value, includeTime = false, locale) {
     if (!value) return "Unavailable";
     const date = new Date(value);
-    return Number.isNaN(date.getTime())
-        ? "Unavailable"
-        : includeTime ? date.toLocaleString() : date.toLocaleDateString();
+    if (Number.isNaN(date.getTime())) return "Unavailable";
+    return includeTime ? date.toLocaleString(locale) : date.toLocaleDateString(locale);
 }
 
 function getCount(value) {
@@ -46,14 +43,8 @@ function getCount(value) {
     return Number.isFinite(count) ? count : 0;
 }
 
-const REPORT_COLUMNS = [
-    { key: "report_type", header: "Report type" },
-    { key: "period_start", header: "Period", render: (row) => `${formatDate(row.period_start)} – ${formatDate(row.period_end)}` },
-    { key: "rba_status", header: "Recorded status", render: (row) => <StatusBadge status={row.rba_status} /> },
-    { key: "generated_at", header: "Generated", render: (row) => formatDate(row.generated_at, true) },
-];
-
 function RegulatorDashboard() {
+    const { t, i18n } = useTranslation();
     const { user } = useAuth();
     const complianceApi = useApi(getComplianceOverview, []);
     const reportsApi = useApi(getComplianceReports, []);
@@ -75,6 +66,22 @@ function RegulatorDashboard() {
         (sum, item) => sum + getCount(item.count),
         0
     );
+    const submittedReports = (reportsApi.data || [])
+        .filter((report) => report.rba_status === "SUBMITTED" && !report.is_legacy_history)
+        .slice(0, 5);
+    const dateLocale = i18n.resolvedLanguage?.startsWith("sw") ? "sw-KE" : "en-KE";
+    const legacyReportColumns = [
+        { key: "report_type", header: "Report type" },
+        { key: "period_start", header: "Period", render: (row) => `${formatDate(row.period_start, false, dateLocale)} – ${formatDate(row.period_end, false, dateLocale)}` },
+        { key: "rba_status", header: "Recorded status", render: (row) => <StatusBadge status={row.rba_status} /> },
+        { key: "generated_at", header: "Generated", render: (row) => formatDate(row.generated_at, true, dateLocale) },
+    ];
+    const submittedReportColumns = [
+        { key: "fund_name", header: t("regulator.dashboard.fund"), render: (report) => report.fund_name || t("regulator.dashboard.unavailable") },
+        { key: "manager_name", header: t("regulator.dashboard.fundManager"), render: (report) => report.manager_name || t("regulator.dashboard.formerManager") },
+        { key: "rba_status", header: t("regulator.dashboard.status"), render: (report) => <StatusBadge status={report.rba_status} /> },
+        { key: "last_submitted_at", header: t("regulator.dashboard.lastSubmitted"), render: (report) => formatDate(report.last_submitted_at || report.submitted_at, true, dateLocale) },
+    ];
 
     return (
         <div className="regulator-dashboard">
@@ -82,7 +89,7 @@ function RegulatorDashboard() {
                 <div>
                     <p className="regulator-dashboard-eyebrow">Oversight and transparency</p>
                     <h1 className="page-title">{firstName ? `Welcome, ${firstName}` : "Regulator Dashboard"}</h1>
-                    <p className="page-subtitle">Review recorded compliance reports, funds, and operational audit events.</p>
+                    <p className="page-subtitle">A concise overview of recorded compliance and operational health.</p>
                 </div>
             </header>
 
@@ -92,13 +99,13 @@ function RegulatorDashboard() {
                 ) : complianceApi.error ? (
                     <ErrorState message={complianceApi.error} onRetry={complianceApi.refetch} />
                 ) : (
-                    <>
+                    <div className="regulator-dashboard-overview-content">
                         <div className="stat-card-grid regulator-dashboard-stats">
                             <StatCard
                                 label="Audit events (24 hours)"
                                 value={auditHealth.events_last_24h ?? "Unavailable"}
                                 hint={auditHealth.last_event_at
-                                    ? `Most recent ${formatDate(auditHealth.last_event_at, true)}`
+                                    ? `Most recent ${formatDate(auditHealth.last_event_at, true, dateLocale)}`
                                     : "No recent event timestamp available"}
                             />
                             <StatCard
@@ -124,7 +131,7 @@ function RegulatorDashboard() {
                                 <p>{parameterChecks?.details || "Parameter-check configuration status is unavailable."}</p>
                             </div>
                         </section>
-                    </>
+                    </div>
                 )}
             </section>
 
@@ -159,13 +166,35 @@ function RegulatorDashboard() {
                     These are reports recorded in MicoPesa. Their presence does not establish external filing or acceptance.
                 </p>
                 <DataTable
-                    columns={REPORT_COLUMNS}
+                    columns={legacyReportColumns}
                     rows={reports.slice(0, 5)}
                     rowKey="report_id"
                     loading={reportsApi.loading}
                     error={reportsApi.error}
                     onRetry={reportsApi.refetch}
                     emptyMessage="No compliance reports are available in the report register."
+                />
+            </section>
+
+            <section className="regulator-dashboard-section" aria-labelledby="submitted-reports-heading">
+                <div className="regulator-dashboard-section-heading">
+                    <h2 id="submitted-reports-heading">{t("regulator.dashboard.submittedReports")}</h2>
+                    <Link className="regulator-dashboard-link" to="/regulator/compliance-reports">
+                        {t("regulator.dashboard.viewAllReports")}
+                    </Link>
+                </div>
+                <DataTable
+                    columns={submittedReportColumns}
+                    rows={submittedReports}
+                    rowKey="report_id"
+                    loading={reportsApi.loading}
+                    refreshing={reportsApi.refreshing}
+                    error={reportsApi.error}
+                    onRetry={reportsApi.refetch}
+                    emptyMessage={t("regulator.dashboard.emptyReports")}
+                    loadingLabel={t("regulator.dashboard.loadingReports")}
+                    refreshingLabel={t("regulator.dashboard.refreshingReports")}
+                    errorTitle={t("regulator.dashboard.reportsErrorTitle")}
                 />
             </section>
 
@@ -188,7 +217,7 @@ function RegulatorDashboard() {
                                 <li key={event.log_id}>
                                     <strong>{event.action_type || "Action unavailable"}</strong>
                                     <span>{event.full_name || "System"} · {event.entity_name || "Record"}</span>
-                                    <time dateTime={event.timestamp}>{formatDate(event.timestamp, true)}</time>
+                                    <time dateTime={event.timestamp}>{formatDate(event.timestamp, true, dateLocale)}</time>
                                 </li>
                             ))}
                         </ol>
@@ -236,11 +265,11 @@ function RegulatorDashboard() {
                 </section>
             </div>
 
-            <nav className="regulator-dashboard-section regulator-dashboard-navigation" aria-labelledby="regulator-quick-links-title">
+            <nav className="regulator-dashboard-section regulator-dashboard-navigation" aria-label="Regulator features">
                 <div className="regulator-dashboard-section-heading">
                     <div>
                         <p className="regulator-dashboard-eyebrow">Navigation</p>
-                        <h2 id="regulator-quick-links-title">Quick access</h2>
+                        <h2>Quick access</h2>
                     </div>
                 </div>
                 <ul>

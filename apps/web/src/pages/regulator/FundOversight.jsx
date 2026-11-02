@@ -56,6 +56,7 @@ function FundOversight() {
                 rows={fundsApi.data}
                 rowKey="fund_id"
                 loading={fundsApi.loading}
+                refreshing={fundsApi.refreshing}
                 error={fundsApi.error}
                 onRetry={fundsApi.refetch}
                 emptyMessage="No funds have been created yet."
@@ -67,6 +68,7 @@ function FundOversight() {
                     rows={allocationsApi.data}
                     rowKey="allocation_id"
                     loading={allocationsApi.loading}
+                    refreshing={allocationsApi.refreshing}
                     error={allocationsApi.error}
                     emptyMessage="No allocations recorded for this fund."
                 />

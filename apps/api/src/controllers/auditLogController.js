@@ -2,7 +2,7 @@ const pool = require("../db/database");
 
 const BASE_QUERY = `
     SELECT al.log_id, al.user_id, u.full_name, u.role AS user_role,
-           al.action_type, al.entity_name, al.entity_id, al."timestamp"
+           al.action_type, al.entity_name, al.entity_id, al.details, al."timestamp"
     FROM audit_logs al
     LEFT JOIN users u ON u.user_id = al.user_id
 `;
