@@ -15,6 +15,7 @@ import SkeletonLoader from "./ui/SkeletonLoader";
 import StatusBadge from "./ui/StatusBadge";
 import Button from "./ui/Button";
 import UserAvatar from "./UserAvatar";
+import PhoneNumberChange from "./PhoneNumberChange";
 import { formatDate as formatLocaleDate } from "../i18n/formatters";
 import "./ProfileCard.css";
 
@@ -91,14 +92,14 @@ function ProfileCard() {
         ? t(`worker.profile.${key}`)
         : fallback;
 
-    const loadProfile = useCallback(async () => {
+    const loadProfile = useCallback(async ({ silent = false } = {}) => {
         const request = beginProfileRequest();
         if (!request) {
             setError("sessionUnavailable");
             setLoading(false);
             return;
         }
-        setLoading(true);
+        if (!silent) setLoading(true);
         setError("");
         try {
             const savedProfile = await getMyProfile();
@@ -435,10 +436,6 @@ function ProfileCard() {
                     )}
                     <dl className="profile-details">
                         <div className="profile-detail">
-                            <dt><span className="profile-detail-icon" aria-hidden="true">☎</span>{profileText("registeredPhone", "Registered phone")}</dt>
-                            <dd>{displayValue(profile.phone, profileText("notProvided", "Not provided"))}</dd>
-                        </div>
-                        <div className="profile-detail">
                             <dt><span className="profile-detail-icon" aria-hidden="true">▧</span>{profileText("occupation", "Occupation")}</dt>
                             <dd>{profile.occupation
                                 ? isWorker
@@ -468,10 +465,14 @@ function ProfileCard() {
                             <dd>{formatDate(profile.created_at, i18n.language, profileText("notProvided", "Not provided"))}</dd>
                         </div>
                     </dl>
+                    <PhoneNumberChange
+                        currentPhone={profile.phone}
+                        onVerified={() => loadProfile({ silent: true })}
+                    />
                     <p className="profile-readonly-note">
                         {isWorker
                             ? t("worker.profile.readonlyNote")
-                            : "Profile changes update only your name, email address, or photo. Your phone, role, account status, and permissions cannot be changed here."}
+                            : "Profile changes affect only your name, email, photo, and verified phone number. Your role, account status, and permissions cannot be changed here."}
                     </p>
                 </Card>
 

@@ -105,7 +105,7 @@ function Register() {
     }
 
     return (
-        <AuthLayout>
+        <AuthLayout variant="register">
             <div className="auth-card auth-card-register">
                 <p className="auth-eyebrow auth-card-eyebrow">{t("auth.register.eyebrow")}</p>
                 <h1>{registeredEmail ? t("auth.register.verifyTitle") : t("auth.register.title")}</h1>

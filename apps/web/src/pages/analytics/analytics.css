@@ -1,0 +1,81 @@
+.role-analytics-page {
+    width: 100%;
+    min-width: 0;
+}
+
+.role-analytics-page .page-header {
+    margin-bottom: 20px;
+}
+
+.analytics-navigation {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    margin: -4px 0 16px;
+    color: var(--accent-text);
+    font-weight: 700;
+    text-underline-offset: 3px;
+}
+
+.analytics-navigation:focus-visible,
+.analytics-filter-reset:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+    border-radius: 3px;
+}
+
+.analytics-filter-bar {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+    gap: 12px;
+    margin: 0 0 20px;
+    padding: 16px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--bg);
+}
+
+.analytics-filter-bar label {
+    display: grid;
+    gap: 6px;
+    color: var(--text-h);
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.analytics-filter-bar input,
+.analytics-filter-bar select {
+    width: 100%;
+    min-height: 42px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg);
+    color: var(--text-h);
+    font: inherit;
+}
+
+.analytics-filter-reset {
+    justify-self: start;
+    align-self: end;
+    min-height: 42px;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--accent-text);
+    font: inherit;
+    font-weight: 650;
+    cursor: pointer;
+}
+
+.analytics-chart-grid {
+    margin-top: 8px;
+}
+
+@media (max-width: 520px) {
+    .analytics-filter-bar {
+        grid-template-columns: minmax(0, 1fr);
+        padding: 12px;
+    }
+}

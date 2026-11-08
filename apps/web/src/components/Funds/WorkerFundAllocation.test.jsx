@@ -70,7 +70,7 @@ describe("WorkerFundAllocation", () => {
         renderSection();
 
         expect(await screen.findByRole("heading", { name: "My Fund Allocation" })).toBeInTheDocument();
-        expect(screen.getByRole("checkbox", { name: /Growth Fund/ })).toBeInTheDocument();
+        expect(await screen.findByRole("checkbox", { name: /Growth Fund/ })).toBeInTheDocument();
         expect(screen.getByText("Current recorded distribution")).toBeInTheDocument();
         expect(screen.getByRole("checkbox", { name: /Growth Fund/ })).toBeChecked();
         expect(screen.getByLabelText("Allocation percentage")).toHaveValue(40);

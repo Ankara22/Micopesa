@@ -48,7 +48,7 @@ describe("FundManagerDashboard", () => {
         mocks.getFundPerformance.mockRejectedValue(new Error("Performance unavailable"));
         renderDashboard();
 
-        expect(await screen.findByText("Performance unavailable")).toBeInTheDocument();
+        expect(await screen.findByText("Unable to load the fund summary right now. Please try again.")).toBeInTheDocument();
         expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
     });
 });

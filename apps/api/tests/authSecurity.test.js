@@ -251,17 +251,27 @@ test("production startup fails when privileged signup is enabled", () => {
 
     const startup = spawnSync(
         process.execPath,
-        ["-e", "require('./apps/api/src/server')"],
+        [
+            "--require",
+            path.resolve(__dirname, "../../../tests/scripts/noEnvironmentFilesPreload.js"),
+            "-e",
+            "let startupError; try { require('./apps/api/src/server'); } catch (error) { startupError = error; } if (global.__micopesaDotenvConfigCalls !== 1 || startupError?.message !== 'ALLOW_PRIVILEGED_SIGNUP must be disabled in production') { process.exitCode = 1; } else { process.stdout.write('DOTENV_STUB_VERIFIED'); }",
+        ],
         {
             cwd: path.resolve(__dirname, "../../.."),
             encoding: "utf8",
             env: {
-                ...process.env,
+                PATH: process.env.PATH,
+                SystemRoot: process.env.SystemRoot,
+                WINDIR: process.env.WINDIR,
+                TEMP: process.env.TEMP,
+                TMP: process.env.TMP,
                 NODE_ENV: " production ",
                 ALLOW_PRIVILEGED_SIGNUP: " YES ",
+                MICOPESA_TEST_DOTENV_STUB: "enabled",
             },
         }
     );
-    assert.notEqual(startup.status, 0);
-    assert.match(startup.stderr, /ALLOW_PRIVILEGED_SIGNUP must be disabled in production/);
+    assert.equal(startup.status, 0);
+    assert.equal(startup.stdout, "DOTENV_STUB_VERIFIED");
 });

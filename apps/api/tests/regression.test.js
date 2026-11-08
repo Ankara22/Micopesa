@@ -2,12 +2,15 @@ const { before, after, beforeEach, test } = require("node:test");
 const assert = require("node:assert/strict");
 const http = require("node:http");
 const path = require("node:path");
+const { createRequire } = require("node:module");
+const apiRequire = createRequire(path.resolve(__dirname, "../package.json"));
+const {
+    getTargetDatabase,
+    verifyDatabaseIdentity,
+} = require("../../../tests/scripts/testDatabaseSafety");
 
-const testDatabaseUrl = process.env.TEST_DATABASE_URL;
-if (!testDatabaseUrl || new URL(testDatabaseUrl).pathname.slice(1) !== "micopesa_test" ||
-    !["localhost", "127.0.0.1", "::1", "[::1]"].includes(new URL(testDatabaseUrl).hostname)) {
-    throw new Error("API tests require TEST_DATABASE_URL pointing exactly to micopesa_test.");
-}
+const testDatabase = getTargetDatabase(process.env);
+const testDatabaseUrl = testDatabase.url.toString();
 process.env.DATABASE_URL = testDatabaseUrl;
 process.env.JWT_SECRET ||= "micopesa-test-only-jwt-secret";
 process.env.MPESA_CONSUMER_KEY ||= "test-consumer-key";
@@ -16,8 +19,7 @@ process.env.MPESA_PASSKEY ||= "test-passkey";
 process.env.MPESA_SHORTCODE ||= "test-shortcode";
 process.env.MPESA_CALLBACK_URL ||= "https://example.test/api/mpesa/callback";
 
-const { createRequire } = require("node:module");
-const apiRequire = createRequire(path.resolve(__dirname, "../package.json"));
+const { Client } = apiRequire("pg");
 const pool = apiRequire("./src/db/database");
 const app = apiRequire("./src/server");
 const { generateToken } = apiRequire("./src/utils/token");
@@ -77,6 +79,14 @@ async function setAccountBalance(accountId, balance) {
 }
 
 before(async () => {
+    const verificationClient = new Client({ connectionString: testDatabaseUrl });
+    await verificationClient.connect();
+    try {
+        await verifyDatabaseIdentity(verificationClient, testDatabase.databaseName);
+    } finally {
+        await verificationClient.end();
+    }
+
     await new Promise((resolve, reject) => {
         server.once("error", reject);
         server.listen(0, "127.0.0.1", resolve);
@@ -286,14 +296,16 @@ test("worker receives only own pending contributions with exact decimal amounts"
     assert.deepEqual(response.body.data.map((row) => row.amount).sort(), ["1200.00", "3400.00"]);
 });
 
-test("worker cannot see another worker's contributions or retirement plan", async () => {
+test("worker contribution and retirement-plan reads remain scoped to that worker", async () => {
     const workerAToken = await login("254700000004");
     const workerBToken = await login("254700000005");
     const workerAContributions = await request("/api/accounts/my-contributions", { token: workerAToken });
     const workerBContributions = await request("/api/accounts/my-contributions", { token: workerBToken });
     assert.deepEqual(workerAContributions.body.data.map((row) => row.amount).sort(), ["1200.00", "3400.00"]);
     assert.deepEqual(workerBContributions.body.data.map((row) => row.amount), ["777.00"]);
-    assert.equal((await request("/api/retirement/my-plan", { token: workerAToken })).status, 404);
+    const workerAPlan = await request("/api/retirement/my-plan", { token: workerAToken });
+    assert.equal(workerAPlan.status, 200);
+    assert.equal(workerAPlan.body.data.plan, null);
 
     const workerAClaims = await request("/api/withdrawals/my-claims", { token: workerAToken });
     assert.equal(workerAClaims.body.data.length, 1);
@@ -325,6 +337,7 @@ test("M-Pesa initiation is disabled and callback notifications cannot change fin
         Body: {
             stkCallback: {
                 CheckoutRequestID: "untrusted-test-checkout",
+                MerchantRequestID: "untrusted-test-merchant",
                 ResultCode: 0,
                 ResultDesc: "Payment completed",
                 CallbackMetadata: {

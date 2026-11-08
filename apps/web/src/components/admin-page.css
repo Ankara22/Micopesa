@@ -249,11 +249,21 @@
 
 .admin-status-pill[data-status="FAILED"],
 .admin-status-pill[data-status="SUSPENDED"],
-.admin-status-pill[data-status="INACTIVE"],
 .admin-status-pill[data-status="EXPIRED"],
 .admin-status-pill[data-status="TIMED OUT"] {
     color: #a3312c;
     background: #fbe9e7;
+}
+
+.admin-status-pill[data-status="INACTIVE"] {
+    color: #66766d;
+    background: #edf1ed;
+}
+
+.admin-status-pill[data-status="PROCESSING"],
+.admin-status-pill[data-status="PROVIDER_ACCEPTED"] {
+    color: #245b8f;
+    background: #e6f0fa;
 }
 
 .admin-status-pill[data-status="ACTIVE"] {
@@ -266,8 +276,13 @@
     background: #fff3d4;
 }
 
+.admin-status-pill[data-status="UNKNOWN"] {
+    color: #845b0d;
+    background: #fff3d4;
+}
+
 .admin-status-pill[data-status="COMPLETED"],
-.admin-status-pill[data-status="SENT"] {
+.admin-status-pill[data-status="DELIVERED"] {
     color: #1b4332;
     background: #e9f1eb;
 }

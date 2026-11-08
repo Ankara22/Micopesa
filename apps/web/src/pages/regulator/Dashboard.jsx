@@ -1,4 +1,3 @@
-import { lazy, Suspense } from "react";
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import useApi from "../../hooks/useApi";
@@ -14,12 +13,12 @@ import ErrorState from "../../components/ui/ErrorState";
 import DataTable from "../../components/ui/DataTable";
 import "./regulator-dashboard.css";
 
-const RegulatorComplianceChart = lazy(() => import("./RegulatorComplianceChart"));
 const REGULATOR_LINKS = [
-    { label: "Compliance Reports", description: "Review available reports.", to: "/regulator/compliance-reports" },
-    { label: "Fund Oversight", description: "Review funds and allocation records.", to: "/regulator/funds" },
-    { label: "Audit Logs", description: "Review recorded operational events.", to: "/regulator/audit-logs" },
-    { label: "Profile", description: "View your regulator profile.", to: "/regulator/profile" },
+    { key: "analytics", to: "/regulator/analytics" },
+    { key: "reports", to: "/regulator/compliance-reports" },
+    { key: "funds", to: "/regulator/funds" },
+    { key: "audit", to: "/regulator/audit-logs" },
+    { key: "profile", to: "/regulator/profile" },
 ];
 
 function getFundOverview() {
@@ -52,10 +51,6 @@ function RegulatorDashboard() {
     const fundsApi = useApi(getFundOverview, []);
     const compliance = complianceApi.data;
     const reports = reportsApi.data || [];
-    const reportStatusData = (compliance?.rba_reports_by_status || []).map((item) => ({
-        status: item.rba_status,
-        reports: getCount(item.count),
-    }));
     const auditHealth = compliance?.audit_health || {};
     const parameterChecks = compliance?.rba_parameter_checks;
     const latestReport = compliance?.latest_rba_report;
@@ -70,16 +65,21 @@ function RegulatorDashboard() {
         .filter((report) => report.rba_status === "SUBMITTED" && !report.is_legacy_history)
         .slice(0, 5);
     const dateLocale = i18n.resolvedLanguage?.startsWith("sw") ? "sw-KE" : "en-KE";
+    const parameterDetails = parameterChecks?.status === "NOT_CONFIGURED"
+        ? t("dashboards.regulator.parameterNotConfigured")
+        : parameterChecks?.details || t("dashboards.regulator.parameterUnavailable");
+    const translatedStatus = (status) =>
+        status ? t(`analytics.status.${status}`, { defaultValue: status }) : undefined;
     const legacyReportColumns = [
-        { key: "report_type", header: "Report type" },
-        { key: "period_start", header: "Period", render: (row) => `${formatDate(row.period_start, false, dateLocale)} – ${formatDate(row.period_end, false, dateLocale)}` },
-        { key: "rba_status", header: "Recorded status", render: (row) => <StatusBadge status={row.rba_status} /> },
-        { key: "generated_at", header: "Generated", render: (row) => formatDate(row.generated_at, true, dateLocale) },
+        { key: "report_type", header: t("dashboards.regulator.reportType") },
+        { key: "period_start", header: t("dashboards.regulator.period"), render: (row) => `${formatDate(row.period_start, false, dateLocale)} – ${formatDate(row.period_end, false, dateLocale)}` },
+        { key: "rba_status", header: t("regulator.dashboard.recordedStatus"), render: (row) => <StatusBadge status={row.rba_status} label={translatedStatus(row.rba_status)} /> },
+        { key: "generated_at", header: t("dashboards.regulator.generated"), render: (row) => formatDate(row.generated_at, true, dateLocale) },
     ];
     const submittedReportColumns = [
         { key: "fund_name", header: t("regulator.dashboard.fund"), render: (report) => report.fund_name || t("regulator.dashboard.unavailable") },
         { key: "manager_name", header: t("regulator.dashboard.fundManager"), render: (report) => report.manager_name || t("regulator.dashboard.formerManager") },
-        { key: "rba_status", header: t("regulator.dashboard.status"), render: (report) => <StatusBadge status={report.rba_status} /> },
+        { key: "rba_status", header: t("regulator.dashboard.status"), render: (report) => <StatusBadge status={report.rba_status} label={translatedStatus(report.rba_status)} /> },
         { key: "last_submitted_at", header: t("regulator.dashboard.lastSubmitted"), render: (report) => formatDate(report.last_submitted_at || report.submitted_at, true, dateLocale) },
     ];
 
@@ -87,92 +87,87 @@ function RegulatorDashboard() {
         <div className="regulator-dashboard">
             <header className="page-header regulator-dashboard-header">
                 <div>
-                    <p className="regulator-dashboard-eyebrow">Oversight and transparency</p>
-                    <h1 className="page-title">{firstName ? `Welcome, ${firstName}` : "Regulator Dashboard"}</h1>
-                    <p className="page-subtitle">A concise overview of recorded compliance and operational health.</p>
+                    <p className="regulator-dashboard-eyebrow">{t("dashboards.regulator.eyebrow")}</p>
+                    <h1 className="page-title">
+                        {firstName ? t("dashboards.welcome", { name: firstName }) : t("dashboards.regulator.title")}
+                    </h1>
+                    <p className="page-subtitle">{t("dashboards.regulator.subtitle")}</p>
                 </div>
             </header>
 
-            <section className="regulator-dashboard-overview" aria-label="Compliance oversight summary">
+            <section className="regulator-dashboard-overview" aria-label={t("dashboards.regulator.summary")}>
                 {complianceApi.loading ? (
-                    <SkeletonLoader variant="metrics" count={3} label="Loading compliance overview" />
+                    <SkeletonLoader variant="metrics" count={3} label={t("dashboards.regulator.loading")} />
                 ) : complianceApi.error ? (
-                    <ErrorState message={complianceApi.error} onRetry={complianceApi.refetch} />
+                    <ErrorState
+                        title={t("dashboards.regulator.errorTitle")}
+                        message={t("dashboards.regulator.complianceError")}
+                        onRetry={complianceApi.refetch}
+                    />
                 ) : (
                     <div className="regulator-dashboard-overview-content">
                         <div className="stat-card-grid regulator-dashboard-stats">
                             <StatCard
-                                label="Audit events (24 hours)"
-                                value={auditHealth.events_last_24h ?? "Unavailable"}
+                                label={t("dashboards.regulator.auditEvents")}
+                                value={auditHealth.events_last_24h ?? t("analytics.unavailable")}
                                 hint={auditHealth.last_event_at
-                                    ? `Most recent ${formatDate(auditHealth.last_event_at, true, dateLocale)}`
-                                    : "No recent event timestamp available"}
+                                    ? t("dashboards.regulator.mostRecent", { date: formatDate(auditHealth.last_event_at, true, dateLocale) })
+                                    : t("dashboards.regulator.noRecentEvent")}
                             />
                             <StatCard
-                                label="Recorded RBA reports"
-                                value={reportStatusTotals}
+                                label={t("dashboards.regulator.rbaReports")}
+                                value={new Intl.NumberFormat(dateLocale).format(reportStatusTotals)}
                                 hint={latestReport
-                                    ? `Latest status: ${latestReport.rba_status}`
-                                    : "No RBA report recorded"}
+                                    ? t("dashboards.regulator.latestStatus", {
+                                        status: t(`analytics.status.${latestReport.rba_status}`, { defaultValue: latestReport.rba_status }),
+                                    })
+                                    : t("dashboards.regulator.noRbaReport")}
                             />
                             <StatCard
-                                label="Regulatory parameter checks"
-                                value={<StatusBadge status={parameterChecks?.status || "NOT_CONFIGURED"} />}
-                                hint={parameterChecks?.details || "Configuration status unavailable"}
+                                label={t("dashboards.regulator.parameterChecks")}
+                                value={<StatusBadge
+                                    status={parameterChecks?.status || "NOT_CONFIGURED"}
+                                    label={translatedStatus(parameterChecks?.status || "NOT_CONFIGURED")}
+                                />}
+                                hint={parameterDetails}
                             />
                         </div>
                         <section className="regulator-dashboard-card regulator-parameter-card" aria-labelledby="parameter-checks-title">
                             <div>
-                                <p className="regulator-dashboard-eyebrow">Configuration</p>
-                                <h2 id="parameter-checks-title">Regulatory parameter checks</h2>
+                                <p className="regulator-dashboard-eyebrow">{t("dashboards.regulator.configuration")}</p>
+                                <h2 id="parameter-checks-title">{t("dashboards.regulator.parameterChecks")}</h2>
                             </div>
                             <div className="regulator-parameter-state">
-                                <StatusBadge status={parameterChecks?.status || "NOT_CONFIGURED"} />
-                                <p>{parameterChecks?.details || "Parameter-check configuration status is unavailable."}</p>
+                                <StatusBadge
+                                    status={parameterChecks?.status || "NOT_CONFIGURED"}
+                                    label={translatedStatus(parameterChecks?.status || "NOT_CONFIGURED")}
+                                />
+                                <p>{parameterDetails}</p>
                             </div>
                         </section>
                     </div>
                 )}
             </section>
 
-            <section className="regulator-dashboard-section" aria-labelledby="rba-status-title">
-                <div className="regulator-dashboard-section-heading">
-                    <div>
-                        <p className="regulator-dashboard-eyebrow">Report records</p>
-                        <h2 id="rba-status-title">RBA reports by recorded status</h2>
-                    </div>
-                    <Link className="regulator-dashboard-link" to="/regulator/compliance-reports">View reports</Link>
-                </div>
-                {complianceApi.loading ? (
-                    <SkeletonLoader variant="chart" label="Loading report status chart" />
-                ) : complianceApi.error ? (
-                    <ErrorState message={complianceApi.error} onRetry={complianceApi.refetch} />
-                ) : (
-                    <Suspense fallback={<SkeletonLoader variant="chart" label="Loading report status chart" />}>
-                        <RegulatorComplianceChart reportStatusData={reportStatusData} />
-                    </Suspense>
-                )}
-            </section>
-
             <section className="regulator-dashboard-section" aria-labelledby="reports-overview-title">
                 <div className="regulator-dashboard-section-heading">
                     <div>
-                        <p className="regulator-dashboard-eyebrow">Report register</p>
-                        <h2 id="reports-overview-title">Recent compliance reports</h2>
+                        <p className="regulator-dashboard-eyebrow">{t("dashboards.regulator.reportRegister")}</p>
+                        <h2 id="reports-overview-title">{t("dashboards.regulator.recentReports")}</h2>
                     </div>
-                    <Link className="regulator-dashboard-link" to="/regulator/compliance-reports">All reports</Link>
+                    <Link className="regulator-dashboard-link" to="/regulator/compliance-reports">{t("dashboards.regulator.allReports")}</Link>
                 </div>
                 <p className="regulator-dashboard-note">
-                    These are reports recorded in MicoPesa. Their presence does not establish external filing or acceptance.
+                    {t("dashboards.regulator.reportDisclaimer")}
                 </p>
                 <DataTable
                     columns={legacyReportColumns}
-                    rows={reports.slice(0, 5)}
+                    rows={reportsApi.data === null ? null : reports.slice(0, 5)}
                     rowKey="report_id"
                     loading={reportsApi.loading}
-                    error={reportsApi.error}
+                    error={reportsApi.error ? t("dashboards.regulator.reportsError") : null}
                     onRetry={reportsApi.refetch}
-                    emptyMessage="No compliance reports are available in the report register."
+                    emptyMessage={t("dashboards.regulator.noReports")}
                 />
             </section>
 
@@ -185,11 +180,11 @@ function RegulatorDashboard() {
                 </div>
                 <DataTable
                     columns={submittedReportColumns}
-                    rows={submittedReports}
+                    rows={reportsApi.data === null ? null : submittedReports}
                     rowKey="report_id"
                     loading={reportsApi.loading}
                     refreshing={reportsApi.refreshing}
-                    error={reportsApi.error}
+                    error={reportsApi.error ? t("dashboards.regulator.reportsError") : null}
                     onRetry={reportsApi.refetch}
                     emptyMessage={t("regulator.dashboard.emptyReports")}
                     loadingLabel={t("regulator.dashboard.loadingReports")}
@@ -202,42 +197,55 @@ function RegulatorDashboard() {
                 <section className="regulator-dashboard-section" aria-labelledby="audit-activity-title">
                     <div className="regulator-dashboard-section-heading">
                         <div>
-                            <p className="regulator-dashboard-eyebrow">Recorded events</p>
-                            <h2 id="audit-activity-title">Recent audit activity</h2>
+                            <p className="regulator-dashboard-eyebrow">{t("dashboards.regulator.recordedEvents")}</p>
+                            <h2 id="audit-activity-title">{t("dashboards.regulator.recentAudit")}</h2>
                         </div>
-                        <Link className="regulator-dashboard-link" to="/regulator/audit-logs">View audit logs</Link>
+                        <Link className="regulator-dashboard-link" to="/regulator/audit-logs">{t("dashboards.regulator.viewAudit")}</Link>
                     </div>
                     {auditApi.loading ? (
-                        <LoadingState message="Loading recent audit events..." />
+                        <LoadingState message={t("dashboards.regulator.loadingAudit")} />
                     ) : auditApi.error ? (
-                        <ErrorState message={auditApi.error} onRetry={auditApi.refetch} />
+                        <ErrorState
+                            title={t("dashboards.regulator.errorTitle")}
+                            message={t("dashboards.regulator.auditError")}
+                            onRetry={auditApi.refetch}
+                        />
                     ) : recentAudit.length ? (
                         <ol className="regulator-audit-list">
                             {recentAudit.map((event) => (
                                 <li key={event.log_id}>
-                                    <strong>{event.action_type || "Action unavailable"}</strong>
-                                    <span>{event.full_name || "System"} · {event.entity_name || "Record"}</span>
+                                    <strong>{t(`analytics.status.${event.action_type}`, { defaultValue: event.action_type || t("dashboards.regulator.actionUnavailable") })}</strong>
+                                    <span>
+                                        {event.full_name || t("dashboards.regulator.system")} · {t(
+                                            `analytics.status.${event.entity_name}`,
+                                            { defaultValue: event.entity_name || t("dashboards.regulator.record") }
+                                        )}
+                                    </span>
                                     <time dateTime={event.timestamp}>{formatDate(event.timestamp, true, dateLocale)}</time>
                                 </li>
                             ))}
                         </ol>
                     ) : (
-                        <p className="regulator-dashboard-empty">No operational audit events are available.</p>
+                        <p className="regulator-dashboard-empty">{t("dashboards.regulator.noAudit")}</p>
                     )}
                 </section>
 
                 <section className="regulator-dashboard-section" aria-labelledby="fund-oversight-title">
                     <div className="regulator-dashboard-section-heading">
                         <div>
-                            <p className="regulator-dashboard-eyebrow">Fund register</p>
-                            <h2 id="fund-oversight-title">Fund oversight</h2>
+                            <p className="regulator-dashboard-eyebrow">{t("dashboards.regulator.fundRegister")}</p>
+                            <h2 id="fund-oversight-title">{t("dashboards.regulator.fundOversight")}</h2>
                         </div>
-                        <Link className="regulator-dashboard-link" to="/regulator/funds">View all funds</Link>
+                        <Link className="regulator-dashboard-link" to="/regulator/funds">{t("dashboards.regulator.viewFunds")}</Link>
                     </div>
                     {fundsApi.loading ? (
-                        <LoadingState message="Loading fund records..." />
+                        <LoadingState message={t("dashboards.regulator.loadingFunds")} />
                     ) : fundsApi.error ? (
-                        <ErrorState message={fundsApi.error} onRetry={fundsApi.refetch} />
+                        <ErrorState
+                            title={t("dashboards.regulator.errorTitle")}
+                            message={t("dashboards.regulator.fundsError")}
+                            onRetry={fundsApi.refetch}
+                        />
                     ) : funds.length ? (
                         <ul className="regulator-fund-list">
                             {funds.slice(0, 4).map(({ fund, allocationCount }) => (
@@ -245,39 +253,43 @@ function RegulatorDashboard() {
                                     <div className="regulator-fund-heading">
                                         <strong>{fund.fund_name}</strong>
                                         {fund.fund_status
-                                            ? <StatusBadge status={fund.fund_status} />
-                                            : <span>Unavailable</span>}
+                                            ? <StatusBadge status={fund.fund_status} label={translatedStatus(fund.fund_status)} />
+                                            : <span>{t("analytics.unavailable")}</span>}
                                     </div>
                                     <span>
-                                        {fund.risk_level || "Risk category unavailable"} · {allocationCount} allocation records
-                                        {" · Configured expected return "}
+                                        {fund.risk_level
+                                            ? translatedStatus(fund.risk_level)
+                                            : t("dashboards.regulator.riskUnavailable")} · {t("dashboards.regulator.allocationRecords", { count: new Intl.NumberFormat(dateLocale).format(allocationCount) })}
+                                        {" · "}
                                         {fund.expected_return === undefined || fund.expected_return === null
                                             || !Number.isFinite(Number(fund.expected_return))
-                                            ? "Unavailable"
-                                            : `${Number(fund.expected_return).toFixed(2)}%`}
+                                            ? t("analytics.unavailable")
+                                            : t("dashboards.regulator.expectedReturn", {
+                                                percentage: new Intl.NumberFormat(dateLocale, { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(fund.expected_return)),
+                                            })}
                                     </span>
                                 </li>
                             ))}
                         </ul>
                     ) : (
-                        <p className="regulator-dashboard-empty">No fund records are available.</p>
+                        <p className="regulator-dashboard-empty">{t("dashboards.regulator.noFunds")}</p>
                     )}
                 </section>
             </div>
 
-            <nav className="regulator-dashboard-section regulator-dashboard-navigation" aria-label="Regulator features">
+            <nav className="regulator-dashboard-section regulator-dashboard-navigation" aria-label={t("dashboards.regulator.features")}>
                 <div className="regulator-dashboard-section-heading">
                     <div>
-                        <p className="regulator-dashboard-eyebrow">Navigation</p>
-                        <h2>Quick access</h2>
+                        <p className="regulator-dashboard-eyebrow">{t("dashboards.regulator.navigation")}</p>
+                        <h2>{t("dashboards.regulator.quickAccess")}</h2>
                     </div>
                 </div>
                 <ul>
                     {REGULATOR_LINKS.map((item) => (
                         <li key={item.to}>
                             <Link to={item.to}>
-                                <span>{item.label}</span>
-                                <small>{item.description}</small>
+                                <span>{t(`dashboards.regulator.links.${item.key}`)}</span>
+                                <small>{t(`dashboards.regulator.links.${item.key}Description`)}</small>
                             </Link>
                         </li>
                     ))}

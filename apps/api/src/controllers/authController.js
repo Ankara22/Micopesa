@@ -4,6 +4,7 @@ const { generateToken } = require("../utils/token");
 const { hashOpaque } = require("../services/authEmailService");
 const authEmailService = require("../services/authEmailService");
 const { loadAdminSettings } = require("../services/adminSettingsService");
+const { normalizeKenyanPhone, NORMALIZED_PHONE_SQL } = require("../utils/kenyanPhone");
 
 const SALT_ROUNDS = 10;
 const MIN_PASSWORD_LENGTH = 8;
@@ -163,6 +164,7 @@ async function login(req, res) {
         });
     }
     const email = identifier.includes("@") ? identifier.toLowerCase() : null;
+    const normalizedPhone = email ? null : normalizeKenyanPhone(identifier);
 
     try {
         const result = await pool.query(
@@ -171,11 +173,19 @@ async function login(req, res) {
                     locked_until, is_temp_password, force_password_change, created_at, updated_at,
                     (profile_photo_ref IS NOT NULL) AS profile_photo_available
              FROM users
-             WHERE (login_method = 'PHONE' AND phone = $1)
+             WHERE (login_method = 'PHONE' AND (
+                        phone = $1 OR
+                        ($3::varchar IS NOT NULL AND (${NORMALIZED_PHONE_SQL}) = $3)
+                    ))
+                OR ($3::varchar IS NOT NULL AND phone_verified_at IS NOT NULL
+                    AND (${NORMALIZED_PHONE_SQL}) = $3)
                 OR ($2::varchar IS NOT NULL AND email_verified IS TRUE AND lower(email) = $2)
-             ORDER BY CASE WHEN login_method = 'PHONE' AND phone = $1 THEN 0 ELSE 1 END
+             ORDER BY CASE WHEN login_method = 'PHONE' AND (
+                    phone = $1 OR
+                    ($3::varchar IS NOT NULL AND (${NORMALIZED_PHONE_SQL}) = $3)
+                ) THEN 0 ELSE 1 END
              LIMIT 1`,
-            [identifier, email]
+            [identifier, email, normalizedPhone]
         );
 
         if (result.rows.length === 0) {

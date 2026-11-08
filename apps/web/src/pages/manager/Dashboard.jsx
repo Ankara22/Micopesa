@@ -1,4 +1,5 @@
 import { Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import useApi from "../../hooks/useApi";
 import { getFundPerformance } from "../../services/fundManagerApi";
 import { useAuth } from "../../context/AuthContext";
@@ -9,74 +10,78 @@ import LoadingState from "../../components/ui/LoadingState";
 import "./fund-manager-dashboard.css";
 
 const MANAGER_LINKS = [
-    { label: "Manage Funds", description: "Create and manage your fund records.", to: "/manager/funds" },
-    { label: "Fund Analytics", description: "Review current allocation shares and dated history.", to: "/manager/analytics" },
-    { label: "Withdrawal Requests", description: "Review worker withdrawal requests.", to: "/manager/withdrawal-requests" },
-    { label: "Reports", description: "Open operational reports.", to: "/manager/reports" },
-    { label: "Audit Logs", description: "Review recorded operational actions.", to: "/manager/audit-logs" },
-    { label: "Profile", description: "View your manager profile.", to: "/manager/profile" },
+    { key: "funds", to: "/manager/funds" },
+    { key: "analytics", to: "/manager/analytics" },
+    { key: "withdrawals", to: "/manager/withdrawal-requests" },
+    { key: "reports", to: "/manager/reports" },
+    { key: "audit", to: "/manager/audit-logs" },
+    { key: "profile", to: "/manager/profile" },
 ];
 
-function formatCurrency(value) {
-    if (value === undefined || value === null || value === "" || !Number.isFinite(Number(value))) return "Unavailable";
-    return `KSh ${Number(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+function formatCurrency(value, locale, unavailable) {
+    if (value === undefined || value === null || value === "" || !Number.isFinite(Number(value))) return unavailable;
+    return `KSh ${Number(value).toLocaleString(locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-function formatCount(value) {
+function formatCount(value, locale, unavailable) {
     return value !== undefined && value !== null && Number.isFinite(Number(value))
-        ? Number(value).toLocaleString()
-        : "Unavailable";
+        ? Number(value).toLocaleString(locale)
+        : unavailable;
 }
 
-function formatPercentage(value) {
-    if (value === undefined || value === null || value === "" || !Number.isFinite(Number(value))) return "Unavailable";
-    return `${Number(value).toFixed(2)}%`;
+function formatPercentage(value, locale, unavailable) {
+    if (value === undefined || value === null || value === "" || !Number.isFinite(Number(value))) return unavailable;
+    return `${Number(value).toLocaleString(locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`;
 }
 
 function FundManagerDashboard() {
+    const { t, i18n } = useTranslation();
     const { user } = useAuth();
     const performanceApi = useApi(getFundPerformance, []);
     const performance = performanceApi.data;
     const firstName = user?.full_name?.trim().split(/\s+/)[0];
+    const locale = i18n.resolvedLanguage?.startsWith("sw") ? "sw-KE" : "en-KE";
 
     return (
         <div className="fund-manager-dashboard">
             <header className="page-header fund-manager-dashboard-header">
                 <div>
-                    <p className="fund-manager-eyebrow">Fund management</p>
-                    <h1 className="page-title">{firstName ? `Welcome, ${firstName}` : "Fund Manager Dashboard"}</h1>
-                    <p className="page-subtitle">A concise overview of managed funds and pension accounts.</p>
+                    <p className="fund-manager-eyebrow">{t("dashboards.manager.eyebrow")}</p>
+                    <h1 className="page-title">
+                        {firstName ? t("dashboards.welcome", { name: firstName }) : t("dashboards.manager.title")}
+                    </h1>
+                    <p className="page-subtitle">{t("dashboards.manager.subtitle")}</p>
                 </div>
             </header>
 
-            <section aria-label="Fund management summary">
-                {performanceApi.refreshing && <LoadingState message="Refreshing fund summary..." />}
+            <section aria-label={t("dashboards.manager.summary")}>
+                {performanceApi.refreshing && <LoadingState message={t("dashboards.manager.refreshing")} />}
                 {performanceApi.loading && performanceApi.data === null ? (
-                    <SkeletonLoader variant="metrics" count={4} label="Loading fund summary" />
+                    <SkeletonLoader variant="metrics" count={4} label={t("dashboards.manager.loading")} />
                 ) : performanceApi.error && performanceApi.data === null ? (
-                    <ErrorState message={performanceApi.error} onRetry={performanceApi.refetch} />
+                    <ErrorState title={t("dashboards.manager.errorTitle")} message={t("dashboards.manager.loadError")} onRetry={performanceApi.refetch} />
                 ) : (
                     <>
-                        {performanceApi.error && <ErrorState message={performanceApi.error} onRetry={performanceApi.refetch} />}
+                        {performanceApi.error && <ErrorState title={t("dashboards.manager.errorTitle")} message={t("dashboards.manager.loadError")} onRetry={performanceApi.refetch} />}
                         <div className="stat-card-grid fund-manager-summary">
-                            <StatCard label="Total pension account balances" value={formatCurrency(performance?.total_assets)} hint="Across all pension accounts" />
-                            <StatCard label="Active pension accounts" value={formatCount(performance?.active_accounts)} />
-                            <StatCard label="Managed funds" value={formatCount(performance?.funds_managed)} />
-                            <StatCard label="Average expected return" value={formatPercentage(performance?.average_yield)} hint="Configured average for active managed funds" />
+                            <StatCard label={t("dashboards.manager.totalBalances")} value={formatCurrency(performance?.total_assets, locale, t("analytics.unavailable"))} hint={t("dashboards.manager.allBalances")} />
+                            <StatCard label={t("dashboards.manager.activeAccounts")} value={formatCount(performance?.active_accounts, locale, t("analytics.unavailable"))} />
+                            <StatCard label={t("dashboards.manager.managedFunds")} value={formatCount(performance?.funds_managed, locale, t("analytics.unavailable"))} />
+                            <StatCard label={t("dashboards.manager.averageReturn")} value={formatPercentage(performance?.average_yield, locale, t("analytics.unavailable"))} hint={t("dashboards.manager.configuredReturn")} />
                         </div>
                     </>
                 )}
             </section>
 
-            <nav className="fund-manager-dashboard-section fund-manager-quick-links" aria-label="Fund Manager features">
-                <p className="fund-manager-eyebrow">Your workspace</p>
-                <h2>Go to a feature</h2>
+            <nav className="fund-manager-dashboard-section fund-manager-quick-links" aria-label={t("dashboards.manager.workspace")}>
+                <p className="fund-manager-eyebrow">{t("dashboards.manager.workspace")}</p>
+                <h2>{t("dashboards.manager.goToFeature")}</h2>
                 <ul>
                     {MANAGER_LINKS.map((item) => (
                         <li key={item.to}>
                             <Link to={item.to}>
-                                <span>{item.label}</span>
-                                <small>{item.description}</small>
+                                <span>{t(`dashboards.manager.links.${item.key}`)}</span>
+                                <small>{t(`dashboards.manager.links.${item.key}Description`)}</small>
                             </Link>
                         </li>
                     ))}

@@ -22,9 +22,13 @@ const funds = [
     { fund_id: "closed-fund", managed_by: "manager-2", fund_name: "Closed Fund", administrator_name: "Admin B", risk_level: "HIGH", expected_return: "5.00", fund_status: "CLOSED" },
     { fund_id: "other-active", managed_by: "manager-2", fund_name: "Other Active Fund", administrator_name: "Admin B", risk_level: "MEDIUM", expected_return: "6.00", fund_status: "ACTIVE" },
 ];
+const regulatorAssignments = [
+    { regulator_user_id: "regulator-1", fund_id: "closed-fund", active: true },
+    { regulator_user_id: "regulator-1", fund_id: "suspended-fund", active: false },
+];
 
 pool.query = async (query, values = []) => {
-    if (query.includes("SELECT user_id, role, account_status, auth_version FROM users")) {
+    if (query.includes("SELECT user_id, role, account_status, auth_version")) {
         const user = users.get(values[0]);
         return { rows: user ? [user] : [] };
     }
@@ -64,8 +68,14 @@ pool.query = async (query, values = []) => {
         return { rows: funds.filter((fund) => fund.managed_by === values[0]) };
     }
 
-    if (query.includes("FROM funds ORDER BY created_at DESC")) {
-        return { rows: funds };
+    if (query.includes("FROM funds f") && query.includes("regulator_fund_assignments")) {
+        return {
+            rows: funds.filter((fund) => regulatorAssignments.some((assignment) =>
+                assignment.regulator_user_id === values[0] &&
+                assignment.fund_id === fund.fund_id &&
+                assignment.active
+            )),
+        };
     }
 
     assert.fail(`Unexpected database query in fund discovery test: ${query}`);
@@ -152,7 +162,7 @@ test("manager-created active funds appear in worker discovery while role permiss
 
         const regulatorListResponse = await request("/", { userId: "regulator-1" });
         const regulatorFunds = (await regulatorListResponse.json()).data;
-        assert.equal(regulatorFunds.length, funds.length);
+        assert.deepEqual(regulatorFunds.map((fund) => fund.fund_id), ["closed-fund"]);
     } finally {
         await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }

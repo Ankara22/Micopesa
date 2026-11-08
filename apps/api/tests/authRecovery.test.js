@@ -126,7 +126,7 @@ test("only verified email identifiers are used and the database role is signed a
 
 test("unverified email cannot be used as a login identifier", async () => {
     pool.query = async (_query, values) => {
-        assert.deepEqual(values, ["LEGACY@example.com", "legacy@example.com"]);
+        assert.deepEqual(values, ["LEGACY@example.com", "legacy@example.com", null]);
         return { rows: [] };
     };
     const res = response();
@@ -135,6 +135,46 @@ test("unverified email cannot be used as a login identifier", async () => {
     }, res);
     assert.equal(res.statusCode, 401);
     assert.match(res.body.message, /Invalid phone number or password/);
+});
+
+test("a verified changed phone logs in to the same account with the existing password", async () => {
+    let loginQuery;
+    let loginValues;
+    pool.query = async (query, values) => {
+        if (query.includes("SELECT setting_key, setting_value")) return { rows: adminSettingsRows };
+        if (query.includes("SET failed_login_attempts = 0")) return { rows: [] };
+        loginQuery = query;
+        loginValues = values;
+        return { rows: [{
+            user_id: "same-admin-id",
+            full_name: "Existing Admin",
+            phone: "+254712345678",
+            phone_verified_at: new Date("2026-11-05T00:00:00.000Z"),
+            email: "admin@example.com",
+            email_verified: true,
+            password_hash: "unchanged-password-hash",
+            role: "ADMIN",
+            account_status: "ACTIVE",
+            auth_version: 7,
+        }] };
+    };
+    bcrypt.compare = async (password, hash) =>
+        password === "existing-password" && hash === "unchanged-password-hash";
+
+    const res = response();
+    await authController.login({
+        body: { identifier: "0712 345 678", password: "existing-password" },
+    }, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(loginValues[2], "+254712345678");
+    assert.match(loginQuery, /phone_verified_at IS NOT NULL/);
+    assert.equal(res.body.data.user.user_id, "same-admin-id");
+    assert.equal(res.body.data.user.phone, "+254712345678");
+    assert.equal(res.body.data.user.role, "ADMIN");
+    assert.equal(verifyTokenString(res.body.data.token).userId, "same-admin-id");
+    assert.equal(verifyTokenString(res.body.data.token).role, "ADMIN");
+    assert.equal(verifyTokenString(res.body.data.token).authVersion, 7);
 });
 
 test("password-reset requests return the same public response for missing, unverified, and verified accounts", async () => {

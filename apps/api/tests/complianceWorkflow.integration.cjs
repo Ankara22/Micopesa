@@ -5,6 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const express = require("express");
 const { Client, Pool } = require("pg");
+const { assertTestMode } = require("../../../tests/scripts/testDatabaseSafety");
 
 const SOCKET_DIRECTORY = "/var/run/postgresql";
 const DATA_DIRECTORY = "/var/lib/postgresql/18/main";
@@ -17,6 +18,7 @@ let integrationPool;
 let httpServer;
 
 function parseArguments(argv) {
+    assertTestMode(process.env);
     const args = {};
     for (let index = 0; index < argv.length; index += 2) {
         const key = argv[index];

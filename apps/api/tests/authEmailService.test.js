@@ -1,17 +1,24 @@
-const { after, beforeEach, test } = require("node:test");
+const { after, afterEach, beforeEach, test } = require("node:test");
 const assert = require("node:assert/strict");
 const nodemailer = require("nodemailer");
 const pool = require("../src/db/database");
 const authEmailService = require("../src/services/authEmailService");
+const mobileSasaService = require("../src/services/mobileSasaService");
 
 const originalQuery = pool.query;
 const originalCreateTransport = nodemailer.createTransport;
+const originalMobileSasaSendEmail = mobileSasaService.sendEmail;
 const originalConsoleInfo = console.info;
 const originalConsoleError = console.error;
 const originalEnvironment = {
     GMAIL_USER: process.env.GMAIL_USER,
     GMAIL_APP_PASSWORD: process.env.GMAIL_APP_PASSWORD,
     FRONTEND_BASE_URL: process.env.FRONTEND_BASE_URL,
+    EMAIL_PROVIDER: process.env.EMAIL_PROVIDER,
+    MOBILESASA_EMAIL_ENABLED: process.env.MOBILESASA_EMAIL_ENABLED,
+    MOBILE_SASA_EMAIL_API_TOKEN: process.env.MOBILE_SASA_EMAIL_API_TOKEN,
+    MOBILE_SASA_EMAIL_FROM: process.env.MOBILE_SASA_EMAIL_FROM,
+    MOBILE_SASA_EMAIL_DOMAIN_UUID: process.env.MOBILE_SASA_EMAIL_DOMAIN_UUID,
 };
 let queryCount;
 
@@ -20,10 +27,15 @@ beforeEach(() => {
     process.env.GMAIL_USER = "  MicoPesa.Test@GMAIL.COM ";
     process.env.GMAIL_APP_PASSWORD = "abcd efgh ijkl mnop";
     process.env.FRONTEND_BASE_URL = "https://micopesa.example.test";
+    process.env.EMAIL_PROVIDER = "GMAIL";
     pool.query = async () => {
         queryCount += 1;
         return { rows: [] };
     };
+});
+
+afterEach(() => {
+    mobileSasaService.sendEmail = originalMobileSasaSendEmail;
 });
 
 after(() => {
@@ -128,4 +140,66 @@ test("SMTP must explicitly accept the user's recipient before delivery is report
         }),
         (error) => error.code === "EMAIL_SMTP_RECIPIENT_REJECTED",
     );
+});
+
+test("authentication verification and reset templates can select Mobile Sasa", async () => {
+    process.env.EMAIL_PROVIDER = "MOBILE_SASA";
+    process.env.MOBILESASA_EMAIL_ENABLED = "true";
+    process.env.MOBILE_SASA_EMAIL_API_TOKEN = "mbs_test-token";
+    process.env.MOBILE_SASA_EMAIL_FROM = "notifications@example.test";
+    const messages = [];
+    mobileSasaService.sendEmail = async (message) => {
+        messages.push(message);
+        return {
+            accepted: true,
+            status: "PROVIDER_ACCEPTED",
+            deliveryResult: { provider: "MOBILE_SASA", accepted: 1, suppressed: 0, failed: 0 },
+        };
+    };
+    nodemailer.createTransport = () => {
+        assert.fail("Mobile Sasa selection must not fall back to Gmail.");
+    };
+
+    await authEmailService.issueEmailToken({
+        userId: "mock-user",
+        email: "worker@example.test",
+        purpose: "EMAIL_VERIFICATION",
+    });
+    await authEmailService.issueEmailToken({
+        userId: "mock-user",
+        email: "worker@example.test",
+        purpose: "PASSWORD_RESET",
+    });
+
+    assert.equal(messages.length, 2);
+    assert.match(messages[0].subject, /Verify your MicoPesa email/);
+    assert.match(messages[0].text, /\/verify-email\?token=/);
+    assert.match(messages[0].html, /\/verify-email\?token=/);
+    assert.match(messages[1].subject, /Reset your MicoPesa password/);
+    assert.match(messages[1].text, /\/reset-password\?token=/);
+    assert.match(messages[1].html, /\/reset-password\?token=/);
+});
+
+test("an ambiguous Mobile Sasa authentication email outcome never triggers Gmail fallback", async () => {
+    process.env.EMAIL_PROVIDER = "MOBILE_SASA";
+    process.env.MOBILESASA_EMAIL_ENABLED = "true";
+    process.env.MOBILE_SASA_EMAIL_API_TOKEN = "mbs_test-token";
+    process.env.MOBILE_SASA_EMAIL_FROM = "notifications@example.test";
+    let gmailCalls = 0;
+    mobileSasaService.sendEmail = async () => {
+        const error = new Error("Provider outcome is unknown.");
+        error.code = "EMAIL_UNKNOWN_OUTCOME";
+        throw error;
+    };
+    nodemailer.createTransport = () => {
+        gmailCalls += 1;
+        throw new Error("Gmail must not be used as automatic fallback.");
+    };
+
+    await assert.rejects(authEmailService.sendEmail({
+        to: "worker@example.test",
+        subject: "Reset password",
+        text: "Reset instructions",
+    }), { code: "EMAIL_UNKNOWN_OUTCOME" });
+    assert.equal(gmailCalls, 0);
 });

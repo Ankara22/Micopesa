@@ -36,7 +36,7 @@ function renderAuth(initialEntry = "/login") {
 }
 
 function fillLoginForm(identifier = "worker@example.com", password = "correct-password") {
-    fireEvent.change(screen.getByLabelText(/Email address|Phone number \(existing accounts\)/), { target: { value: identifier } });
+    fireEvent.change(screen.getByLabelText(/Email address|Verified phone number/), { target: { value: identifier } });
     fireEvent.change(screen.getByLabelText("Password"), { target: { value: password } });
 }
 
@@ -59,22 +59,27 @@ describe("authentication pages", () => {
         });
     });
 
-    it("presents email as primary login and offers the legacy phone path", () => {
-        renderAuth();
+    it("presents email as primary login and offers the verified phone path", () => {
+        const { container } = renderAuth();
 
         expect(screen.getByRole("heading", { name: "Sign in" })).toBeInTheDocument();
+        expect(container.querySelector(".auth-art img"))
+            .toHaveAttribute("src", "/images/micopesa-login-reference-hd.png");
         expect(screen.getByLabelText("Email address")).toHaveAttribute("autocomplete", "email");
         expect(screen.getByLabelText("Password")).toHaveAttribute("autocomplete", "current-password");
         expect(screen.getByRole("link", { name: "Create an account" })).toHaveAttribute("href", "/register");
 
-        fireEvent.click(screen.getByRole("button", { name: "Existing account? Sign in with phone" }));
-        expect(screen.getByLabelText("Phone number (existing accounts)")).toHaveAttribute("autocomplete", "tel");
+        fireEvent.click(screen.getByRole("button", { name: "Sign in with phone" }));
+        expect(screen.getByLabelText("Verified phone number")).toHaveAttribute("autocomplete", "tel");
         fireEvent.click(screen.getByRole("button", { name: "Sign in with email instead" }));
         expect(screen.getByLabelText("Email address")).toBeInTheDocument();
 
         fireEvent.click(screen.getByRole("link", { name: "Create an account" }));
         expect(screen.getByRole("heading", { name: "Create account" })).toBeInTheDocument();
         expect(screen.getByRole("combobox", { name: "Occupation" })).toBeInTheDocument();
+        expect(container.querySelector(".auth-art img"))
+            .toHaveAttribute("src", "/images/micopesa-signup-reference-hd.png");
+        expect(screen.getByLabelText("Email address (used to sign in)")).toBeRequired();
     });
 
     it("validates required login fields and displays authentication errors", async () => {
@@ -119,7 +124,7 @@ describe("authentication pages", () => {
             user: { role: "FUND_MANAGER" },
         });
         renderAuth();
-        fireEvent.click(screen.getByRole("button", { name: "Existing account? Sign in with phone" }));
+        fireEvent.click(screen.getByRole("button", { name: "Sign in with phone" }));
         fillLoginForm("  +254700123456  ", "my-password");
 
         fireEvent.click(screen.getByRole("button", { name: "Sign in" }));

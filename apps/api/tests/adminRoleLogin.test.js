@@ -69,8 +69,10 @@ function createRoleApi(initialRole) {
             const user = users.get(values[0]);
             return { rows: user ? [user] : [] };
         }
-        if (query.includes("FROM users") && query.includes("login_method = 'PHONE' AND phone = $1")) {
-            const user = [...users.values()].find((item) => item.phone === values[0]);
+        if (query.includes("FROM users") && query.includes("login_method = 'PHONE'")) {
+            const user = [...users.values()].find((item) =>
+                item.phone === values[0] || item.phone === values[2]
+            );
             return {
                 rows: user ? [{
                     ...user,

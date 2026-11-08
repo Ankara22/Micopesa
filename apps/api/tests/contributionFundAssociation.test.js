@@ -59,17 +59,19 @@ function createState() {
             contribution_id: "OLD-CONTRIBUTION",
             contribution_status: "COMPLETED",
         }],
+        paymentAttempts: [],
         shares: [],
         clientQueries: [],
         poolQueries: [],
         failShareInsert: false,
+        failContributionsHistory: false,
     };
 }
 
 function installDatabase(state) {
     pool.query = async (query, values = []) => {
         state.poolQueries.push({ query, values });
-        if (query.includes("SELECT user_id, role, account_status, auth_version FROM users")) {
+        if (query.includes("SELECT user_id, role, account_status, auth_version")) {
             const user = state.users.get(values[0]);
             return { rows: user ? [user] : [] };
         }
@@ -78,15 +80,29 @@ function installDatabase(state) {
             return { rows: accountId ? [{ account_id: accountId }] : [] };
         }
         if (query.includes("FROM contributions c") && query.includes("fund_allocations")) {
+            if (state.failContributionsHistory) {
+                const error = new Error('relation "mpesa_payment_attempts" does not exist');
+                error.code = "42P01";
+                throw error;
+            }
             return {
                 rows: state.contributions
                     .filter(({ account_id }) => account_id === ACCOUNT_A)
-                    .map((contribution) => ({
-                        ...contribution,
-                        fund_allocations: state.shares.filter(({ contribution_id }) =>
-                            contribution_id === contribution.contribution_id
-                        ),
-                    })),
+                    .map((contribution) => {
+                        const attempt = state.paymentAttempts.find(
+                            ({ transaction_id }) => transaction_id === contribution.transaction_id
+                        );
+                        return {
+                            ...contribution,
+                            checkout_request_id: attempt?.checkout_request_id ?? null,
+                            payment_provider: attempt?.provider_mode === "SIMULATOR"
+                                ? "SIMULATED"
+                                : attempt?.provider_mode === "DARAJA" ? "DARAJA" : "UNRESOLVED",
+                            fund_allocations: state.shares.filter(({ contribution_id }) =>
+                                contribution_id === contribution.contribution_id
+                            ),
+                        };
+                    }),
             };
         }
         assert.fail(`Unexpected pool query: ${query}`);
@@ -227,6 +243,84 @@ test("snapshot constraints do not depend on mutable allocation rows", () => {
     }
     assert.doesNotMatch(schemaSql, /uq_fund_allocations_id_account_fund/);
     assert.doesNotMatch(migrationSql, /uq_fund_allocations_id_account_fund/);
+});
+
+test("canonical schema defines payment attempts with their constraints and indexes", () => {
+    const attemptDefinition = schemaSql.match(
+        /CREATE TABLE mpesa_payment_attempts \(([\s\S]*?)\n\);/
+    )?.[1];
+    assert.ok(attemptDefinition);
+    assert.match(attemptDefinition, /idempotency_key\s+VARCHAR\(128\) NOT NULL/);
+    assert.match(attemptDefinition, /attempt_status\s+VARCHAR\(25\) NOT NULL/);
+    assert.match(attemptDefinition, /UNIQUE \(idempotency_key\)/);
+    assert.match(attemptDefinition, /UNIQUE \(checkout_request_id\)/);
+    assert.match(attemptDefinition, /UNIQUE \(merchant_request_id\)/);
+    assert.match(attemptDefinition, /FOREIGN KEY \(contribution_id, account_id, transaction_id\)/);
+    assert.match(attemptDefinition, /chk_mpesa_payment_attempts_provider_code/);
+    assert.match(attemptDefinition, /chk_mpesa_payment_attempts_accepted_timestamp/);
+    assert.match(schemaSql, /CREATE INDEX idx_mpesa_payment_attempts_account_created/);
+    assert.match(schemaSql, /CREATE INDEX idx_mpesa_payment_attempts_contribution_created/);
+    assert.match(schemaSql, /CREATE INDEX idx_mpesa_payment_attempts_transaction/);
+    assert.match(schemaSql, /CREATE INDEX idx_mpesa_payment_attempts_status_created/);
+    assert.match(schemaSql, /CREATE UNIQUE INDEX uq_mpesa_payment_attempts_one_active_per_contribution/);
+    assert.match(schemaSql, /CREATE TRIGGER trg_mpesa_payment_attempts_set_updated_at/);
+});
+
+test("contribution history reads simulated payment-attempt details", async () => {
+    const state = createState();
+    state.contributions[0] = {
+        ...state.contributions[0],
+        contribution_id: CONTRIBUTION,
+        transaction_id: TRANSACTION,
+        account_id: ACCOUNT_A,
+    };
+    state.paymentAttempts.push({
+        transaction_id: TRANSACTION,
+        checkout_request_id: `SIM${"A".repeat(22)}`,
+        provider_mode: "SIMULATOR",
+    });
+    const api = await createApi(state);
+    try {
+        const response = await api.request("/api/accounts/my-contributions", { method: "GET" });
+        const body = await response.json();
+        const historyQuery = state.poolQueries.find(({ query }) =>
+            query.includes("FROM contributions c")
+        )?.query;
+
+        assert.equal(response.status, 200);
+        assert.match(historyQuery, /FROM mpesa_payment_attempts/);
+        assert.match(historyQuery, /a\.provider_mode/);
+        assert.doesNotMatch(historyQuery, /checkout_request_id LIKE 'SIM%'/);
+        assert.equal(body.data[0].checkout_request_id, `SIM${"A".repeat(22)}`);
+        assert.equal(body.data[0].payment_provider, "SIMULATED");
+    } finally {
+        await api.close();
+    }
+});
+
+test("contribution history safely reports a missing payment-attempt table", async () => {
+    const state = createState();
+    state.failContributionsHistory = true;
+    const api = await createApi(state);
+    const logs = [];
+    const originalConsoleError = console.error;
+    console.error = (...args) => logs.push(args);
+    try {
+        const response = await api.request("/api/accounts/my-contributions", { method: "GET" });
+        const body = await response.json();
+
+        assert.equal(response.status, 500);
+        assert.equal(body.message, "Failed to fetch contributions due to a server error");
+        assert.equal(logs.length, 1);
+        assert.equal(logs[0][0], "Failed to fetch contributions:");
+        assert.deepEqual(logs[0][1], {
+            code: "42P01",
+            message: 'relation "mpesa_payment_attempts" does not exist',
+        });
+    } finally {
+        console.error = originalConsoleError;
+        await api.close();
+    }
 });
 
 test("creates pending contribution and selected-fund snapshots from the authenticated account allocation", async () => {

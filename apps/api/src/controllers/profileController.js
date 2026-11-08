@@ -14,6 +14,7 @@ const PROFILE_FIELDS = [
     "pending_email",
     "email_verified",
     "phone",
+    "phone_verified_at",
     "role",
     "occupation",
     "account_status",

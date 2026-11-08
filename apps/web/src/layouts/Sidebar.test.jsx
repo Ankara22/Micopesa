@@ -9,15 +9,18 @@ const authMock = vi.hoisted(() => ({ useAuth: vi.fn() }));
 vi.mock("../context/AuthContext", () => ({ useAuth: authMock.useAuth }));
 
 const KNOWN_PATHS = new Set([
-    "/worker/dashboard", "/worker/contributions", "/worker/balance", "/worker/funds",
+    "/worker/dashboard", "/worker/contributions", "/worker/analytics", "/worker/balance", "/worker/funds",
     "/worker/retirement-plan", "/worker/retirement-projection", "/worker/withdrawals",
     "/worker/literacy", "/worker/notifications", "/worker/profile",
     "/manager/dashboard", "/manager/funds", "/manager/analytics", "/manager/withdrawal-requests",
     "/manager/reports", "/manager/audit-logs", "/manager/notifications", "/manager/profile",
-    "/regulator/dashboard", "/regulator/funds", "/regulator/compliance-reports",
+    "/manager/notification-audit-log", "/manager/reports-exports", "/manager/report-history",
+    "/regulator/dashboard", "/regulator/analytics", "/regulator/funds", "/regulator/compliance-reports",
     "/regulator/audit-logs", "/regulator/notifications", "/regulator/profile",
-    "/admin/dashboard", "/admin/users", "/admin/roles", "/admin/settings",
+    "/regulator/notification-audit-log", "/regulator/reports", "/regulator/report-history",
+    "/admin/dashboard", "/admin/analytics", "/admin/users", "/admin/roles", "/admin/settings",
     "/admin/notifications", "/admin/activity", "/admin/audit-logs", "/admin/profile",
+    "/admin/regulator-scopes", "/admin/notification-audit-log", "/admin/reports", "/admin/report-history",
 ]);
 
 describe("role-aware sidebar", () => {

@@ -94,14 +94,16 @@ async function submitClaim(req, res) {
     const { amount_requested, destination_phone, withdrawal_reason } = req.body;
     const amount = Number(amount_requested);
 
-    if (amount_requested === undefined || !destination_phone || !withdrawal_reason) {
+    if (amount_requested === undefined || !withdrawal_reason) {
         return res.status(400).json({
             status: "error",
-            message: "amount_requested, destination_phone, and withdrawal_reason are required",
+            message: "amount_requested and withdrawal_reason are required",
         });
     }
 
-    if (typeof destination_phone !== "string" || destination_phone.trim().length === 0 || destination_phone.trim().length > 15) {
+    if (destination_phone !== undefined &&
+        (typeof destination_phone !== "string" || destination_phone.trim().length === 0 ||
+         destination_phone.trim().length > 15)) {
         return res.status(400).json({ status: "error", message: "destination_phone must be a valid phone number" });
     }
 
@@ -141,6 +143,29 @@ async function submitClaim(req, res) {
             });
         }
 
+        const profileResult = await client.query(
+            `SELECT phone, phone_verified_at
+             FROM users
+             WHERE user_id = $1 AND role = 'WORKER'
+             FOR SHARE`,
+            [userId]
+        );
+        const profile = profileResult.rows[0];
+        if (!profile || !profile.phone || !profile.phone_verified_at) {
+            await client.query("ROLLBACK");
+            return res.status(403).json({
+                status: "error",
+                message: "A verified profile phone is required to submit a withdrawal claim",
+            });
+        }
+        if (destination_phone !== undefined && destination_phone.trim() !== profile.phone) {
+            await client.query("ROLLBACK");
+            return res.status(400).json({
+                status: "error",
+                message: "destination_phone must match your verified profile phone",
+            });
+        }
+
         const reservedAmount = Number(await getWithdrawalAvailability(client, account.account_id));
         const availableBalance = calculateAvailableBalance(account.current_balance, reservedAmount);
         if (amount > availableBalance) {
@@ -169,7 +194,7 @@ async function submitClaim(req, res) {
              VALUES ($1, $2, $3, $4)
              RETURNING claim_id, account_id, amount_requested, destination_phone,
                        withdrawal_reason, claim_status, requested_at`,
-            [account.account_id, amount, destination_phone.trim(), withdrawal_reason.trim()]
+            [account.account_id, amount, profile.phone, withdrawal_reason.trim()]
         );
 
         await client.query("COMMIT");
@@ -240,7 +265,17 @@ async function getPendingClaims(req, res) {
              JOIN pension_accounts pa ON pa.account_id = wc.account_id
              JOIN users u ON u.user_id = pa.user_id
              WHERE wc.claim_status IN ('PENDING', 'APPROVED')
-             ORDER BY wc.requested_at ASC`
+               AND EXISTS (
+                   SELECT 1
+                   FROM fund_allocations fa
+                   JOIN funds f ON f.fund_id = fa.fund_id
+                   WHERE fa.account_id = wc.account_id
+                     AND f.managed_by = $1
+                     AND fa.effective_from <= CURRENT_DATE
+                     AND (fa.effective_to IS NULL OR fa.effective_to >= CURRENT_DATE)
+               )
+             ORDER BY wc.requested_at ASC`,
+            [req.user.userId]
         );
 
         return res.status(200).json({ status: "success", data: result.rows });

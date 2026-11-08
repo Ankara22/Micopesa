@@ -6,6 +6,10 @@ const {
     updateMyProfile,
     uploadMyProfilePhoto,
 } = require("../controllers/profileController");
+const {
+    requestPhoneChange,
+    verifyPhoneChange,
+} = require("../controllers/phoneChangeController");
 
 const router = express.Router();
 const parsePhotoBody = express.raw({
@@ -15,6 +19,8 @@ const parsePhotoBody = express.raw({
 
 router.get("/me", requireAuth, getMyProfile);
 router.patch("/me", requireAuth, updateMyProfile);
+router.post("/me/phone-change/request", requireAuth, requestPhoneChange);
+router.post("/me/phone-change/verify", requireAuth, verifyPhoneChange);
 router.get("/me/photo", requireAuth, getMyProfilePhoto);
 router.put("/me/photo", requireAuth, parsePhotoBody, uploadMyProfilePhoto);
 

@@ -41,6 +41,7 @@ describe("AdminDashboard", () => {
         expect(screen.getByText("Active USSD sessions").parentElement).toHaveTextContent("3");
         expect(screen.getByText("Audit actions (24 hours)").parentElement).toHaveTextContent("6");
         const links = [
+            ["Analytics", "/admin/analytics"],
             ["User Management", "/admin/users"],
             ["Roles & Permissions", "/admin/roles"],
             ["System Settings", "/admin/settings"],
@@ -59,7 +60,7 @@ describe("AdminDashboard", () => {
     it("shows summary loading and retryable errors without a separate detailed audit feed", async () => {
         mocks.getActivitySummary.mockRejectedValue(new Error("Summary unavailable"));
         renderDashboard();
-        expect(await screen.findByText("Summary unavailable")).toBeInTheDocument();
+        expect(await screen.findByText("Unable to load the platform summary right now. Please try again.")).toBeInTheDocument();
         expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
         expect(screen.queryByText("Loading recent audit activity")).not.toBeInTheDocument();
     });

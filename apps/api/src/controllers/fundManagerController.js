@@ -6,9 +6,23 @@ async function getPerformance(req, res) {
 
     try {
         const result = await pool.query(
-            `SELECT
-                (SELECT COALESCE(SUM(current_balance), 0) FROM pension_accounts) AS total_assets,
-                (SELECT count(*)::int FROM pension_accounts WHERE account_status = 'ACTIVE') AS active_accounts,
+            `WITH manager_account_allocations AS (
+                 SELECT fa.account_id, SUM(fa.percentage) AS allocation_percentage
+                 FROM fund_allocations fa
+                 JOIN funds managed_fund ON managed_fund.fund_id = fa.fund_id
+                 WHERE managed_fund.managed_by = $1
+                   AND fa.effective_from <= CURRENT_DATE
+                   AND (fa.effective_to IS NULL OR fa.effective_to >= CURRENT_DATE)
+                 GROUP BY fa.account_id
+             )
+             SELECT
+                (SELECT COALESCE(SUM(pa.current_balance * maa.allocation_percentage / 100), 0)
+                 FROM pension_accounts pa
+                 JOIN manager_account_allocations maa ON maa.account_id = pa.account_id) AS total_assets,
+                (SELECT count(*)::int
+                 FROM pension_accounts pa
+                 JOIN manager_account_allocations maa ON maa.account_id = pa.account_id
+                 WHERE pa.account_status = 'ACTIVE') AS active_accounts,
                 (SELECT count(*)::int FROM funds WHERE managed_by = $1) AS funds_managed,
                 (SELECT AVG(expected_return) FROM funds WHERE managed_by = $1 AND fund_status = 'ACTIVE') AS average_yield`,
             [userId]
@@ -35,9 +49,19 @@ async function listWithdrawals(req, res) {
              JOIN pension_accounts pa ON pa.account_id = wc.account_id
              JOIN users u ON u.user_id = pa.user_id
              LEFT JOIN users reviewer ON reviewer.user_id = wc.reviewed_by
+             WHERE EXISTS (
+                 SELECT 1
+                 FROM fund_allocations fa
+                 JOIN funds f ON f.fund_id = fa.fund_id
+                 WHERE fa.account_id = wc.account_id
+                   AND f.managed_by = $1
+                   AND fa.effective_from <= CURRENT_DATE
+                   AND (fa.effective_to IS NULL OR fa.effective_to >= CURRENT_DATE)
+             )
              ORDER BY CASE WHEN wc.claim_status = 'PENDING' THEN 0 ELSE 1 END,
                       wc.requested_at ASC
-             LIMIT 500`
+             LIMIT 500`,
+            [req.user.userId]
         );
 
         return res.status(200).json({ status: "success", data: result.rows });

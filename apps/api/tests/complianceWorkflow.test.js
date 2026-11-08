@@ -29,6 +29,11 @@ const fixture = {
         ["fund-1", { fund_id: "fund-1", managed_by: "manager-1", fund_name: "Worker Growth" }],
         ["fund-2", { fund_id: "fund-2", managed_by: "manager-2", fund_name: "Community Growth" }],
     ]),
+    regulatorAssignments: new Map([
+        ["regulator-1", new Set(["fund-1"])],
+        ["regulator-2", new Set(["fund-2"])],
+    ]),
+    inactiveRegulatorAssignments: new Map(),
     reports: new Map(),
     submissions: [],
     reviews: [],
@@ -46,6 +51,11 @@ const fixture = {
 function resetFixture() {
     fixture.funds.set("fund-1", { fund_id: "fund-1", managed_by: "manager-1", fund_name: "Worker Growth" });
     fixture.funds.set("fund-2", { fund_id: "fund-2", managed_by: "manager-2", fund_name: "Community Growth" });
+    fixture.regulatorAssignments = new Map([
+        ["regulator-1", new Set(["fund-1"])],
+        ["regulator-2", new Set(["fund-2"])],
+    ]);
+    fixture.inactiveRegulatorAssignments = new Map();
     fixture.identities.set("manager-1", { full_name: "Manager One", role: "FUND_MANAGER", account_status: "ACTIVE" });
     fixture.identities.set("manager-2", { full_name: "Manager Two", role: "FUND_MANAGER", account_status: "ACTIVE" });
     fixture.identities.set("regulator-1", { full_name: "Regulator One", role: "REGULATOR", account_status: "ACTIVE" });
@@ -165,7 +175,9 @@ async function fakeQuery(query, values = []) {
     }
     if (sql.startsWith("SELECT report_id FROM compliance_reports") && sql.includes("is_legacy = TRUE")) {
         const report = fixture.reports.get(values[0]);
-        return result(report && (report.is_legacy || report.rba_status !== "DRAFT")
+        const assignedFunds = fixture.regulatorAssignments.get(values[1]) || new Set();
+        return result(report && assignedFunds.has(report.fund_id) &&
+            (report.is_legacy || report.rba_status !== "DRAFT")
             ? [{ report_id: report.report_id }] : []);
     }
     if (sql.startsWith("UPDATE compliance_reports SET report_type = $1")) {
@@ -217,8 +229,10 @@ async function fakeQuery(query, values = []) {
         return result(fixture.notifications.filter((notification) => notification.user_id === values[0]));
     }
     if (sql.startsWith("SELECT cr.report_id, cr.generated_by AS manager_id")) {
+        const assignedFunds = fixture.regulatorAssignments.get(values[0]) || new Set();
         return result([...fixture.reports.values()]
-            .filter((report) => report.is_legacy || report.rba_status !== "DRAFT")
+            .filter((report) => assignedFunds.has(report.fund_id) &&
+                (report.is_legacy || report.rba_status !== "DRAFT"))
             .map((report) => ({
                 ...report,
                 manager_id: report.generated_by,
@@ -238,9 +252,15 @@ async function fakeQuery(query, values = []) {
         });
         return result([]);
     }
+    if (sql.startsWith("SELECT fund_id FROM regulator_fund_assignments") && sql.endsWith("FOR SHARE")) {
+        const [regulatorId, fundId] = values;
+        const assignedFunds = fixture.regulatorAssignments.get(regulatorId) || new Set();
+        return result(assignedFunds.has(fundId) ? [{ fund_id: fundId }] : []);
+    }
     if (sql.includes("SELECT report_id, generated_by, rba_status, is_legacy") && sql.endsWith("FOR UPDATE")) {
         const report = fixture.reports.get(values[0]);
-        return result(report ? [{
+        const assignedFunds = fixture.regulatorAssignments.get(values[1]) || new Set();
+        return result(report && assignedFunds.has(report.fund_id) ? [{
             report_id: report.report_id,
             generated_by: report.generated_by,
             rba_status: report.rba_status,
@@ -325,7 +345,9 @@ function makeMockClient() {
                 return result([]);
             }
             if (sql.includes("FOR UPDATE") || sql.includes("FOR SHARE")) {
-                const lockId = values[0];
+                const lockId = sql.startsWith("SELECT fund_id FROM regulator_fund_assignments")
+                    ? `regulator-assignment:${values[0]}:${values[1]}`
+                    : values[0];
                 const previous = fixture.lockTails.get(lockId) || Promise.resolve();
                 let unlock;
                 const gate = new Promise((resolve) => { unlock = resolve; });
@@ -502,7 +524,7 @@ test("the current fund manager owns report access while submission history keeps
     assert.deepEqual(fixture.submissions.map((submission) => submission.submitted_by), ["manager-1", "manager-2"]);
     const accepted = response();
     await regulator.reviewComplianceReport({
-        user: { userId: "regulator-2" },
+        user: { userId: "regulator-1" },
         params: { reportId },
         body: { submission_id: latestSubmissionId(reportId), decision: "ACCEPTED" },
     }, accepted);
@@ -520,6 +542,48 @@ test("the current fund manager owns report access while submission history keeps
         params: { reportId: unrelatedDraft.body.data.report.report_id },
     }, unrelatedRead);
     assert.equal(unrelatedRead.statusCode, 404);
+});
+
+test("regulators cannot review reports for unassigned or inactive fund assignments", async () => {
+    resetFixture();
+    const reportId = await createAndSubmit();
+    const report = fixture.reports.get(reportId);
+    const submissionId = latestSubmissionId(reportId);
+    const existingReviewCount = fixture.reviews.length;
+    const existingNotificationCount = fixture.notifications.length;
+    const existingAuditCount = fixture.audits.length;
+
+    const unassigned = response();
+    await regulator.reviewComplianceReport({
+        user: { userId: "regulator-2" },
+        params: { reportId },
+        body: { submission_id: submissionId, decision: "ACCEPTED" },
+    }, unassigned);
+    assert.equal(unassigned.statusCode, 404);
+    assert.deepEqual(unassigned.body, {
+        status: "error",
+        message: "Submitted compliance report not found",
+    });
+    assert.match(fixture.lastQuery, /rfa\.active = TRUE/);
+
+    fixture.inactiveRegulatorAssignments.set("regulator-2", new Set([report.fund_id]));
+    const inactiveAssignment = response();
+    await regulator.reviewComplianceReport({
+        user: { userId: "regulator-2" },
+        params: { reportId },
+        body: { submission_id: submissionId, decision: "ACCEPTED" },
+    }, inactiveAssignment);
+
+    assert.equal(inactiveAssignment.statusCode, 404);
+    assert.deepEqual(inactiveAssignment.body, {
+        status: "error",
+        message: "Submitted compliance report not found",
+    });
+    assert.match(fixture.lastQuery, /rfa\.active = TRUE/);
+    assert.equal(fixture.reviews.length, existingReviewCount);
+    assert.equal(fixture.notifications.length, existingNotificationCount);
+    assert.equal(fixture.audits.length, existingAuditCount);
+    assert.equal(report.rba_status, "SUBMITTED");
 });
 
 test("submission and review snapshots keep database-backed names and roles after user changes", async () => {
@@ -617,6 +681,7 @@ test("regulator report listing returns submitted reports and binds each supporte
     const reportId = await createAndSubmit();
     const res = response();
     await regulator.listReports({
+        user: { userId: "regulator-1" },
         query: {
             fund_id: "fund-1",
             manager_id: "manager-1",
@@ -631,18 +696,20 @@ test("regulator report listing returns submitted reports and binds each supporte
     assert.equal(res.statusCode, 200);
     assert.equal(res.body.data[0].report_id, reportId);
     assert.match(fixture.lastQuery, /cr\.rba_status <> 'DRAFT'/);
-    assert.match(fixture.lastQuery, /cr\.fund_id = \$1/);
-    assert.match(fixture.lastQuery, /cr\.generated_by = \$2/);
-    assert.match(fixture.lastQuery, /cr\.report_type = \$3/);
-    assert.match(fixture.lastQuery, /cr\.rba_status = \$4/);
-    assert.match(fixture.lastQuery, /cr\.period_end >= \$5/);
-    assert.match(fixture.lastQuery, /cr\.period_start <= \$6/);
+    assert.match(fixture.lastQuery, /rfa\.regulator_user_id = \$1/);
+    assert.match(fixture.lastQuery, /cr\.fund_id = \$2/);
+    assert.match(fixture.lastQuery, /cr\.generated_by = \$3/);
+    assert.match(fixture.lastQuery, /cr\.report_type = \$4/);
+    assert.match(fixture.lastQuery, /cr\.rba_status = \$5/);
+    assert.match(fixture.lastQuery, /cr\.period_end >= \$6/);
+    assert.match(fixture.lastQuery, /cr\.period_start <= \$7/);
     assert.deepEqual(fixture.lastValues, [
-        "fund-1", "manager-1", "RBA", "SUBMITTED", "2026-01-01", "2026-03-31", "%Worker%", "%Worker%",
+        "regulator-1", "fund-1", "manager-1", "RBA", "SUBMITTED",
+        "2026-01-01", "2026-03-31", "%Worker%", "%Worker%",
     ]);
 });
 
-test("legacy reports remain visible as historical records but cannot enter regulator or manager workflows", async () => {
+test("legacy reports outside assigned funds remain hidden from regulator list and detail", async () => {
     resetFixture();
     fixture.reports.set("legacy-report", {
         report_id: "legacy-report",
@@ -660,18 +727,15 @@ test("legacy reports remain visible as historical records but cannot enter regul
     });
 
     const regulatorList = response();
-    await regulator.listReports({ query: {} }, regulatorList);
-    assert.equal(regulatorList.body.data[0].report_id, "legacy-report");
-    assert.equal(regulatorList.body.data[0].is_legacy_history, true);
+    await regulator.listReports({ user: { userId: "regulator-1" }, query: {} }, regulatorList);
+    assert.equal(regulatorList.body.data.length, 0);
 
     const regulatorDetail = response();
     await regulator.getComplianceReport({
+        user: { userId: "regulator-1" },
         params: { reportId: "legacy-report" },
     }, regulatorDetail);
-    assert.equal(regulatorDetail.statusCode, 200);
-    assert.equal(regulatorDetail.body.data.report.reviewable, false);
-    assert.equal(regulatorDetail.body.data.report.is_legacy_history, true);
-    assert.equal(regulatorDetail.body.data.report.is_legacy, true);
+    assert.equal(regulatorDetail.statusCode, 404);
 
     const review = response();
     await regulator.reviewComplianceReport({
@@ -679,7 +743,7 @@ test("legacy reports remain visible as historical records but cannot enter regul
         params: { reportId: "legacy-report" },
         body: { decision: "ACCEPTED" },
     }, review);
-    assert.equal(review.statusCode, 409);
+    assert.equal(review.statusCode, 404);
 
     const managerList = response();
     await workflow.listManagerReports({ user: { userId: "manager-1" } }, managerList);
@@ -699,6 +763,7 @@ test("duplicate submission requests and competing regulator decisions are reject
     assert.equal(fixture.submissions.length, 1);
     assert.equal(fixture.notifications.length, 2);
 
+    fixture.regulatorAssignments.get("regulator-2").add("fund-1");
     const concurrentDecisions = await Promise.all(["regulator-1", "regulator-2"].map(async (userId) => {
         const res = response();
         await regulator.reviewComplianceReport({
@@ -785,7 +850,7 @@ test("regulator acceptance is audited, notifies only the submitter, and final re
 
     const secondReview = response();
     await regulator.reviewComplianceReport({
-        user: { userId: "regulator-2" },
+        user: { userId: "regulator-1" },
         params: { reportId },
         body: {
             submission_id: latestSubmissionId(reportId),
@@ -814,7 +879,7 @@ test("revision requests preserve prior decisions and allow manager resubmission 
 
     const duplicateDecision = response();
     await regulator.reviewComplianceReport({
-        user: { userId: "regulator-2" },
+        user: { userId: "regulator-1" },
         params: { reportId },
         body: { submission_id: latestSubmissionId(reportId), decision: "ACCEPTED" },
     }, duplicateDecision);
@@ -843,7 +908,7 @@ test("revision requests preserve prior decisions and allow manager resubmission 
 
     const finalDecision = response();
     await regulator.reviewComplianceReport({
-        user: { userId: "regulator-2" },
+        user: { userId: "regulator-1" },
         params: { reportId },
         body: {
             submission_id: latestSubmissionId(reportId),
@@ -898,7 +963,7 @@ test("regulator decisions require the viewed submission and reject stale version
 
     const staleDecision = response();
     await regulator.reviewComplianceReport({
-        user: { userId: "regulator-2" },
+        user: { userId: "regulator-1" },
         params: { reportId },
         body: { submission_id: firstSubmissionId, decision: "ACCEPTED" },
     }, staleDecision);
@@ -909,7 +974,7 @@ test("regulator decisions require the viewed submission and reject stale version
 
     const currentDecision = response();
     await regulator.reviewComplianceReport({
-        user: { userId: "regulator-2" },
+        user: { userId: "regulator-1" },
         params: { reportId },
         body: { submission_id: secondSubmissionId, decision: "ACCEPTED" },
     }, currentDecision);

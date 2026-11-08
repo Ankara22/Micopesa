@@ -74,7 +74,7 @@ function installDatabase(state, { failOn } = {}) {
     state.poolQueries = [];
     pool.query = async (query, values = []) => {
         state.poolQueries.push(query);
-        if (query.includes("SELECT user_id, role, account_status, auth_version FROM users")) {
+        if (query.includes("SELECT user_id, role, account_status, auth_version")) {
             const user = state.users.get(values[0]);
             return { rows: user ? [user] : [] };
         }
@@ -219,7 +219,7 @@ test("admin deletion removes account-owned records and unlinks retained shared r
         assert.ok(contributionDeleteIndex < userDeleteIndex);
         assert.ok(userDeleteIndex < transactionDeleteIndex);
         assert.ok(state.poolQueries.every((query) =>
-            query.includes("SELECT user_id, role, account_status, auth_version FROM users")
+            query.includes("SELECT user_id, role, account_status, auth_version")
         ));
     } finally {
         await api.close();

@@ -25,12 +25,6 @@ vi.mock("../../services/fundService", () => ({
     getFundAllocations: mocks.getFundAllocations,
 }));
 vi.mock("../../context/AuthContext", () => ({ useAuth: mocks.useAuth }));
-vi.mock("./RegulatorComplianceChart", () => ({
-    default: ({ reportStatusData }) => (
-        <output data-testid="report-status-chart">{JSON.stringify(reportStatusData)}</output>
-    ),
-}));
-
 function renderDashboard() {
     return render(<MemoryRouter><RegulatorDashboard /></MemoryRouter>);
 }
@@ -109,30 +103,26 @@ describe("RegulatorDashboard", () => {
         expect(await screen.findByRole("heading", { name: "Welcome, Achieng" })).toBeInTheDocument();
         expect(screen.getByText("Audit events (24 hours)").parentElement).toHaveTextContent("14");
         expect(screen.getByText("Recorded RBA reports").parentElement).toHaveTextContent("5");
-        expect(await screen.findByTestId("report-status-chart")).toHaveTextContent(
-            JSON.stringify([
-                { status: "SUBMITTED", reports: 3 },
-                { status: "ACCEPTED", reports: 2 },
-            ]),
-        );
+        expect(screen.queryByRole("heading", { name: "RBA Reports by Status" })).not.toBeInTheDocument();
         expect(screen.getByText("Recent compliance reports")).toBeInTheDocument();
         expect(screen.getByText("Recent audit activity")).toBeInTheDocument();
         expect(screen.getByText("GENERATE_REPORT")).toBeInTheDocument();
-        expect(screen.getByText("Manager Name · COMPLIANCE_REPORTS")).toBeInTheDocument();
+        expect(screen.getByText("Manager Name · Compliance report")).toBeInTheDocument();
         expect(screen.getByText("Fund oversight")).toBeInTheDocument();
         expect(screen.getByText("Growth Fund")).toBeInTheDocument();
-        expect(screen.getByText(/MEDIUM · 2 allocation records · Configured expected return 8\.25%/))
+        expect(screen.getByText(/Medium · 2 allocation records · Configured expected return 8\.25%/))
             .toBeInTheDocument();
         expect(await screen.findByRole("heading", { name: "Submitted reports awaiting review" })).toBeInTheDocument();
-        const reportRow = screen.getByRole("row", { name: /Worker Growth Achieng Manager SUBMITTED/ });
+        const reportRow = screen.getByRole("row", { name: /Worker Growth Achieng Manager Submitted/ });
         expect(reportRow).toHaveTextContent("Worker Growth");
         expect(reportRow).toHaveTextContent("Achieng Manager");
-        expect(reportRow).toHaveTextContent("SUBMITTED");
+        expect(reportRow).toHaveTextContent("Submitted");
         expect(reportRow.textContent).toMatch(/2026/);
         expect(screen.queryByRole("row", { name: /Community Growth/ })).not.toBeInTheDocument();
         expect(screen.queryByRole("row", { name: /report-3/ })).not.toBeInTheDocument();
         expect(screen.getByRole("link", { name: "View all reports" })).toHaveAttribute("href", "/regulator/compliance-reports");
         expect(screen.getByRole("link", { name: /Fund Oversight/ })).toHaveAttribute("href", "/regulator/funds");
+        expect(screen.getByRole("link", { name: /Analytics/ })).toHaveAttribute("href", "/regulator/analytics");
         expect(screen.getByRole("link", { name: /Compliance Reports/ })).toHaveAttribute("href", "/regulator/compliance-reports");
         expect(screen.getByRole("link", { name: /Audit Logs/ })).toHaveAttribute("href", "/regulator/audit-logs");
         expect(screen.getAllByRole("table")).toHaveLength(2);
@@ -141,23 +131,26 @@ describe("RegulatorDashboard", () => {
 
     it("displays parameter-check state without implying enforcement or approval", async () => {
         renderDashboard();
-        expect(await screen.findAllByText("NOT_CONFIGURED")).toHaveLength(2);
-        expect(screen.getAllByText("No check configuration is available.")).toHaveLength(2);
+        expect(await screen.findAllByText("Not configured")).toHaveLength(2);
+        expect(screen.getAllByText("The database schema contains no RBA-specific limits or parameter configuration to evaluate."))
+            .toHaveLength(2);
         expect(screen.queryByRole("button", { name: /approve|suspend|enforce/i })).not.toBeInTheDocument();
     });
 
     it("shows loading and retryable compliance errors", async () => {
         mocks.getComplianceOverview.mockRejectedValue(new Error("Compliance overview unavailable"));
         renderDashboard();
-        expect(await screen.findAllByText("Compliance overview unavailable")).toHaveLength(2);
-        expect(screen.getAllByRole("button", { name: "Try again" })).toHaveLength(2);
+        expect(await screen.findAllByText("Unable to load the compliance overview right now. Please try again.")).toHaveLength(1);
+        expect(screen.getAllByRole("button", { name: "Try again" })).toHaveLength(1);
     });
 
     it("shows a retryable error when submitted reports cannot be loaded", async () => {
         mocks.getComplianceReports.mockRejectedValue(new Error("Submitted reports unavailable"));
         renderDashboard();
-        expect(await screen.findAllByText("Submitted reports unavailable")).toHaveLength(2);
+        expect(await screen.findAllByText("Unable to load compliance reports right now. Please try again.")).toHaveLength(2);
         expect(screen.getByText("Unable to load submitted reports")).toBeInTheDocument();
+        expect(screen.queryByText("No compliance reports are available in the report register.")).not.toBeInTheDocument();
+        expect(screen.queryByText("No submitted reports are awaiting review.")).not.toBeInTheDocument();
     });
 
     it("shows an empty state when no submissions await review", async () => {
@@ -173,7 +166,7 @@ describe("RegulatorDashboard", () => {
         expect(await screen.findByText("No compliance reports are available in the report register.")).toBeInTheDocument();
         expect(screen.getByText("No operational audit events are available.")).toBeInTheDocument();
         expect(screen.getByText("No fund records are available.")).toBeInTheDocument();
-        expect(await screen.findByTestId("report-status-chart")).toHaveTextContent("[]");
+        expect(screen.queryByTestId("report-status-chart")).not.toBeInTheDocument();
         expect(await screen.findByText("No submitted reports are awaiting review.")).toBeInTheDocument();
         expect(screen.queryAllByRole("table")).toHaveLength(0);
     });

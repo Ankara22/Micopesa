@@ -47,7 +47,9 @@ function FundOversight() {
             <div className="page-header">
                 <div>
                     <h1 className="page-title">Fund Oversight</h1>
-                    <p className="page-subtitle">Read-only view of all pension funds on the platform.</p>
+                    <p className="page-subtitle">
+                        View pension funds available within your authorized regulatory scope.
+                    </p>
                 </div>
             </div>
 
@@ -59,7 +61,7 @@ function FundOversight() {
                 refreshing={fundsApi.refreshing}
                 error={fundsApi.error}
                 onRetry={fundsApi.refetch}
-                emptyMessage="No funds have been created yet."
+                emptyMessage="No funds are currently available within your authorized scope. Contact the platform administrator if you require fund access."
             />
 
             <Modal open={Boolean(viewingFund)} title={`Allocations - ${viewingFund?.fund_name || ""}`} onClose={() => setViewingFund(null)}>
