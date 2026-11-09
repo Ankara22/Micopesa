@@ -208,6 +208,8 @@ const workerRegistration = {
     phone: "07000000001",
     password: "password123",
     occupation: "OTHER_INFORMAL_WORKER",
+    national_id: "12345678",
+    date_of_birth: "1990-05-14",
 };
 
 test("public registration without a role creates a worker", async () => {
@@ -242,6 +244,32 @@ test("legitimate worker registration retains hashing and pension-account creatio
     assert.equal(userInsert.values[3], "hashed:password123");
     assert.equal(userInsert.values[2], "worker@example.com");
     assert.ok(calls.some(({ query }) => query.includes("INSERT INTO pension_accounts")));
+});
+
+test("registration stores the National ID and date of birth as a PENDING KYC record", async () => {
+    const { res, calls } = await registerWithMocks({ ...workerRegistration, phone: "07000000004" });
+    assert.equal(res.statusCode, 201);
+    const kycInsert = calls.find(({ query }) => query.includes("INSERT INTO kyc_records"));
+    assert.deepEqual(kycInsert.values.slice(1), ["12345678", "1990-05-14"]);
+    assert.match(kycInsert.query, /'PENDING'/);
+});
+
+test("registration rejects a missing or malformed National ID and invalid dates of birth", async () => {
+    const bad = [
+        { national_id: undefined },
+        { national_id: "1234" },
+        { national_id: "ABC12345" },
+        { date_of_birth: undefined },
+        { date_of_birth: "14/05/1990" },
+        { date_of_birth: "1990-02-31" },
+        { date_of_birth: new Date().toISOString().slice(0, 10) },
+        { date_of_birth: "1900-01-01" },
+    ];
+    for (const override of bad) {
+        const { res, calls } = await registerWithMocks({ ...workerRegistration, ...override });
+        assert.equal(res.statusCode, 400, JSON.stringify(override));
+        assert.ok(!calls.some(({ query }) => query.includes("INSERT INTO users")));
+    }
 });
 
 test("production startup fails when privileged signup is enabled", () => {

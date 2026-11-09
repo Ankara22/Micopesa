@@ -157,7 +157,14 @@
       "verificationRequestAccepted": "Ikiwa anwani hii inalingana na akaunti inayosubiri uthibitishaji, maelekezo yanaweza kutumwa.",
       "continueSignIn": "Endelea kuingia",
       "alreadyRegistered": "Tayari umesajiliwa?",
-      "signIn": "Ingia"
+      "signIn": "Ingia",
+      "nationalId": "Nambari ya Kitambulisho cha Taifa",
+      "nationalIdHint": "Tarakimu 7 au 8, kama ilivyoandikwa kwenye kitambulisho chako cha Kenya.",
+      "nationalIdRequired": "Nambari ya Kitambulisho cha Taifa inahitajika.",
+      "nationalIdInvalid": "Weka nambari ya Kitambulisho yenye tarakimu 7 au 8.",
+      "dateOfBirth": "Tarehe ya kuzaliwa",
+      "dobRequired": "Tarehe ya kuzaliwa inahitajika.",
+      "dobInvalid": "Lazima uwe na umri wa miaka 18 au zaidi ili kujisajili."
     },
     "forgot": {
       "eyebrow": "Urejeshaji wa akaunti",

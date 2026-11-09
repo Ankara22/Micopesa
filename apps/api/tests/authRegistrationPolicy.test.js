@@ -133,6 +133,7 @@ function configureDb() {
                     }] };
                 }
                 if (query.includes("INSERT INTO pension_accounts")) return { rows: [] };
+                if (query.includes("INSERT INTO kyc_records")) return { rows: [] };
                 if (query.includes("FROM auth_tokens")) {
                     const token = state.tokens.get(values[0]);
                     return token && !token.consumed
@@ -225,6 +226,8 @@ test("registration requires a valid normalized email and rejects duplicate addre
             phone: "07000000001",
             password: "secure-password",
             occupation: "OTHER_INFORMAL_WORKER",
+            national_id: "12345678",
+            date_of_birth: "1990-05-14",
         };
         assert.equal((await api.request("/register", base)).status, 400);
         assert.equal((await api.request("/register", { ...base, email: "not-an-email" })).status, 400);
@@ -262,6 +265,8 @@ test("client role and login-method overrides cannot change the EMAIL/WORKER regi
             phone: "07000000001",
             password: "secure-password",
             occupation: "OTHER_INFORMAL_WORKER",
+            national_id: "12345678",
+            date_of_birth: "1990-05-14",
             role: "ADMIN",
             login_method: "PHONE",
         });
@@ -283,6 +288,8 @@ test("EMAIL-policy accounts cannot use phone or unverified email; verified email
             phone: "07000000001",
             password: "secure-password",
             occupation: "OTHER_INFORMAL_WORKER",
+            national_id: "12345678",
+            date_of_birth: "1990-05-14",
         });
         assert.equal(registration.status, 201);
 
@@ -381,6 +388,8 @@ test("legacy PHONE-policy accounts keep phone login and public resend remains ge
             phone: "07000000010",
             password: "secure-password",
             occupation: "OTHER_INFORMAL_WORKER",
+            national_id: "12345678",
+            date_of_birth: "1990-05-14",
         });
         assert.equal(request.status, 201);
         assert.equal((await request.clone().json()).data.verificationEmailSent, false);
@@ -394,6 +403,8 @@ test("legacy PHONE-policy accounts keep phone login and public resend remains ge
             phone: "07000000011",
             password: "secure-password",
             occupation: "OTHER_INFORMAL_WORKER",
+            national_id: "12345678",
+            date_of_birth: "1990-05-14",
         });
         assert.equal(retryRegistration.status, 409);
         assert.equal(state.users.length, 2);

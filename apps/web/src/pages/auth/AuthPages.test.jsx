@@ -187,6 +187,8 @@ describe("authentication pages", () => {
         fireEvent.change(screen.getByLabelText("Full name"), { target: { value: "  Amina Worker  " } });
         fireEvent.change(screen.getByLabelText("Email address (used to sign in)"), { target: { value: "  AMINA@example.com " } });
         fireEvent.change(screen.getByLabelText("Phone number"), { target: { value: "  0712345678  " } });
+        fireEvent.change(screen.getByLabelText("National ID number"), { target: { value: "12345678" } });
+        fireEvent.change(screen.getByLabelText("Date of birth"), { target: { value: "1990-05-14" } });
         fireEvent.change(screen.getByRole("combobox", { name: "Occupation" }), {
             target: { value: "MARKET_VENDOR" },
         });
@@ -205,6 +207,8 @@ describe("authentication pages", () => {
             "0712345678",
             "secure-pass-1",
             "MARKET_VENDOR",
+            "12345678",
+            "1990-05-14",
         );
         fireEvent.click(screen.getByRole("button", { name: "Resend verification email" }));
         expect(await screen.findByText(/If an unverified email-login account matches this address/)).toBeInTheDocument();
@@ -234,6 +238,8 @@ describe("authentication pages", () => {
         fireEvent.change(screen.getByLabelText("Full name"), { target: { value: "Amina Worker" } });
         fireEvent.change(screen.getByLabelText("Email address (used to sign in)"), { target: { value: "amina@example.com" } });
         fireEvent.change(screen.getByLabelText("Phone number"), { target: { value: "0712345678" } });
+        fireEvent.change(screen.getByLabelText("National ID number"), { target: { value: "12345678" } });
+        fireEvent.change(screen.getByLabelText("Date of birth"), { target: { value: "1990-05-14" } });
         fireEvent.change(screen.getByRole("combobox", { name: "Occupation" }), {
             target: { value: "MARKET_VENDOR" },
         });
@@ -259,6 +265,8 @@ describe("authentication pages", () => {
         fireEvent.change(screen.getByLabelText("Full name"), { target: { value: "Amina Worker" } });
         fireEvent.change(screen.getByLabelText("Email address (used to sign in)"), { target: { value: "amina@example.com" } });
         fireEvent.change(screen.getByLabelText("Phone number"), { target: { value: "0712345678" } });
+        fireEvent.change(screen.getByLabelText("National ID number"), { target: { value: "12345678" } });
+        fireEvent.change(screen.getByLabelText("Date of birth"), { target: { value: "1990-05-14" } });
         fireEvent.change(screen.getByRole("combobox", { name: "Occupation" }), {
             target: { value: "MARKET_VENDOR" },
         });
@@ -278,11 +286,31 @@ describe("authentication pages", () => {
         expect(await screen.findByRole("heading", { name: "Verify your email" })).toBeInTheDocument();
     });
 
+    it("requires a valid National ID and an adult date of birth before registering", async () => {
+        renderAuth("/register");
+        fireEvent.change(screen.getByLabelText("Full name"), { target: { value: "Amina Worker" } });
+        fireEvent.change(screen.getByLabelText("Email address (used to sign in)"), { target: { value: "amina@example.com" } });
+        fireEvent.change(screen.getByLabelText("Phone number"), { target: { value: "0712345678" } });
+        fireEvent.change(screen.getByRole("combobox", { name: "Occupation" }), { target: { value: "MARKET_VENDOR" } });
+        fireEvent.change(screen.getByLabelText("Password"), { target: { value: "secure-pass-1" } });
+        fireEvent.change(screen.getByLabelText("Confirm password"), { target: { value: "secure-pass-1" } });
+
+        fireEvent.change(screen.getByLabelText("National ID number"), { target: { value: "123" } });
+        fireEvent.change(screen.getByLabelText("Date of birth"), { target: { value: "2015-01-01" } });
+        fireEvent.click(screen.getByRole("button", { name: "Create account" }));
+
+        expect(screen.getByText("Enter a 7 or 8 digit National ID number.")).toBeInTheDocument();
+        expect(screen.getByText("You must be at least 18 years old to register.")).toBeInTheDocument();
+        expect(authMocks.register).not.toHaveBeenCalled();
+    });
+
     it("validates registration passwords and presents API errors accessibly", async () => {
         renderAuth("/register");
         fireEvent.change(screen.getByLabelText("Full name"), { target: { value: "Amina Worker" } });
         fireEvent.change(screen.getByLabelText("Email address (used to sign in)"), { target: { value: "amina@example.com" } });
         fireEvent.change(screen.getByLabelText("Phone number"), { target: { value: "0712345678" } });
+        fireEvent.change(screen.getByLabelText("National ID number"), { target: { value: "12345678" } });
+        fireEvent.change(screen.getByLabelText("Date of birth"), { target: { value: "1990-05-14" } });
         fireEvent.change(screen.getByRole("combobox", { name: "Occupation" }), {
             target: { value: "MARKET_VENDOR" },
         });

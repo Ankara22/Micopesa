@@ -187,6 +187,46 @@ async function initiateStkPush({ phoneNumber, amount }) {
     };
 }
 
+/**
+ * Asks Daraja for the authoritative outcome of an STK Push request. Callbacks
+ * are unauthenticated HTTP calls, so a payment is only ever credited after this
+ * query agrees with the callback. Throws (statusCode 502/504) when the outcome
+ * cannot be confirmed; callers must then leave the payment PENDING.
+ */
+async function queryStkPushStatus({ checkoutRequestId }) {
+    if (typeof checkoutRequestId !== "string" || !checkoutRequestId) {
+        throw new Error("checkoutRequestId is required");
+    }
+    const configuration = getConfiguration();
+    const timestamp = getDarajaTimestamp();
+    const password = Buffer.from(`${configuration.shortcode}${configuration.passkey}${timestamp}`).toString("base64");
+    const accessToken = await getAccessToken(configuration);
+
+    const { body: response } = await requestJson(`${DARAJA_BASE_URL}/mpesa/stkpushquery/v1/query`, {
+        method: "POST",
+        headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+            BusinessShortCode: configuration.shortcode,
+            Password: password,
+            Timestamp: timestamp,
+            CheckoutRequestID: checkoutRequestId,
+        }),
+        requestStage: "stk_query",
+    });
+
+    const resultCode = Number(response.ResultCode);
+    if (!Number.isInteger(resultCode) || String(response.CheckoutRequestID) !== checkoutRequestId) {
+        const error = new Error("M-Pesa returned an unusable status response");
+        error.statusCode = 502;
+        error.requestStage = "stk_query";
+        throw error;
+    }
+    return { resultCode, resultDescription: typeof response.ResultDesc === "string" ? response.ResultDesc : null };
+}
+
 function assertConfigured() {
     getConfiguration();
 }
@@ -195,4 +235,4 @@ function maskPhoneNumber(phoneNumber) {
     return typeof phoneNumber === "string" ? `***${phoneNumber.slice(-4)}` : "unavailable";
 }
 
-module.exports = { initiateStkPush, normalizePhoneNumber, assertConfigured, maskPhoneNumber };
+module.exports = { initiateStkPush, queryStkPushStatus, normalizePhoneNumber, assertConfigured, maskPhoneNumber };

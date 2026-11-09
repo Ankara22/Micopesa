@@ -312,9 +312,12 @@ CREATE TABLE transactions (
         CHECK (transaction_type IN ('CONTRIBUTION', 'WITHDRAWAL')),
     amount                NUMERIC(12,2) NOT NULL CHECK (amount > 0),
     mpesa_receipt         VARCHAR(25),
-    checkout_request_id   VARCHAR(25),
+    checkout_request_id   VARCHAR(100),
+    mpesa_phone           VARCHAR(12),
+    mpesa_result_code     INTEGER,
+    mpesa_result_description VARCHAR(255),
     transaction_status    VARCHAR(15)  NOT NULL DEFAULT 'PENDING'
-        CHECK (transaction_status IN ('PENDING', 'COMPLETED', 'FAILED', 'REVERSED')),
+        CHECK (transaction_status IN ('PENDING', 'COMPLETED', 'FAILED', 'REVERSED', 'CANCELLED', 'TIMED_OUT')),
     initiated_at          TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
     completed_at          TIMESTAMP WITH TIME ZONE,
     updated_at            TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
@@ -344,7 +347,7 @@ CREATE TABLE contributions (
     channel               VARCHAR(20)  NOT NULL
         CHECK (channel IN ('MPESA', 'BANK', 'USSD')),
     contribution_status   VARCHAR(15)  NOT NULL DEFAULT 'PENDING'
-        CHECK (contribution_status IN ('PENDING', 'COMPLETED', 'FAILED')),
+        CHECK (contribution_status IN ('PENDING', 'COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT')),
     created_at            TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
     updated_at            TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
     CONSTRAINT uq_contributions_transaction_id UNIQUE (transaction_id),
@@ -376,6 +379,7 @@ CREATE TABLE withdrawal_claims (
     transaction_id      VARCHAR(25),
     amount_requested    NUMERIC(12,2) NOT NULL CHECK (amount_requested > 0),
     destination_phone   VARCHAR(15)  NOT NULL,
+    withdrawal_reason   VARCHAR(255),
     claim_status        VARCHAR(15)  NOT NULL DEFAULT 'PENDING'
         CHECK (claim_status IN ('PENDING', 'APPROVED', 'REJECTED', 'PAID')),
     requested_at        TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),

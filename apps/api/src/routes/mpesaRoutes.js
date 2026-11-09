@@ -6,6 +6,7 @@ const router = express.Router();
 
 router.post("/stkpush", requireAuth, requireRole("WORKER"), startStkPush);
 router.post("/callback", handleStkCallback);
+router.post("/callback/:secret", handleStkCallback);
 router.get("/status/:checkoutRequestId", requireAuth, requireRole("WORKER"), getStkPushStatus);
 
 module.exports = router;

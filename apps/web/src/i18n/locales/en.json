@@ -157,7 +157,14 @@
       "verificationRequestAccepted": "If an unverified email-login account matches this address, verification instructions can be sent.",
       "continueSignIn": "Continue to sign in",
       "alreadyRegistered": "Already registered?",
-      "signIn": "Sign in"
+      "signIn": "Sign in",
+      "nationalId": "National ID number",
+      "nationalIdHint": "7 or 8 digits, as printed on your Kenyan National ID.",
+      "nationalIdRequired": "National ID number is required.",
+      "nationalIdInvalid": "Enter a 7 or 8 digit National ID number.",
+      "dateOfBirth": "Date of birth",
+      "dobRequired": "Date of birth is required.",
+      "dobInvalid": "You must be at least 18 years old to register."
     },
     "forgot": {
       "eyebrow": "Account recovery",

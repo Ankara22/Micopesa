@@ -28,12 +28,32 @@ function normalizeEmail(value) {
 
 /**
  * POST /api/auth/register
- * Body: { full_name, email, phone, password, occupation }
+ * Body: { full_name, email, phone, password, occupation, national_id, date_of_birth }
  *
  * Public registration always creates a WORKER. Privileged roles must be
  * assigned through a separately authorized administrative or provisioning
  * workflow.
  */
+const MIN_REGISTRATION_AGE = 18;
+const MAX_REGISTRATION_AGE = 90;
+
+function normalizeNationalId(value) {
+    const text = typeof value === "string" || typeof value === "number" ? String(value).trim() : "";
+    return /^\d{7,8}$/.test(text) ? text : null;
+}
+
+function parseDateOfBirth(value, now = new Date()) {
+    if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+    const date = new Date(`${value}T00:00:00Z`);
+    if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value) return null;
+    let age = now.getUTCFullYear() - date.getUTCFullYear();
+    const birthdayPassed =
+        now.getUTCMonth() > date.getUTCMonth() ||
+        (now.getUTCMonth() === date.getUTCMonth() && now.getUTCDate() >= date.getUTCDate());
+    if (!birthdayPassed) age -= 1;
+    return age >= MIN_REGISTRATION_AGE && age <= MAX_REGISTRATION_AGE ? value : null;
+}
+
 async function register(req, res) {
     const { full_name, phone, password, occupation } = req.body || {};
     const email = normalizeEmail(req.body?.email);
@@ -57,6 +77,21 @@ async function register(req, res) {
         return res.status(400).json({
             status: "error",
             message: `occupation must be one of: ${VALID_OCCUPATIONS.join(", ")}`,
+        });
+    }
+
+    const nationalId = normalizeNationalId(req.body?.national_id);
+    if (!nationalId) {
+        return res.status(400).json({
+            status: "error",
+            message: "national_id must be a 7 or 8 digit Kenyan National ID number",
+        });
+    }
+    const dateOfBirth = parseDateOfBirth(req.body?.date_of_birth);
+    if (!dateOfBirth) {
+        return res.status(400).json({
+            status: "error",
+            message: `date_of_birth must be a valid date (YYYY-MM-DD) for someone aged ${MIN_REGISTRATION_AGE} to ${MAX_REGISTRATION_AGE}`,
         });
     }
 
@@ -98,6 +133,13 @@ async function register(req, res) {
                  ON CONFLICT (user_id) DO NOTHING`,
                 [user.user_id]
             );
+            // Captured for later verification; status stays PENDING because no
+            // identity-registry (IPRS) check is performed by this application.
+            await client.query(
+                `INSERT INTO kyc_records (user_id, national_id, date_of_birth, kyc_status)
+                 VALUES ($1, $2, $3, 'PENDING')`,
+                [user.user_id, nationalId, dateOfBirth]
+            );
         }
         await client.query("COMMIT");
         client.release();
@@ -129,7 +171,9 @@ async function register(req, res) {
         if (error.code === "23505") {
             return res.status(409).json({
                 status: "error",
-                message: "An account already uses this phone number or email address",
+                message: error.constraint === "uq_kyc_records_national_id"
+                    ? "An account already uses this National ID number"
+                    : "An account already uses this phone number or email address",
             });
         }
         console.error("Registration failed:", error);

@@ -7,6 +7,23 @@ import { useTranslation } from "react-i18next";
 import "./auth.css";
 
 const MIN_PASSWORD_LENGTH = 8;
+const MIN_AGE = 18;
+
+function todayIso() {
+    return new Date().toISOString().slice(0, 10);
+}
+
+function validateDateOfBirth(value) {
+    if (!value) return "auth.register.dobRequired";
+    const dob = new Date(`${value}T00:00:00Z`);
+    if (Number.isNaN(dob.getTime())) return "auth.register.dobInvalid";
+    const now = new Date();
+    let age = now.getUTCFullYear() - dob.getUTCFullYear();
+    const birthdayPassed = now.getUTCMonth() > dob.getUTCMonth()
+        || (now.getUTCMonth() === dob.getUTCMonth() && now.getUTCDate() >= dob.getUTCDate());
+    if (!birthdayPassed) age -= 1;
+    return age >= MIN_AGE && age <= 90 ? "" : "auth.register.dobInvalid";
+}
 
 function Register() {
     const { register } = useAuth();
@@ -16,6 +33,8 @@ function Register() {
     const [email, setEmail] = useState("");
     const [phone, setPhone] = useState("");
     const [occupation, setOccupation] = useState("");
+    const [nationalId, setNationalId] = useState("");
+    const [dateOfBirth, setDateOfBirth] = useState("");
     const [password, setPassword] = useState("");
     const [confirmPassword, setConfirmPassword] = useState("");
     const [isSubmitting, setIsSubmitting] = useState(false);
@@ -48,6 +67,10 @@ function Register() {
         if (!normalizedEmail) nextFieldErrors.email = "auth.register.emailRequired";
         else nextFieldErrors.email = validateEmail(normalizedEmail);
         if (!normalizedPhone) nextFieldErrors.phone = "auth.register.phoneRequired";
+        const normalizedNationalId = nationalId.trim();
+        if (!normalizedNationalId) nextFieldErrors.nationalId = "auth.register.nationalIdRequired";
+        else if (!/^\d{7,8}$/.test(normalizedNationalId)) nextFieldErrors.nationalId = "auth.register.nationalIdInvalid";
+        nextFieldErrors.dateOfBirth = validateDateOfBirth(dateOfBirth);
         setFieldErrors(nextFieldErrors);
         if (Object.values(nextFieldErrors).some(Boolean) || !password || !confirmPassword) {
             setFormError(!password || !confirmPassword ? "auth.register.passwordRequired" : "");
@@ -72,7 +95,10 @@ function Register() {
         submissionInProgress.current = true;
         setIsSubmitting(true);
         try {
-            const result = await register(normalizedName, normalizedEmail, normalizedPhone, password, occupation);
+            const result = await register(
+                normalizedName, normalizedEmail, normalizedPhone, password, occupation,
+                normalizedNationalId, dateOfBirth,
+            );
             if (!result.success) {
                 setFormError("auth.register.createError");
                 return;
@@ -199,6 +225,49 @@ function Register() {
                             required
                         />
                         {fieldErrors.phone && <span id="register-phone-error" className="auth-field-hint" role="alert">{t(fieldErrors.phone)}</span>}
+                    </div>
+                    <div className="auth-field">
+                        <label htmlFor="register-national-id">{t("auth.register.nationalId")}</label>
+                        <input
+                            id="register-national-id"
+                            name="national_id"
+                            type="text"
+                            inputMode="numeric"
+                            autoComplete="off"
+                            maxLength={8}
+                            value={nationalId}
+                            onChange={(e) => {
+                                setNationalId(e.target.value.replace(/\D/g, ""));
+                                setFieldErrors((current) => ({ ...current, nationalId: "" }));
+                            }}
+                            disabled={isSubmitting}
+                            aria-invalid={Boolean(fieldErrors.nationalId)}
+                            aria-describedby={fieldErrors.nationalId ? "register-national-id-error" : "register-national-id-help"}
+                            required
+                        />
+                        {fieldErrors.nationalId
+                            ? <span id="register-national-id-error" className="auth-field-hint" role="alert">{t(fieldErrors.nationalId)}</span>
+                            : <span id="register-national-id-help" className="auth-field-hint">{t("auth.register.nationalIdHint")}</span>}
+                    </div>
+                    <div className="auth-field">
+                        <label htmlFor="register-dob">{t("auth.register.dateOfBirth")}</label>
+                        <input
+                            id="register-dob"
+                            name="date_of_birth"
+                            type="date"
+                            autoComplete="bday"
+                            max={todayIso()}
+                            value={dateOfBirth}
+                            onChange={(e) => {
+                                setDateOfBirth(e.target.value);
+                                setFieldErrors((current) => ({ ...current, dateOfBirth: "" }));
+                            }}
+                            disabled={isSubmitting}
+                            aria-invalid={Boolean(fieldErrors.dateOfBirth)}
+                            aria-describedby={fieldErrors.dateOfBirth ? "register-dob-error" : undefined}
+                            required
+                        />
+                        {fieldErrors.dateOfBirth && <span id="register-dob-error" className="auth-field-hint" role="alert">{t(fieldErrors.dateOfBirth)}</span>}
                     </div>
                     <div className="auth-field">
                         <label htmlFor="register-occupation">{t("auth.register.occupation")}</label>

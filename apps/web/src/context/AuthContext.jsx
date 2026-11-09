@@ -218,10 +218,12 @@ export function AuthProvider({ children }) {
             }
         }
     }, []);
-    const register = useCallback(async (full_name, email, phone, password, occupation) => {
+    const register = useCallback(async (full_name, email, phone, password, occupation, national_id, date_of_birth) => {
         setError(null);
         try {
             const payload = { full_name, email, phone, password, occupation };
+            if (national_id !== undefined) payload.national_id = national_id;
+            if (date_of_birth !== undefined) payload.date_of_birth = date_of_birth;
             const response = await api.post("/api/auth/register", payload);
             const { user: newUser, verificationEmailSent } = response.data.data;
             return { success: true, user: newUser, verificationEmailSent };
