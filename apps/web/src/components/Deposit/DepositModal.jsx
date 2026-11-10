@@ -3,11 +3,9 @@ import { useTranslation } from "react-i18next";
 import { formatDateTime, formatKes } from "../../i18n/formatters";
 import { getMyBalance, getMyContributions } from "../../services/accountService";
 import {
-    confirmSimulatedPayment,
     getPaymentProvider,
     getStkPushStatus,
     getStkPushStatusByIdempotencyKey,
-    initiateStkPush,
 } from "../../services/mpesaApi";
 import { useToast } from "../ui/ToastContext";
 import Button from "../ui/Button";
@@ -51,7 +49,6 @@ function DepositModal({ open, onClose, onCompleted }) {
     const [tab, setTab] = useState("mpesa");
     const [amount, setAmount] = useState("");
     const [phoneNumber, setPhoneNumber] = useState("");
-    const [submitting, setSubmitting] = useState(false);
     const [payment, setPayment] = useState(null);
     const [pollMessageKey, setPollMessageKey] = useState("");
     const [startErrorKey, setStartErrorKey] = useState("");
@@ -68,7 +65,6 @@ function DepositModal({ open, onClose, onCompleted }) {
     const submissionInProgressRef = useRef(false);
     const statusCheckInProgressRef = useRef(false);
     const idempotencyKeyRef = useRef(null);
-    const retryContributionRef = useRef(null);
     const completedTransactionRef = useRef(null);
     const callbacksRef = useRef({ onCompleted });
 
@@ -107,13 +103,6 @@ function DepositModal({ open, onClose, onCompleted }) {
         setCheckingStatus(true);
         try {
             const attemptStatus = getAttemptStatus(paymentSnapshot);
-            const alreadyTerminal = isSettled(paymentSnapshot) ||
-                terminalAttemptStatuses.has(attemptStatus) ||
-                ["FAILED", "REVERSED", "CANCELLED", "TIMED_OUT"]
-                    .includes(paymentSnapshot?.transaction_status);
-            if (paymentSnapshot?.simulated && !alreadyTerminal) {
-                await confirmSimulatedPayment(paymentSnapshot.attempt_id);
-            }
             const latest = await getStkPushStatus(statusReference);
             const latestAttemptStatus = latest.attempt_status;
             const normalizedLatest = {
@@ -295,106 +284,9 @@ function DepositModal({ open, onClose, onCompleted }) {
         checkPaymentStatus,
     ]);
 
-    async function handleSubmit(event) {
+    function handleSubmit(event) {
         event.preventDefault();
-        if (submissionInProgressRef.current || restoringStatus) return;
-        submissionInProgressRef.current = true;
-        setSubmitting(true);
-        setPollMessageKey("");
-        setStartErrorKey("");
-        setSubmissionUnknown(false);
-        setMissingAttemptForKey(false);
-        try {
-            let idempotencyKey = idempotencyKeyRef.current;
-            if (!idempotencyKey) {
-                try {
-                    idempotencyKey = window.sessionStorage.getItem(PAYMENT_IDEMPOTENCY_KEY);
-                } catch {
-                    setStartErrorKey("worker.depositModal.statusRecoveryUnavailable");
-                    return;
-                }
-            }
-            if (!idempotencyKey) {
-                if (typeof window.crypto?.randomUUID !== "function") {
-                    setStartErrorKey("worker.depositModal.statusRecoveryUnavailable");
-                    return;
-                }
-                idempotencyKey = window.crypto.randomUUID();
-            }
-            try {
-                window.sessionStorage.setItem(PAYMENT_IDEMPOTENCY_KEY, idempotencyKey);
-            } catch {
-                setStartErrorKey("worker.depositModal.statusRecoveryUnavailable");
-                return;
-            }
-            idempotencyKeyRef.current = idempotencyKey;
-            const providerConfiguration = providerLoading
-                ? await getPaymentProvider()
-                : { provider: paymentProvider };
-            const selectedProvider = providerConfiguration.provider;
-            if (selectedProvider === "SIMULATOR") {
-                setPaymentProvider("SIMULATOR");
-            }
-            const result = await initiateStkPush({
-                amount: Number(amount),
-                phoneNumber,
-                idempotencyKey,
-                contributionId: retryContributionRef.current || undefined,
-                ...(selectedProvider === "SIMULATOR" ? { provider: selectedProvider } : {}),
-            });
-            retryContributionRef.current = null;
-            const reference = statusReferenceFor(result);
-            if (reference) {
-                try {
-                    window.sessionStorage.setItem(LAST_STATUS_REFERENCE_KEY, reference);
-                } catch {
-                    setPollMessageKey("worker.depositModal.statusRecoveryUnavailable");
-                }
-            }
-            setPayment({
-                ...result,
-                simulated: result.payment_provider === "SIMULATED" || result.simulated === true,
-                transaction_status: result.transaction_status || "PENDING",
-            });
-            setSettlementConfirmed(result.settlement_confirmed === true);
-            setSettlementRefreshError(false);
-            setPollingStopped(false);
-            setAmount("");
-            if (result.settlement_confirmed === true) {
-                try {
-                    window.sessionStorage.removeItem(LAST_STATUS_REFERENCE_KEY);
-                    window.sessionStorage.removeItem(PAYMENT_IDEMPOTENCY_KEY);
-                    idempotencyKeyRef.current = null;
-                } catch {
-                    setPollMessageKey("worker.depositModal.statusRecoveryUnavailable");
-                }
-                callbacksRef.current.onCompleted?.(result);
-                toast.success(i18n.t("worker.depositModal.depositSuccessfulToast"));
-            }
-            if (!result.simulated) {
-                const messageKey = result.payment_status === "OUTCOME_UNKNOWN"
-                    ? "worker.depositModal.promptConfirmationPending"
-                    : result.payment_status === "PROMPT_ACCEPTED"
-                        ? "worker.depositModal.promptAcceptedToast"
-                        : "worker.depositModal.sendingPrompt";
-                toast.info(i18n.t(messageKey));
-            }
-        } catch (error) {
-            if (error?.status === 401) {
-                setStartErrorKey("worker.depositModal.sessionExpired");
-            } else if (error?.status === 403) {
-                setStartErrorKey("worker.depositModal.startForbidden");
-            } else if (error?.status === 503) {
-                setStartErrorKey("worker.depositModal.initiationUnavailable");
-            } else if (error?.status == null || error?.status >= 500 || error?.code === "INVALID_MPESA_RESPONSE") {
-                setSubmissionUnknown(true);
-            } else {
-                setStartErrorKey("worker.depositModal.startPaymentError");
-            }
-        } finally {
-            submissionInProgressRef.current = false;
-            setSubmitting(false);
-        }
+        setStartErrorKey("worker.depositModal.paymentDisabled");
     }
 
     async function handleManualStatusCheck() {
@@ -643,9 +535,7 @@ function DepositModal({ open, onClose, onCompleted }) {
                                                 loading={checkingStatus}
                                                 onClick={handleManualStatusCheck}
                                             >
-                                                {payment.simulated
-                                                    ? t("worker.depositModal.retrySimulatorConfirmation")
-                                                    : t("worker.depositModal.checkStatus")}
+                                                {t("worker.depositModal.checkStatus")}
                                             </Button>
                                         </div>
                                     )}
@@ -655,8 +545,6 @@ function DepositModal({ open, onClose, onCompleted }) {
                                                 variant="secondary"
                                                 size="sm"
                                                 onClick={() => {
-                                                    retryContributionRef.current =
-                                                        payment.contribution_id || null;
                                                     setPayment(null);
                                                     try {
                                                         window.sessionStorage.removeItem(LAST_STATUS_REFERENCE_KEY);
@@ -684,12 +572,9 @@ function DepositModal({ open, onClose, onCompleted }) {
                             </div>
                         ) : (
                             <form className="form-grid" onSubmit={handleSubmit}>
-                                {paymentProvider === "SIMULATOR" ? (
-                                    <p className="deposit-simulator-notice" role="note">
-                                        <strong>{t("worker.depositModal.simulatedLabel")}</strong>{" "}
-                                        {t("worker.depositModal.simulatorIntro")}
-                                    </p>
-                                ) : <p className="deposit-intro">{t("worker.depositModal.intro")}</p>}
+                                <p className="deposit-intro" role="status">
+                                    {t("worker.depositModal.paymentDisabled")}
+                                </p>
                                 {providerLoading && <p role="status">{t("worker.depositModal.loadingProvider")}</p>}
                                 {providerError && (
                                     <p className="deposit-poll-message" role="alert">
@@ -715,7 +600,7 @@ function DepositModal({ open, onClose, onCompleted }) {
                                             setStartErrorKey("worker.depositModal.statusRecoveryUnavailable");
                                         }
                                     }}
-                                    disabled={submitting}
+                                    disabled
                                 />
                                 <FormField
                                     id="deposit-phone"
@@ -736,17 +621,14 @@ function DepositModal({ open, onClose, onCompleted }) {
                                             setStartErrorKey("worker.depositModal.statusRecoveryUnavailable");
                                         }
                                     }}
-                                    disabled={submitting}
+                                    disabled
                                 />
                                 <Button
                                     type="submit"
                                     variant="primary"
-                                    loading={submitting || restoringStatus}
-                                    disabled={restoringStatus || providerError}
+                                    disabled
                                 >
-                                    {paymentProvider === "SIMULATOR"
-                                        ? t("worker.depositModal.runSimulation")
-                                        : t("worker.depositModal.sendPrompt")}
+                                    {t("worker.depositModal.paymentDisabledButton")}
                                 </Button>
                             </form>
                         )}

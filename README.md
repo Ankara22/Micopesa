@@ -6,18 +6,18 @@
 
 Use `npm run test:unit` for API unit tests and `npm run test:web` for frontend tests. The database-backed regression and PostgreSQL concurrency tests are excluded from the normal test command.
 
-Database-backed tests are explicit and require `NODE_ENV=test`, `TEST_DATABASE_URL` for a local PostgreSQL database named exactly `micopesa_test`, and a successful `current_database()`/loopback identity check before tests run. Run a selected test without resetting the schema with:
+Database-backed tests are explicit and require `NODE_ENV=test`, `TEST_DATABASE_URL` for `127.0.0.1:5544/micopesa_registration_test`, and a successful `current_database()`/loopback identity check before tests run. Run a selected test without resetting the schema with:
 
 ```powershell
 npm run test:integration -- apps/api/tests/regression.test.js
 ```
 
-To reset the dedicated database before running selected tests, also set `ALLOW_DESTRUCTIVE_TEST_DB_SETUP=1` and provide `TEST_DATABASE_ADMIN_URL` for a separate database on the same local server, then run:
+To reset the dedicated database before running selected tests, also set `ALLOW_DESTRUCTIVE_TEST_DB_SETUP=1` and provide `TEST_DATABASE_ADMIN_URL` for `127.0.0.1:5544/postgres`, then run:
 
 ```powershell
 npm run test:db -- apps/api/tests/regression.test.js
 ```
 
-The setup refuses missing databases rather than creating or redirecting them. It applies the canonical schema and listed migrations, which drop/recreate application tables; use only a disposable `micopesa_test` database. `db:test:setup` has the same safeguards. Database teardown is separate and requires `NODE_ENV=test` and `ALLOW_DESTRUCTIVE_TEST_DB_TEARDOWN=1` in addition to the verified local database URLs.
+The setup refuses missing databases rather than creating or redirecting them. It applies the canonical schema and listed migrations, which drop/recreate application tables; use only the disposable `micopesa_registration_test` database at the exact target above. `db:test:setup` has the same safeguards. Database teardown is separate and requires `NODE_ENV=test` and `ALLOW_DESTRUCTIVE_TEST_DB_TEARDOWN=1` in addition to the verified local database URLs.
 
 Connection details must be supplied through shell environment variables; test commands do not load `.env` files. Database-backed tests can mutate the dedicated test database. Mocked tests do not establish PostgreSQL concurrency behavior, and no test command initiates M-Pesa payments or contacts a provider.

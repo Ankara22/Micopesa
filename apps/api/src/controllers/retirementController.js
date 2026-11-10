@@ -34,8 +34,10 @@ async function getPlan(req, res) {
         );
         const plan = planResult.rows[0] || null;
         if (!plan) {
-            return res.status(200).json({
-                status: "success",
+            return res.status(404).json({
+                status: "error",
+                code: "RETIREMENT_PLAN_NOT_FOUND",
+                message: "No active retirement plan found",
                 data: {
                     plan: null,
                     projection: null,
