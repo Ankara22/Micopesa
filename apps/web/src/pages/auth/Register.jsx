@@ -1,12 +1,38 @@
 import { useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useAuth } from "../../context/AuthContext";
-import { requestEmailVerificationForAddress } from "../../services/authEmailApi";
 import AuthLayout from "./AuthLayout";
 import { useTranslation } from "react-i18next";
 import "./auth.css";
 
-const MIN_PASSWORD_LENGTH = 8;
+const REGISTRATION_ERROR_KEYS = {
+    INVALID_NATIONAL_ID: "auth.register.invalidNationalId",
+    INVALID_DATE_OF_BIRTH: "auth.register.invalidDateOfBirth",
+    WORKER_AGE_OUT_OF_RANGE: "auth.register.workerAgeOutOfRange",
+};
+
+function getWorkerAge(dateOfBirth) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateOfBirth)) return null;
+    const [year, month, day] = dateOfBirth.split("-").map(Number);
+    const birthDate = new Date(Date.UTC(year, month - 1, day));
+    if (
+        birthDate.getUTCFullYear() !== year ||
+        birthDate.getUTCMonth() !== month - 1 ||
+        birthDate.getUTCDate() !== day
+    ) return null;
+
+    const now = new Date();
+    const currentYear = now.getUTCFullYear();
+    const currentMonth = now.getUTCMonth();
+    const currentDay = now.getUTCDate();
+    if (birthDate > Date.UTC(currentYear, currentMonth, currentDay)) return null;
+
+    let age = currentYear - year;
+    if (currentMonth < month - 1 || (currentMonth === month - 1 && currentDay < day)) {
+        age -= 1;
+    }
+    return age;
+}
 
 function Register() {
     const { register } = useAuth();
@@ -15,17 +41,13 @@ function Register() {
     const [fullName, setFullName] = useState("");
     const [email, setEmail] = useState("");
     const [phone, setPhone] = useState("");
+    const [nationalId, setNationalId] = useState("");
+    const [dateOfBirth, setDateOfBirth] = useState("");
     const [occupation, setOccupation] = useState("");
-    const [password, setPassword] = useState("");
-    const [confirmPassword, setConfirmPassword] = useState("");
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [formError, setFormError] = useState("");
     const [fieldErrors, setFieldErrors] = useState({});
-    const [registeredEmail, setRegisteredEmail] = useState("");
-    const [verificationEmailSent, setVerificationEmailSent] = useState(null);
-    const [verificationMessage, setVerificationMessage] = useState("");
-    const [verificationError, setVerificationError] = useState("");
-    const [isResending, setIsResending] = useState(false);
+    const [registrationSubmitted, setRegistrationSubmitted] = useState(false);
     const submissionInProgress = useRef(false);
 
     function validateEmail(value) {
@@ -48,39 +70,44 @@ function Register() {
         if (!normalizedEmail) nextFieldErrors.email = "auth.register.emailRequired";
         else nextFieldErrors.email = validateEmail(normalizedEmail);
         if (!normalizedPhone) nextFieldErrors.phone = "auth.register.phoneRequired";
-        setFieldErrors(nextFieldErrors);
-        if (Object.values(nextFieldErrors).some(Boolean) || !password || !confirmPassword) {
-            setFormError(!password || !confirmPassword ? "auth.register.passwordRequired" : "");
-            return;
+        const normalizedNationalId = nationalId.trim();
+        if (!normalizedNationalId) nextFieldErrors.nationalId = "auth.register.nationalIdRequired";
+        else if (!/^\d{7,8}$/.test(normalizedNationalId)) {
+            nextFieldErrors.nationalId = "auth.register.invalidNationalId";
         }
+        const normalizedDateOfBirth = dateOfBirth.trim();
+        const workerAge = getWorkerAge(normalizedDateOfBirth);
+        if (!normalizedDateOfBirth) {
+            nextFieldErrors.dateOfBirth = "auth.register.dateOfBirthRequired";
+        } else if (workerAge === null) {
+            nextFieldErrors.dateOfBirth = "auth.register.invalidDateOfBirth";
+        } else if (workerAge < 18 || workerAge > 60) {
+            nextFieldErrors.dateOfBirth = "auth.register.workerAgeOutOfRange";
+        }
+        setFieldErrors(nextFieldErrors);
+        if (Object.values(nextFieldErrors).some(Boolean)) return;
 
         if (!occupation) {
             setFormError("auth.register.occupationRequired");
             return;
         }
 
-        if (password.length < MIN_PASSWORD_LENGTH) {
-            setFormError("auth.register.passwordTooShort");
-            return;
-        }
-
-        if (password !== confirmPassword) {
-            setFormError("auth.register.passwordMismatch");
-            return;
-        }
-
         submissionInProgress.current = true;
         setIsSubmitting(true);
         try {
-            const result = await register(normalizedName, normalizedEmail, normalizedPhone, password, occupation);
+            const result = await register(
+                normalizedName,
+                normalizedEmail,
+                normalizedPhone,
+                occupation,
+                normalizedNationalId,
+                normalizedDateOfBirth,
+            );
             if (!result.success) {
-                setFormError("auth.register.createError");
+                setFormError(REGISTRATION_ERROR_KEYS[result.code] || "auth.register.createError");
                 return;
             }
-            setRegisteredEmail(normalizedEmail);
-            setVerificationEmailSent(
-                typeof result.verificationEmailSent === "boolean" ? result.verificationEmailSent : null,
-            );
+            setRegistrationSubmitted(true);
         } catch {
             setFormError("auth.register.genericError");
         } finally {
@@ -89,56 +116,29 @@ function Register() {
         }
     }
 
-    async function handleResendVerification() {
-        if (isResending || !registeredEmail) return;
-        setIsResending(true);
-        setVerificationMessage("");
-        setVerificationError("");
-        try {
-            await requestEmailVerificationForAddress(registeredEmail);
-            setVerificationMessage("auth.register.verificationRequestAccepted");
-        } catch {
-            setVerificationError("auth.register.verificationRequestError");
-        } finally {
-            setIsResending(false);
-        }
-    }
-
     return (
         <AuthLayout variant="register">
             <div className="auth-card auth-card-register">
                 <p className="auth-eyebrow auth-card-eyebrow">{t("auth.register.eyebrow")}</p>
-                <h1>{registeredEmail ? t("auth.register.verifyTitle") : t("auth.register.title")}</h1>
+                <h1>{registrationSubmitted ? t("auth.register.verifyTitle") : t("auth.register.title")}</h1>
                 <p className="auth-subtitle">
-                    {registeredEmail
-                        ? t("auth.register.verifyDescription", { email: registeredEmail })
+                    {registrationSubmitted
+                        ? t("auth.register.verifyDescription")
                         : t("auth.register.description")}
                 </p>
 
-                {!registeredEmail && formError && (
+                {!registrationSubmitted && formError && (
                     <div className="auth-error" id="register-error" role="alert">
-                        {t(formError, { count: MIN_PASSWORD_LENGTH })}
+                        {t(formError)}
                     </div>
                 )}
 
-                {registeredEmail ? (
+                {registrationSubmitted ? (
                     <section className="auth-form" aria-label={t("auth.register.verificationInstructions")}>
-                        {verificationEmailSent === false ? (
-                            <div className="auth-error" role="alert">
-                                {t("auth.register.deliveryFailed")}
-                            </div>
-                        ) : (
-                            <div className="auth-success" role="status">
-                                {verificationEmailSent === true
-                                    ? t("auth.register.emailSent")
-                                    : t("auth.register.checkInbox")}
-                            </div>
-                        )}
-                        {verificationError && <div className="auth-error" role="alert">{t(verificationError)}</div>}
-                        {verificationMessage && <div className="auth-success" role="status">{t(verificationMessage)}</div>}
-                        <button className="auth-submit" type="button" onClick={handleResendVerification} disabled={isResending}>
-                            {isResending ? t("auth.register.requesting") : t("auth.register.resend")}
-                        </button>
+                        <div className="auth-success" role="status">
+                            {t("auth.register.checkInbox")}
+                        </div>
+                        <p>{t("auth.register.setPasswordAfterVerification")}</p>
                         <p className="auth-footer"><Link to="/login">{t("auth.register.continueSignIn")}</Link></p>
                     </section>
                 ) : <form className="auth-form auth-register-form" onSubmit={handleSubmit} noValidate aria-busy={isSubmitting}>
@@ -201,6 +201,49 @@ function Register() {
                         {fieldErrors.phone && <span id="register-phone-error" className="auth-field-hint" role="alert">{t(fieldErrors.phone)}</span>}
                     </div>
                     <div className="auth-field">
+                        <label htmlFor="register-national-id">{t("auth.register.nationalId")}</label>
+                        <input
+                            id="register-national-id"
+                            name="national_id"
+                            type="text"
+                            inputMode="numeric"
+                            autoComplete="off"
+                            value={nationalId}
+                            onChange={(event) => {
+                                setNationalId(event.target.value);
+                                setFieldErrors((current) => ({ ...current, nationalId: "" }));
+                            }}
+                            disabled={isSubmitting}
+                            aria-invalid={Boolean(fieldErrors.nationalId)}
+                            aria-describedby={fieldErrors.nationalId ? "register-national-id-error" : "register-national-id-hint"}
+                            required
+                        />
+                        <span id="register-national-id-hint" className="auth-field-hint">
+                            {t("auth.register.nationalIdHint")}
+                        </span>
+                        {fieldErrors.nationalId && <span id="register-national-id-error" className="auth-field-hint" role="alert">{t(fieldErrors.nationalId)}</span>}
+                    </div>
+                    <div className="auth-field">
+                        <label htmlFor="register-date-of-birth">{t("auth.register.dateOfBirth")}</label>
+                        <input
+                            id="register-date-of-birth"
+                            name="date_of_birth"
+                            type="date"
+                            autoComplete="bday"
+                            max={new Date().toISOString().slice(0, 10)}
+                            value={dateOfBirth}
+                            onChange={(event) => {
+                                setDateOfBirth(event.target.value);
+                                setFieldErrors((current) => ({ ...current, dateOfBirth: "" }));
+                            }}
+                            disabled={isSubmitting}
+                            aria-invalid={Boolean(fieldErrors.dateOfBirth)}
+                            aria-describedby={fieldErrors.dateOfBirth ? "register-date-of-birth-error" : undefined}
+                            required
+                        />
+                        {fieldErrors.dateOfBirth && <span id="register-date-of-birth-error" className="auth-field-hint" role="alert">{t(fieldErrors.dateOfBirth)}</span>}
+                    </div>
+                    <div className="auth-field">
                         <label htmlFor="register-occupation">{t("auth.register.occupation")}</label>
                         <select
                             id="register-occupation"
@@ -221,45 +264,12 @@ function Register() {
                             <option value="OTHER_INFORMAL_WORKER">{t("auth.register.occupations.OTHER_INFORMAL_WORKER")}</option>
                         </select>
                     </div>
-                    <div className="auth-field">
-                        <label htmlFor="register-password">{t("auth.register.password")}</label>
-                        <input
-                            id="register-password"
-                            name="password"
-                            type="password"
-                            autoComplete="new-password"
-                            value={password}
-                            onChange={(e) => setPassword(e.target.value)}
-                            disabled={isSubmitting}
-                            aria-describedby={formError ? "register-error" : "password-help"}
-                            required
-                            minLength={MIN_PASSWORD_LENGTH}
-                        />
-                        <span id="password-help" className="auth-field-hint">
-                            {t("auth.register.passwordHint", { count: MIN_PASSWORD_LENGTH })}
-                        </span>
-                    </div>
-                    <div className="auth-field">
-                        <label htmlFor="register-confirm-password">{t("auth.register.confirmPassword")}</label>
-                        <input
-                            id="register-confirm-password"
-                            name="confirm_password"
-                            type="password"
-                            autoComplete="new-password"
-                            value={confirmPassword}
-                            onChange={(e) => setConfirmPassword(e.target.value)}
-                            disabled={isSubmitting}
-                            aria-describedby={formError ? "register-error" : undefined}
-                            required
-                            minLength={MIN_PASSWORD_LENGTH}
-                        />
-                    </div>
                     <button type="submit" className="auth-submit" disabled={isSubmitting} aria-busy={isSubmitting}>
                         {isSubmitting ? t("auth.register.submitting") : t("auth.register.create")}
                     </button>
                 </form>}
 
-                {!registeredEmail && <p className="auth-footer">
+                {!registrationSubmitted && <p className="auth-footer">
                     {t("auth.register.alreadyRegistered")} <Link to="/login">{t("auth.register.signIn")}</Link>
                 </p>}
             </div>

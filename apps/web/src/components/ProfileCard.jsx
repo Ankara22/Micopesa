@@ -63,6 +63,13 @@ function formatDate(value, language, fallback) {
     return formatLocaleDate(value, language) || fallback;
 }
 
+function formatBirthDate(value, language, fallback) {
+    const dateValue = typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)
+        ? `${value}T12:00:00`
+        : value;
+    return formatDate(dateValue, language, fallback);
+}
+
 function ProfileCard() {
     const { t, i18n } = useTranslation();
     const {
@@ -443,6 +450,24 @@ function ProfileCard() {
                                     : profile.occupation
                                 : profileText("notProvided", "Not provided")}</dd>
                         </div>
+                        {isWorker && (
+                            <>
+                                <div className="profile-detail">
+                                    <dt><span className="profile-detail-icon" aria-hidden="true">◷</span>{t("worker.profile.dateOfBirth")}</dt>
+                                    <dd>{formatBirthDate(profile.date_of_birth, i18n.language, t("worker.profile.notProvided"))}</dd>
+                                </div>
+                                <div className="profile-detail">
+                                    <dt><span className="profile-detail-icon" aria-hidden="true">▤</span>{t("worker.profile.maskedNationalId")}</dt>
+                                    <dd>{displayValue(profile.masked_national_id, t("worker.profile.notProvided"))}</dd>
+                                </div>
+                                <div className="profile-detail">
+                                    <dt><span className="profile-detail-icon" aria-hidden="true">●</span>{t("worker.profile.kycStatus")}</dt>
+                                    <dd>{profile.kyc_status
+                                        ? t(`worker.profile.kycStatuses.${profile.kyc_status}`, { defaultValue: t("worker.profile.notProvided") })
+                                        : t("worker.profile.notProvided")}</dd>
+                                </div>
+                            </>
+                        )}
                         <div className="profile-detail">
                             <dt><span className="profile-detail-icon" aria-hidden="true">◇</span>{profileText("accountRole", "Account role")}</dt>
                             <dd>{roleLabel}</dd>

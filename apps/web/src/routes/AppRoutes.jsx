@@ -50,6 +50,7 @@ import ReportsPage from "../pages/reports/ReportsPage";
 
 // Admin pages
 import AdminDashboard from "../pages/admin/Dashboard";
+import AdminKycReview from "../pages/admin/KycReview";
 import AdminAnalytics from "../pages/admin/Analytics";
 import AdminUserManagement from "../pages/admin/UserManagement";
 import AdminRolesPermissions from "../pages/admin/RolesPermissions";
@@ -167,6 +168,7 @@ function AppRoutes() {
                 <Route path="/admin/dashboard" element={<AdminDashboard />} />
                 <Route path="/admin/analytics" element={<AdminAnalytics />} />
                 <Route path="/admin/users" element={<AdminUserManagement />} />
+                <Route path="/admin/kyc-review" element={<AdminKycReview />} />
                 <Route path="/admin/roles" element={<AdminRolesPermissions />} />
                 <Route path="/admin/regulator-scopes" element={<AdminRegulatorScopes />} />
                 <Route path="/admin/settings" element={<AdminSystemSettings />} />

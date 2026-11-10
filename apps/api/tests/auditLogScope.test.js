@@ -38,7 +38,7 @@ test("operational audit history is filtered to the authenticated user's actions"
     );
 
     assert.equal(response.statusCode, 200);
-    assert.match(calls[0].sql, /WHERE al\.user_id = \$1/);
+    assert.match(calls[0].sql, /WHERE \(\s*\(al\.user_id = \$1/);
     assert.match(calls[0].sql, /al\.entity_name = 'COMPLIANCE_REPORTS'/);
     assert.match(calls[0].sql, /al\.entity_name = 'ROLE_NOTIFICATION'/);
     assert.match(calls[0].sql, /al\.entity_name = 'WITHDRAWAL_CLAIMS'/);
@@ -72,6 +72,59 @@ test("regulator audit includes only compliance and notification events in active
     assert.match(calls[0].sql, /f\.fund_status = 'ACTIVE'/);
 });
 
+test("regulators see redacted KYC reviews and only fund assignments granting their active scope", async () => {
+    const calls = [];
+    const events = [
+        {
+            log_id: "log-kyc",
+            full_name: "Authorized reviewer",
+            user_role: "ADMIN",
+            action_type: "APPROVE",
+            entity_name: "KYC Review",
+            entity_id: "VERIFIED",
+            timestamp: "2026-11-10T10:00:00Z",
+        },
+        {
+            log_id: "log-assignment",
+            full_name: "Administrator",
+            user_role: "ADMIN",
+            action_type: "UPDATE",
+            entity_name: "Fund Scope",
+            entity_id: "POI Fund",
+            timestamp: "2026-11-10T10:01:00Z",
+        },
+    ];
+    const controller = loadController({
+        async query(sql, params) {
+            calls.push({ sql, params });
+            return { rows: events };
+        },
+    });
+    const response = {
+        status(code) { this.statusCode = code; return this; },
+        json(body) { this.body = body; return this; },
+    };
+
+    await controller.listOperationalLogs(
+        { user: { userId: "regulator-1", role: "REGULATOR" } },
+        response
+    );
+
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(response.body.data, events);
+    assert.deepEqual(calls[0].params, ["regulator-1", "REGULATOR"]);
+    assert.match(calls[0].sql, /al\.entity_name = 'KYC_RECORD'[\s\S]*u\.role = 'ADMIN'/);
+    assert.match(calls[0].sql, /al\.entity_name = 'REGULATOR_FUND_ASSIGNMENT'[\s\S]*al\.details->>'regulatorUserId' = \$1/);
+    assert.match(calls[0].sql, /al\.details->>'active' = 'true'/);
+    assert.match(calls[0].sql, /rfa\.regulator_user_id = \$1[\s\S]*rfa\.fund_id = al\.entity_id[\s\S]*rfa\.active = TRUE/);
+    assert.match(calls[0].sql, /f\.fund_id = al\.entity_id/);
+
+    const selectedColumns = calls[0].sql.slice(0, calls[0].sql.indexOf("FROM audit_logs"));
+    assert.doesNotMatch(selectedColumns, /al\.user_id|u\.full_name|al\.entity_id,\s*al\.details/);
+    assert.doesNotMatch(selectedColumns, /national_id|email|phone|password_hash|details,/i);
+    assert.doesNotMatch(JSON.stringify(response.body.data), /national_id|email|phone|password_hash|user_id|kyc_id/i);
+});
+
 test("regulator audit query rejects revoked assignments and malformed or unknown scope metadata", async () => {
     const calls = [];
     const controller = loadController({
@@ -95,6 +148,64 @@ test("regulator audit query rejects revoked assignments and malformed or unknown
     assert.match(calls[0].sql, /jsonb_typeof\(al\.details->'scopeFundId'\) = 'string'/);
     assert.match(calls[0].sql, /al\.details->'scopeFundId' = 'null'::jsonb/);
     assert.match(calls[0].sql, /al\.entity_name = 'COMPLIANCE_REPORTS'[\s\S]*OR \(al\.entity_name = 'ROLE_NOTIFICATION'/);
+});
+
+test("regulator audit history stays empty when no currently authorized events exist", async () => {
+    const calls = [];
+    const controller = loadController({
+        async query(sql, params) {
+            calls.push({ sql, params });
+            return { rows: [] };
+        },
+    });
+    const response = {
+        status(code) { this.statusCode = code; return this; },
+        json(body) { this.body = body; return this; },
+    };
+
+    await controller.listOperationalLogs(
+        { user: { userId: "regulator-2", role: "REGULATOR" } },
+        response
+    );
+
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(response.body.data, []);
+    assert.deepEqual(calls[0].params, ["regulator-2", "REGULATOR"]);
+    assert.match(calls[0].sql, /al\.details->>'regulatorUserId' = \$1/);
+    assert.match(calls[0].sql, /rfa\.regulator_user_id = \$1[\s\S]*rfa\.active = TRUE/);
+});
+
+test("operational audit database errors return a safe error response and log only the error code", async () => {
+    const controller = loadController({
+        async query() {
+            const error = new Error("sensitive query details");
+            error.code = "42703";
+            throw error;
+        },
+    });
+    const response = {
+        status(code) { this.statusCode = code; return this; },
+        json(body) { this.body = body; return this; },
+    };
+    const originalConsoleError = console.error;
+    const logged = [];
+    console.error = (...args) => logged.push(args);
+
+    try {
+        await controller.listOperationalLogs(
+            { user: { userId: "regulator-1", role: "REGULATOR" } },
+            response
+        );
+    } finally {
+        console.error = originalConsoleError;
+    }
+
+    assert.equal(response.statusCode, 500);
+    assert.deepEqual(response.body, {
+        status: "error",
+        message: "Failed to list audit logs due to a server error",
+    });
+    assert.deepEqual(logged, [["Failed to list operational audit logs:", "42703"]]);
 });
 
 test("explicitly global role-notification audit entries remain visible without granting unknown event access", async () => {

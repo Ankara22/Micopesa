@@ -15,6 +15,9 @@ const mocks = vi.hoisted(() => ({
     downloadMyStatement: vi.fn(),
     getReportFunds: vi.fn(),
     getActivitySummary: vi.fn(),
+    listPendingKycApplications: vi.fn(),
+    reviewKycApplication: vi.fn(),
+    toast: { success: vi.fn(), error: vi.fn() },
     getMyProfile: vi.fn(),
     getMyProfilePhoto: vi.fn(),
     syncProfile: vi.fn(),
@@ -38,7 +41,10 @@ vi.mock("../services/reportsApi", () => ({
 }));
 vi.mock("../services/adminService", () => ({
     getActivitySummary: mocks.getActivitySummary,
+    listPendingKycApplications: mocks.listPendingKycApplications,
+    reviewKycApplication: mocks.reviewKycApplication,
 }));
+vi.mock("../components/ui/ToastContext", () => ({ useToast: () => mocks.toast }));
 vi.mock("../services/profileApi", () => ({
     getMyProfile: mocks.getMyProfile,
     getMyProfilePhoto: mocks.getMyProfilePhoto,
@@ -95,6 +101,26 @@ describe("role feature routes", () => {
         renderRoute("/manager/analytics", "WORKER");
         expect(await screen.findByRole("heading", { name: "Access denied" })).toBeInTheDocument();
         expect(screen.queryByRole("heading", { name: "Fund Analytics" })).not.toBeInTheDocument();
+    });
+
+    it.each(["WORKER", "FUND_MANAGER", "ADMIN"])(
+        "denies %s direct access to regulator fund oversight",
+        async (role) => {
+            renderRoute("/regulator/funds", role);
+            expect(await screen.findByRole("heading", { name: "Access denied" })).toBeInTheDocument();
+            expect(screen.queryByRole("heading", { name: "Fund Oversight" })).not.toBeInTheDocument();
+        }
+    );
+
+    it("allows administrators into KYC review and denies workers direct access", async () => {
+        mocks.listPendingKycApplications.mockResolvedValue([]);
+        const admin = renderRoute("/admin/kyc-review", "ADMIN");
+        expect(await screen.findByRole("heading", { name: "KYC review" })).toBeInTheDocument();
+        admin.unmount();
+
+        renderRoute("/admin/kyc-review", "WORKER");
+        expect(await screen.findByRole("heading", { name: "Access denied" })).toBeInTheDocument();
+        expect(screen.queryByRole("heading", { name: "KYC review" })).not.toBeInTheDocument();
     });
 
     it.each([

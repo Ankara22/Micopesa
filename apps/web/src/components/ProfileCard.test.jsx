@@ -45,6 +45,9 @@ const profile = {
     role: "WORKER",
     occupation: "MARKET_VENDOR",
     account_status: "ACTIVE",
+    date_of_birth: "1990-04-15",
+    masked_national_id: "****1234",
+    kyc_status: "PENDING",
     created_at: "2025-01-01T00:00:00.000Z",
     updated_at: "2026-10-26T00:00:00.000Z",
     profile_photo_available: false,
@@ -130,6 +133,34 @@ describe("shared ProfileCard", () => {
         fireEvent.click(screen.getByRole("button", { name: "Hariri jina kamili" }));
         expect(screen.getByLabelText("Jina kamili")).toHaveValue("Amina Worker");
         expect(screen.getByRole("button", { name: "Hifadhi" })).toBeInTheDocument();
+    });
+
+    it("shows date of birth, masked National ID, and pending KYC status without a full ID", async () => {
+        const { container } = renderProfile();
+
+        await screen.findByRole("heading", { name: "Amina Worker" });
+        expect(screen.getByText("Date of birth")).toBeInTheDocument();
+        expect(screen.getByText(/1990/)).toBeInTheDocument();
+        expect(screen.getByText("National ID")).toBeInTheDocument();
+        expect(screen.getByText("****1234")).toBeInTheDocument();
+        expect(screen.getByText("KYC verification status")).toBeInTheDocument();
+        expect(screen.getByText("Pending verification")).toBeInTheDocument();
+        expect(container).not.toHaveTextContent("12345678");
+    });
+
+    it("shows a graceful fallback when no KYC record is available", async () => {
+        mocks.getMyProfile.mockResolvedValueOnce({
+            ...profile,
+            date_of_birth: null,
+            masked_national_id: null,
+            kyc_status: null,
+        });
+        renderProfile();
+
+        await screen.findByRole("heading", { name: "Amina Worker" });
+        expect(screen.getByText("Date of birth").parentElement).toHaveTextContent("Not provided");
+        expect(screen.getByText("National ID").parentElement).toHaveTextContent("Not provided");
+        expect(screen.getByText("KYC verification status").parentElement).toHaveTextContent("Not provided");
     });
 
     it("requires explicit confirmation, sends a code, and refreshes the profile after verification", async () => {

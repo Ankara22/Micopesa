@@ -7,6 +7,7 @@ const apiTestsDirectory = path.join(repositoryRoot, "apps", "api", "tests");
 const excludedTests = new Set([
     "regression.test.js",
     "withdrawalPostgres.integration.test.js",
+    "kycUniquenessPostgres.integration.test.js",
 ]);
 
 const testFiles = fs.readdirSync(apiTestsDirectory)

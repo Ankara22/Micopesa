@@ -263,6 +263,7 @@ test("a valid reset is single-use, changes the password, and invalidates prior a
     pool.connect = async () => ({
         async query(query, values = []) {
             if (query === "BEGIN" || query === "COMMIT" || query === "ROLLBACK") return { rows: [] };
+            if (query.includes("FROM pending_registrations")) return { rows: [] };
             if (query.includes("FROM auth_tokens")) {
                 assert.match(query, /consumed_at IS NULL/);
                 assert.match(query, /expires_at > now\(\)/);
@@ -347,6 +348,7 @@ test("email verification transfers a pending address only once", async () => {
     pool.connect = async () => ({
         async query(query, values = []) {
             if (query === "BEGIN" || query === "COMMIT" || query === "ROLLBACK") return { rows: [] };
+            if (query.includes("FROM pending_registrations")) return { rows: [] };
             if (query.includes("FROM auth_tokens")) {
                 return values[0] === tokenHash && !state.consumed
                     ? { rows: [{ auth_token_id: 7, user_id: "user-1", email_address: state.pendingEmail }] }
@@ -387,6 +389,7 @@ test("email-verification conflicts do not disclose that another account owns the
     pool.connect = async () => ({
         async query(query) {
             if (query === "BEGIN" || query === "ROLLBACK") return { rows: [] };
+            if (query.includes("FROM pending_registrations")) return { rows: [] };
             if (query.includes("FROM auth_tokens")) {
                 return { rows: [{ auth_token_id: 8, user_id: "user-1", email_address: "claimed@example.com" }] };
             }
@@ -406,7 +409,10 @@ test("email-verification conflicts do not disclose that another account owns the
         const res = response();
         await authController.verifyEmail({ body: { token } }, res);
         assert.equal(res.statusCode, 400);
-        assert.equal(res.body.message, "This verification link is invalid or expired.");
+        assert.equal(
+            res.body.message,
+            "This verification link is invalid or expired, or its registration details are incomplete."
+        );
         assert.doesNotMatch(res.body.message, /already in use|claimed@example\.com/i);
     } finally {
         console.error = originalConsoleError;

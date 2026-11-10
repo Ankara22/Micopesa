@@ -9,6 +9,7 @@
     "test": "npm run test:unit",
     "test:unit": "node ../../tests/scripts/runApiUnitTests.js",
     "test:integration": "node ../../tests/scripts/runIntegrationTests.js",
+    "test:integration:kyc": "node --test tests/kycUniquenessPostgres.integration.test.js",
     "test:db": "node ../../tests/scripts/runDatabaseTests.js",
     "email:diagnostic": "node scripts/emailDiagnostic.js"
   },

@@ -43,6 +43,7 @@ describe("AdminDashboard", () => {
         const links = [
             ["Analytics", "/admin/analytics"],
             ["User Management", "/admin/users"],
+            ["KYC review", "/admin/kyc-review"],
             ["Roles & Permissions", "/admin/roles"],
             ["System Settings", "/admin/settings"],
             ["Notifications", "/admin/notifications"],

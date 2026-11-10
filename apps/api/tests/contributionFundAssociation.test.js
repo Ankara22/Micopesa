@@ -71,6 +71,9 @@ function createState() {
 function installDatabase(state) {
     pool.query = async (query, values = []) => {
         state.poolQueries.push({ query, values });
+        if (query.includes("SELECT kyc_status FROM kyc_records")) {
+            return { rows: [{ kyc_status: "VERIFIED" }] };
+        }
         if (query.includes("SELECT user_id, role, account_status, auth_version")) {
             const user = state.users.get(values[0]);
             return { rows: user ? [user] : [] };
@@ -339,8 +342,17 @@ test("creates pending contribution and selected-fund snapshots from the authenti
         assert.equal(state.shares.length, 2);
         assert.ok(state.shares.every((share) => share.account_id === ACCOUNT_A));
         assert.equal(state.clientQueries.some(({ query }) => query.includes("INSERT INTO contribution_fund_allocations")), true);
-        assert.equal(state.transactions[0].transaction_status, "COMPLETED");
-        assert.equal(state.contributions[0].contribution_status, "COMPLETED");
+        assert.equal(body.data.contribution.contribution_status, "PENDING");
+
+        const createdContribution = state.contributions.find(
+            ({ contribution_id }) => contribution_id === body.data.contribution.contribution_id
+        );
+        const createdTransaction = state.transactions.find(
+            ({ transaction_id }) => transaction_id === body.data.contribution.transaction_id
+        );
+
+        assert.equal(createdContribution.contribution_status, "PENDING");
+        assert.equal(createdTransaction.transaction_status, "PENDING");
         assert.equal(state.clientQueries.some(({ query }) => /UPDATE pension_accounts/i.test(query)), false);
     } finally {
         await api.close();

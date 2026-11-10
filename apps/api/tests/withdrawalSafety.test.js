@@ -335,6 +335,49 @@ afterEach(() => {
     pool.query = originalQuery;
 });
 
+test("worker claim history sanitizes database diagnostics and exposes no query parameters", async () => {
+    const calls = [];
+    pool.query = async (statement, values) => {
+        calls.push({ statement, values });
+        if (statement.includes("FROM pension_accounts WHERE user_id = $1")) {
+            return { rows: [{ account_id: "account-1" }] };
+        }
+        assert.match(statement, /withdrawal_reason/);
+        assert.match(statement, /WHERE account_id = \$1/);
+        throw Object.assign(new Error('column "withdrawal_reason" does not exist'), {
+            code: "42703",
+            position: "147",
+            routine: "errorMissingColumn",
+            query: "SELECT private data",
+            parameters: ["private value"],
+        });
+    };
+    const logs = [];
+    const originalConsoleError = console.error;
+    console.error = (...args) => logs.push(args);
+
+    try {
+        const res = createResponse();
+        await withdrawalController.getMyClaims({ user: { userId: "worker-1" } }, res);
+
+        assert.equal(res.statusCode, 500);
+        assert.equal(res.body.message, "Failed to fetch withdrawal claims due to a server error");
+        assert.equal(calls.length, 2);
+        assert.deepEqual(logs, [[
+            "Failed to fetch withdrawal claims:",
+            {
+                code: "42703",
+                message: 'column "withdrawal_reason" does not exist',
+                position: "147",
+                routine: "errorMissingColumn",
+            },
+        ]]);
+        assert.doesNotMatch(JSON.stringify(logs), /private data|private value/);
+    } finally {
+        console.error = originalConsoleError;
+    }
+});
+
 test("in-memory account-lock mock serializes submissions, not a PostgreSQL concurrency guarantee", async () => {
     const database = new MockWithdrawalDatabase({ balance: 100 });
     useDatabase(database);

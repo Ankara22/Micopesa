@@ -77,6 +77,7 @@ export const ROLE_NAV = {
         { label: "Dashboard", translationKey: "navigation.dashboard", path: "/admin/dashboard" },
         { label: "Analytics", translationKey: "navigation.adminAnalytics", path: "/admin/analytics" },
         { label: "User Management", translationKey: "navigation.userManagement", path: "/admin/users" },
+        { label: "KYC Review", translationKey: "navigation.kycReview", path: "/admin/kyc-review" },
         { label: "Roles & Permissions", translationKey: "navigation.rolesPermissions", path: "/admin/roles" },
         { label: "Regulator Fund Scopes", translationKey: "navigation.regulatorScopes", path: "/admin/regulator-scopes" },
         { label: "System Settings", translationKey: "navigation.systemSettings", path: "/admin/settings" },

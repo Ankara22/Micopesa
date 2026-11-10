@@ -13,6 +13,12 @@ function FundOversight() {
         () => (viewingFund ? getFundAllocations(viewingFund.fund_id) : Promise.resolve([])),
         [viewingFund]
     );
+    const accountLabels = new Map();
+    allocationsApi.data?.forEach(({ account_id }) => {
+        if (!accountLabels.has(account_id)) {
+            accountLabels.set(account_id, `Account ${accountLabels.size + 1}`);
+        }
+    });
 
     const columns = [
         { key: "fund_name", header: "Fund Name" },
@@ -32,13 +38,13 @@ function FundOversight() {
     ];
 
     const allocationColumns = [
-        { key: "account_id", header: "Account" },
-        { key: "percentage", header: "Percentage", render: (row) => `${row.percentage}%` },
-        { key: "effective_from", header: "Effective From", render: (row) => new Date(row.effective_from).toLocaleDateString() },
+        { key: "account_id", header: "Account", render: (row) => accountLabels.get(row.account_id) || "Account" },
+        { key: "percentage", header: "Percentage", render: (row) => `${Number(row.percentage).toFixed(2)}%` },
+        { key: "effective_from", header: "Effective From", render: (row) => formatDate(row.effective_from) },
         {
             key: "effective_to",
             header: "Effective To",
-            render: (row) => (row.effective_to ? new Date(row.effective_to).toLocaleDateString() : "Ongoing"),
+            render: (row) => (row.effective_to ? formatDate(row.effective_to) : "Ongoing"),
         },
     ];
 
@@ -72,11 +78,18 @@ function FundOversight() {
                     loading={allocationsApi.loading}
                     refreshing={allocationsApi.refreshing}
                     error={allocationsApi.error}
+                    onRetry={allocationsApi.refetch}
                     emptyMessage="No allocations recorded for this fund."
                 />
             </Modal>
         </div>
     );
+}
+
+function formatDate(value) {
+    if (!value) return "Unavailable";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? "Unavailable" : date.toLocaleDateString();
 }
 
 export default FundOversight;

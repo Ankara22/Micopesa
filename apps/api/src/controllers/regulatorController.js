@@ -16,7 +16,7 @@ async function getComplianceOverview(req, res) {
           AND rfa.active = TRUE
     )`;
     try {
-        const [audit, reports, latestRba] = await Promise.all([
+        const [audit, reports, latestRba, kycStatuses, kycReviews] = await Promise.all([
             pool.query(
                 `SELECT count(*)::int AS events_last_24h, max(al."timestamp") AS last_event_at
                  FROM audit_logs al
@@ -54,6 +54,20 @@ async function getComplianceOverview(req, res) {
                  LIMIT 1`,
                 [regulatorId]
             ),
+            pool.query(
+                `SELECT kyc_status, count(*)::int AS count
+                 FROM kyc_records
+                 GROUP BY kyc_status
+                 ORDER BY kyc_status`
+            ),
+            pool.query(
+                `SELECT action_type, details->>'status' AS kyc_status, al."timestamp"
+                 FROM audit_logs al
+                 WHERE entity_name = 'KYC_RECORD'
+                   AND action_type IN ('APPROVE', 'REJECT')
+                 ORDER BY al."timestamp" DESC
+                 LIMIT 10`
+            ),
         ]);
 
         const latest = latestRba.rows[0] || null;
@@ -72,6 +86,8 @@ async function getComplianceOverview(req, res) {
                 rba_compliance_status: complianceStatus,
                 rba_reports_by_status: reports.rows,
                 latest_rba_report: latest,
+                kyc_status_counts: kycStatuses.rows,
+                kyc_review_history: kycReviews.rows,
                 rba_parameter_checks: {
                     status: "NOT_CONFIGURED",
                     details: "The database schema contains no RBA-specific limits or parameter configuration to evaluate.",

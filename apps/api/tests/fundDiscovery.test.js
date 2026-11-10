@@ -9,7 +9,9 @@ const { generateToken } = require("../src/utils/token");
 process.env.JWT_SECRET ||= "micopesa-fund-discovery-test-secret";
 
 const originalQuery = pool.query;
+const originalConnect = pool.connect;
 const originalJwtSecret = process.env.JWT_SECRET;
+const audit = [];
 const users = new Map([
     ["manager-1", { user_id: "manager-1", role: "FUND_MANAGER", account_status: "ACTIVE", auth_version: 0 }],
     ["manager-2", { user_id: "manager-2", role: "FUND_MANAGER", account_status: "ACTIVE", auth_version: 0 }],
@@ -28,6 +30,9 @@ const regulatorAssignments = [
 ];
 
 pool.query = async (query, values = []) => {
+    if (query.includes("SELECT kyc_status FROM kyc_records")) {
+        return { rows: [{ kyc_status: "VERIFIED" }] };
+    }
     if (query.includes("SELECT user_id, role, account_status, auth_version")) {
         const user = users.get(values[0]);
         return { rows: user ? [user] : [] };
@@ -81,8 +86,47 @@ pool.query = async (query, values = []) => {
     assert.fail(`Unexpected database query in fund discovery test: ${query}`);
 };
 
+pool.connect = async () => {
+    let snapshot;
+    return {
+        async query(query, values = []) {
+            if (query === "BEGIN") {
+                snapshot = { funds: structuredClone(funds), audit: structuredClone(audit) };
+                return { rows: [] };
+            }
+            if (query === "ROLLBACK") {
+                funds.splice(0, funds.length, ...snapshot.funds);
+                audit.splice(0, audit.length, ...snapshot.audit);
+                return { rows: [] };
+            }
+            if (query === "COMMIT") return { rows: [] };
+            if (query.includes("INSERT INTO funds")) {
+                const [managed_by, fund_name, administrator_name, risk_level, expected_return] = values;
+                const fund = {
+                    fund_id: `created-${funds.length + 1}`,
+                    managed_by,
+                    fund_name,
+                    administrator_name,
+                    risk_level,
+                    expected_return: String(expected_return),
+                    fund_status: "ACTIVE",
+                };
+                funds.push(fund);
+                return { rows: [fund] };
+            }
+            if (query.includes("INSERT INTO audit_logs")) {
+                audit.push(values);
+                return { rows: [] };
+            }
+            assert.fail(`Unexpected transaction query in fund discovery test: ${query}`);
+        },
+        release() {},
+    };
+};
+
 after(() => {
     pool.query = originalQuery;
+    pool.connect = originalConnect;
     process.env.JWT_SECRET = originalJwtSecret;
 });
 
@@ -132,6 +176,7 @@ test("manager-created active funds appear in worker discovery while role permiss
         assert.equal(createdResponse.status, 201);
         const created = (await createdResponse.json()).data.fund;
         assert.equal(created.managed_by, "manager-1");
+        assert.deepEqual(audit[0].slice(0, 4), ["manager-1", "CREATE", "FUNDS", created.fund_id]);
 
         const workerFundsResponse = await request("/available", { userId: "worker-1" });
         assert.equal(workerFundsResponse.status, 200);

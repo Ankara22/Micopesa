@@ -21,22 +21,32 @@ function isValidProjectionData(plan, projection) {
         Number.isFinite(Number(value));
     const years = Number(projection?.projection_years);
     const series = projection?.yearly_projection;
+    const currentAge = Number(projection?.current_age);
+    const targetAge = Number(plan?.target_age);
+    const finalPoint = Array.isArray(series) ? series.at(-1) : null;
     return Boolean(plan) &&
         isNumber(plan.target_amount) && Number(plan.target_amount) > 0 &&
-        isNumber(plan.target_age) &&
+        Number.isInteger(targetAge) &&
         isNumber(projection?.projected_amount) && Number(projection.projected_amount) >= 0 &&
         isNumber(projection?.assumed_contribution) && Number(projection.assumed_contribution) >= 0 &&
         isNumber(projection?.assumed_return) && Number(projection.assumed_return) >= 0 &&
         Number.isInteger(years) && years > 0 &&
-        Number.isInteger(Number(projection.current_age)) &&
+        Number.isInteger(currentAge) &&
+        targetAge === currentAge + years &&
         isNumber(projection.starting_balance) && Number(projection.starting_balance) >= 0 &&
         Array.isArray(series) && series.length === years + 1 &&
         series.every((point, index) =>
             point.year === index &&
             Number.isInteger(point.age) &&
+            point.age === currentAge + index &&
             Number.isFinite(Number(point.projectedBalance)) &&
-            Number.isFinite(Number(point.totalContributions))
-        );
+            Number(point.projectedBalance) >= 0 &&
+            Number.isFinite(Number(point.totalContributions)) &&
+            Number(point.totalContributions) >= 0
+        ) &&
+        finalPoint?.age === targetAge &&
+        Math.round(Number(finalPoint?.projectedBalance) * 100) ===
+            Math.round(Number(projection.projected_amount) * 100);
 }
 
 function RetirementProjection() {

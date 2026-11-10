@@ -1,4 +1,14 @@
+const {
+    assertSafeTestModeConfiguration,
+    assertTestModeWasNotLoadedFromEnvironment,
+    initializeTestModeJwtSecret,
+} = require("./utils/testModeConfiguration");
+const { testModeDispatchGuard } = require("./middleware/testModeDispatchGuard");
+const testMode = process.env.MICOPESA_TEST_MODE === "true";
+assertSafeTestModeConfiguration();
 require("./config/loadEnvironment");
+assertTestModeWasNotLoadedFromEnvironment(process.env, testMode);
+initializeTestModeJwtSecret();
 const { assertSafeAuthConfiguration } = require("./utils/authConfiguration");
 assertSafeAuthConfiguration();
 
@@ -16,6 +26,7 @@ const {
 } = require("./services/smsNotificationRepository");
 const { createNotificationRepository } = require("./services/notificationRepository");
 const { createWebPushService } = require("./services/webPushService");
+const { startPendingRegistrationCleanup } = require("./services/pendingRegistrationCleanupService");
 const { createGeneralJsonParser } = require("./middleware/mpesaCallbackIngress");
 const mobileSasaDlrRoutes = require("./routes/mobileSasaDlrRoutes");
 const authRoutes = require("./routes/authRoutes");
@@ -38,6 +49,7 @@ const profileRoutes = require("./routes/profileRoutes");
 const reportRoutes = require("./routes/reportRoutes");
 const regulatorFundAssignmentRoutes = require("./routes/regulatorFundAssignmentRoutes");
 const adminOperationalSettingsRoutes = require("./routes/adminOperationalSettingsRoutes");
+const adminKycRoutes = require("./routes/adminKycRoutes");
 const staffOnboardingRoutes = require("./routes/staffOnboardingRoutes");
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -56,6 +68,15 @@ app.use(cors({
 }));
 app.use(createGeneralJsonParser());
 
+if (testMode) {
+    const disabledTestModeDispatch = (_req, res) => res.status(503).json({
+        status: "error",
+        message: "External dispatch is disabled in test mode.",
+    });
+    app.use("/api/mpesa", disabledTestModeDispatch);
+    app.use("/api/admin/notifications", testModeDispatchGuard);
+}
+
 app.use("/api/auth", authRoutes);
 app.use("/api/accounts", accountRoutes);
 app.use("/api/retirement", retirementRoutes);
@@ -67,6 +88,7 @@ app.use("/api/audit-logs", auditLogRoutes);
 app.use("/api/admin/users", adminUserRoutes);
 app.use("/api/admin/settings", systemSettingsRoutes);
 app.use("/api/v1/admin/settings", adminOperationalSettingsRoutes);
+app.use("/api/admin/kyc", adminKycRoutes);
 app.use("/api/v1/admin/staff", staffOnboardingRoutes);
 app.use("/api/admin/notifications", notificationRoutes);
 app.use("/api/integrations/mobilesasa", mobileSasaDlrRoutes);
@@ -105,11 +127,16 @@ app.get("/api/health/db", async (req, res) => {
 });
 
 if (require.main === module) {
-    const server = app.listen(PORT, () => {
-        console.log(`MicoPesa API running on http://localhost:${PORT}`);
-    });
+    const server = app.listen(
+        PORT,
+        ...(testMode ? ["127.0.0.1"] : []),
+        () => {
+            console.log(`MicoPesa API running on http://localhost:${PORT}`);
+        }
+    );
+    const stopPendingRegistrationCleanup = startPendingRegistrationCleanup(pool);
     let smsDispatcher = null;
-    const activeNotificationChannels = enabledChannels(process.env);
+    const activeNotificationChannels = testMode ? [] : enabledChannels(process.env);
     if (activeNotificationChannels.length > 0) {
         const notificationRepository = createSmsNotificationRepository(pool);
         const webPushService = createWebPushService({
@@ -137,6 +164,7 @@ if (require.main === module) {
         if (shuttingDown) return;
         shuttingDown = true;
         const failures = [];
+        stopPendingRegistrationCleanup();
         try {
             await smsDispatcher?.stop();
         } catch (error) {

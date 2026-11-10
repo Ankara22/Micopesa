@@ -136,7 +136,7 @@ CREATE UNIQUE INDEX uq_users_pending_email_lower
     WHERE pending_email IS NOT NULL;
 
 CREATE UNIQUE INDEX uq_users_phone_normalized
-    ON users (
+    ON users ((
         CASE
             WHEN regexp_replace(COALESCE(phone, ''), '[[:space:]()-]', '', 'g')
                 ~ '^0[17][0-9]{8}$'
@@ -156,7 +156,7 @@ CREATE UNIQUE INDEX uq_users_phone_normalized
                 ''
             )
         END
-    );
+    ));
 
 CREATE INDEX idx_users_role ON users (role);
 CREATE INDEX idx_users_account_status ON users (account_status);
@@ -212,16 +212,48 @@ CREATE TABLE kyc_records (
     date_of_birth   DATE        NOT NULL,
     kyc_status      VARCHAR(15) NOT NULL DEFAULT 'PENDING'
         CHECK (kyc_status IN ('PENDING', 'VERIFIED', 'REJECTED')),
+    duplicate_submission BOOLEAN NOT NULL DEFAULT FALSE,
     verified_at     TIMESTAMP WITH TIME ZONE,
     created_at      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
     updated_at      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
     CONSTRAINT uq_kyc_records_user_id UNIQUE (user_id),
-    CONSTRAINT uq_kyc_records_national_id UNIQUE (national_id),
     CONSTRAINT fk_kyc_records_user FOREIGN KEY (user_id)
         REFERENCES users (user_id) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_kyc_records_kyc_status ON kyc_records (kyc_status);
+CREATE UNIQUE INDEX uq_kyc_records_verified_national_id
+    ON kyc_records (national_id)
+    WHERE kyc_status = 'VERIFIED';
+CREATE INDEX idx_kyc_records_duplicate_pending
+    ON kyc_records (created_at, kyc_id)
+    WHERE duplicate_submission IS TRUE AND kyc_status = 'PENDING';
+
+CREATE OR REPLACE FUNCTION flag_duplicate_kyc_national_id()
+RETURNS TRIGGER AS $$
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(NEW.national_id, 0));
+    NEW.duplicate_submission := EXISTS (
+        SELECT 1
+        FROM kyc_records
+        WHERE national_id = NEW.national_id
+          AND kyc_id IS DISTINCT FROM NEW.kyc_id
+    );
+    IF NEW.duplicate_submission THEN
+        UPDATE kyc_records
+        SET duplicate_submission = TRUE
+        WHERE national_id = NEW.national_id
+          AND kyc_id IS DISTINCT FROM NEW.kyc_id
+          AND duplicate_submission IS FALSE;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_kyc_records_flag_duplicate_national_id
+    BEFORE INSERT OR UPDATE OF national_id, kyc_status ON kyc_records
+    FOR EACH ROW
+    EXECUTE FUNCTION flag_duplicate_kyc_national_id();
 
 CREATE TRIGGER trg_kyc_records_set_updated_at
     BEFORE UPDATE ON kyc_records
@@ -844,6 +876,23 @@ CREATE TABLE auth_tokens (
 
 CREATE INDEX idx_auth_tokens_user_purpose_created
     ON auth_tokens (user_id, purpose, created_at DESC);
+
+CREATE TABLE pending_registrations (
+    pending_registration_id VARCHAR(25) PRIMARY KEY DEFAULT generate_short_id(),
+    full_name VARCHAR(100) NOT NULL,
+    email VARCHAR(254) NOT NULL,
+    phone VARCHAR(15) NOT NULL,
+    password_hash VARCHAR(255),
+    occupation VARCHAR(50) NOT NULL,
+    national_id VARCHAR(25) NOT NULL,
+    date_of_birth DATE NOT NULL,
+    token_hash CHAR(64) NOT NULL UNIQUE,
+    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_pending_registrations_expiry
+    ON pending_registrations (expires_at);
 
 CREATE TABLE auth_rate_limits (
     scope           VARCHAR(20) NOT NULL CHECK (scope IN ('IP', 'EMAIL', 'ACCOUNT')),

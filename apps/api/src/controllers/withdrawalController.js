@@ -243,7 +243,14 @@ async function getMyClaims(req, res) {
 
         return res.status(200).json({ status: "success", data: result.rows });
     } catch (error) {
-        console.error("Failed to fetch withdrawal claims:", error);
+        console.error("Failed to fetch withdrawal claims:", {
+            code: typeof error?.code === "string" ? error.code : "WITHDRAWAL_CLAIMS_LOOKUP_ERROR",
+            message: typeof error?.message === "string"
+                ? error.message
+                : "Unknown withdrawal claims lookup error",
+            position: typeof error?.position === "string" ? error.position : null,
+            routine: typeof error?.routine === "string" ? error.routine : null,
+        });
         return res.status(500).json({
             status: "error",
             message: "Failed to fetch withdrawal claims due to a server error",

@@ -31,7 +31,7 @@ async function main(environment = process.env) {
     } finally {
         await admin.end();
     }
-    console.log(`Dropped dedicated test database: ${target.databaseName}`);
+    console.log(`Dropped dedicated disposable database: ${target.databaseName}`);
 }
 
 if (require.main === module) {

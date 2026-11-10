@@ -43,6 +43,15 @@ describe("RegulatorDashboard", () => {
                 { rba_status: "ACCEPTED", count: 2 },
             ],
             latest_rba_report: { rba_status: "SUBMITTED" },
+            kyc_status_counts: [
+                { kyc_status: "PENDING", count: 2 },
+                { kyc_status: "VERIFIED", count: 8 },
+                { kyc_status: "REJECTED", count: 1 },
+            ],
+            kyc_review_history: [
+                { action_type: "APPROVE", kyc_status: "VERIFIED", timestamp: "2026-04-03T11:00:00Z" },
+                { action_type: "REJECT", kyc_status: "REJECTED", timestamp: "2026-04-02T11:00:00Z" },
+            ],
             rba_parameter_checks: { status: "NOT_CONFIGURED", details: "No check configuration is available." },
         });
         mocks.getComplianceReports.mockResolvedValue([
@@ -103,6 +112,12 @@ describe("RegulatorDashboard", () => {
         expect(await screen.findByRole("heading", { name: "Welcome, Achieng" })).toBeInTheDocument();
         expect(screen.getByText("Audit events (24 hours)").parentElement).toHaveTextContent("14");
         expect(screen.getByText("Recorded RBA reports").parentElement).toHaveTextContent("5");
+        expect(screen.getByRole("heading", { name: "KYC verification overview" })).toBeInTheDocument();
+        expect(screen.getByRole("list", { name: "KYC records by status" })).toHaveTextContent("Pending2Verified8Rejected1");
+        expect(screen.getByRole("heading", { name: "Recent KYC review history" })).toBeInTheDocument();
+        expect(screen.getAllByText("KYC review recorded")).toHaveLength(2);
+        expect(screen.getByText(/worker identifiers and National IDs are not displayed/i)).toBeInTheDocument();
+        expect(screen.queryByText("kyc-record-1")).not.toBeInTheDocument();
         expect(screen.queryByRole("heading", { name: "RBA Reports by Status" })).not.toBeInTheDocument();
         expect(screen.getByText("Recent compliance reports")).toBeInTheDocument();
         expect(screen.getByText("Recent audit activity")).toBeInTheDocument();

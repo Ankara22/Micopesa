@@ -21,7 +21,9 @@ async function main(environment = process.env) {
             [target.databaseName]
         );
         if (exists.rowCount === 0) {
-            throw new Error("The dedicated micopesa_test database does not exist; refusing to create or redirect it.");
+            throw new Error(
+                "The dedicated micopesa_registration_test database does not exist; refusing to create or redirect it."
+            );
         }
     } finally {
         await admin.end();
@@ -46,7 +48,7 @@ async function main(environment = process.env) {
     } finally {
         await database.end();
     }
-    console.log(`Prepared dedicated test database: ${target.databaseName}`);
+    console.log(`Prepared dedicated disposable database: ${target.databaseName}`);
 }
 
 if (require.main === module) {

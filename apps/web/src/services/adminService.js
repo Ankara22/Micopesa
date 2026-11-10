@@ -1,5 +1,16 @@
 import api from "./api";
 
+// --- KYC review ---
+export async function listPendingKycApplications() {
+    const res = await api.get("/api/admin/kyc/pending");
+    return res.data.data;
+}
+
+export async function reviewKycApplication(kycId, status) {
+    const res = await api.patch(`/api/admin/kyc/${encodeURIComponent(kycId)}/review`, { status });
+    return res.data.data.submission;
+}
+
 // --- Users ---
 export async function listUsers() {
     const res = await api.get("/api/admin/users");

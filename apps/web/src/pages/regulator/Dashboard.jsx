@@ -52,6 +52,8 @@ function RegulatorDashboard() {
     const compliance = complianceApi.data;
     const reports = reportsApi.data || [];
     const auditHealth = compliance?.audit_health || {};
+    const kycStatuses = compliance?.kyc_status_counts || [];
+    const kycReviewHistory = compliance?.kyc_review_history || [];
     const parameterChecks = compliance?.rba_parameter_checks;
     const latestReport = compliance?.latest_rba_report;
     const recentAudit = (auditApi.data || []).slice(0, 5);
@@ -145,6 +147,54 @@ function RegulatorDashboard() {
                                 <p>{parameterDetails}</p>
                             </div>
                         </section>
+                    </div>
+                )}
+            </section>
+
+            <section className="regulator-dashboard-section" aria-labelledby="kyc-oversight-title">
+                <div className="regulator-dashboard-section-heading">
+                    <div>
+                        <p className="regulator-dashboard-eyebrow">{t("dashboards.regulator.kycEyebrow")}</p>
+                        <h2 id="kyc-oversight-title">{t("dashboards.regulator.kycOversight")}</h2>
+                    </div>
+                </div>
+                {complianceApi.loading ? (
+                    <LoadingState message={t("dashboards.regulator.loadingKyc")} />
+                ) : complianceApi.error ? (
+                    <p className="regulator-dashboard-empty">{t("dashboards.regulator.kycUnavailable")}</p>
+                ) : (
+                    <div className="regulator-kyc-oversight">
+                        <ul aria-label={t("dashboards.regulator.kycStatusCounts")}>
+                            {["PENDING", "VERIFIED", "REJECTED"].map((status) => {
+                                const count = kycStatuses.find((item) => item.kyc_status === status)?.count ?? 0;
+                                return (
+                                    <li key={status}>
+                                        <span>{t(`analytics.status.${status}`, { defaultValue: status })}</span>
+                                        <strong>{new Intl.NumberFormat(dateLocale).format(getCount(count))}</strong>
+                                    </li>
+                                );
+                            })}
+                        </ul>
+                        <div>
+                            <h3>{t("dashboards.regulator.kycReviewHistory")}</h3>
+                            {kycReviewHistory.length ? (
+                                <ol className="regulator-audit-list">
+                                    {kycReviewHistory.map((event, index) => {
+                                        const status = event.kyc_status || (event.action_type === "APPROVE" ? "VERIFIED" : "REJECTED");
+                                        return (
+                                            <li key={`${event.timestamp}-${event.action_type}-${index}`}>
+                                                <strong>{t(`analytics.status.${status}`, { defaultValue: status })}</strong>
+                                                <span>{t("dashboards.regulator.kycReviewRecorded")}</span>
+                                                <time dateTime={event.timestamp}>{formatDate(event.timestamp, true, dateLocale)}</time>
+                                            </li>
+                                        );
+                                    })}
+                                </ol>
+                            ) : (
+                                <p className="regulator-dashboard-empty">{t("dashboards.regulator.noKycReviews")}</p>
+                            )}
+                        </div>
+                        <p className="regulator-dashboard-note">{t("dashboards.regulator.kycPrivacyNote")}</p>
                     </div>
                 )}
             </section>

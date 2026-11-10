@@ -12,6 +12,7 @@ import "./admin-dashboard.css";
 const ADMIN_LINKS = [
     { key: "analytics", to: "/admin/analytics" },
     { key: "users", to: "/admin/users" },
+    { key: "kyc", to: "/admin/kyc-review" },
     { key: "roles", to: "/admin/roles" },
     { key: "settings", to: "/admin/settings" },
     { key: "notifications", to: "/admin/notifications" },

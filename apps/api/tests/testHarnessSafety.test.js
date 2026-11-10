@@ -20,8 +20,8 @@ const apiRequire = createRequire(path.join(repositoryRoot, "apps/api/package.jso
 const validEnvironment = {
     NODE_ENV: "test",
     ALLOW_DESTRUCTIVE_TEST_DB_SETUP: "1",
-    TEST_DATABASE_URL: "postgres://localhost:5432/micopesa_test",
-    TEST_DATABASE_ADMIN_URL: "postgres://localhost:5432/postgres",
+    TEST_DATABASE_URL: "postgres://127.0.0.1:5544/micopesa_registration_test",
+    TEST_DATABASE_ADMIN_URL: "postgres://127.0.0.1:5544/postgres",
 };
 
 test("normal test scripts never invoke database setup or regression integration tests", () => {
@@ -37,7 +37,15 @@ test("normal test scripts never invoke database setup or regression integration 
 });
 
 test("database setup requires test mode, explicit opt-in, exact local target, and separate admin database", () => {
-    assert.doesNotThrow(() => getDatabaseSetupConfig(validEnvironment));
+    const setupConfig = getDatabaseSetupConfig(validEnvironment);
+    assert.deepEqual(
+        [setupConfig.admin.host, setupConfig.admin.port, setupConfig.admin.databaseName],
+        ["127.0.0.1", "5544", "postgres"]
+    );
+    assert.deepEqual(
+        [getTargetDatabase(validEnvironment).host, getTargetDatabase(validEnvironment).port, getTargetDatabase(validEnvironment).databaseName],
+        ["127.0.0.1", "5544", "micopesa_registration_test"]
+    );
     assert.throws(
         () => getDatabaseSetupConfig({ ...validEnvironment, NODE_ENV: "development" }),
         /NODE_ENV=test/
@@ -49,23 +57,58 @@ test("database setup requires test mode, explicit opt-in, exact local target, an
     assert.throws(
         () => getDatabaseSetupConfig({
             ...validEnvironment,
-            TEST_DATABASE_URL: "postgres://example.com:5432/micopesa_test",
+            TEST_DATABASE_URL: "postgres://example.com:5544/micopesa_registration_test",
         }),
-        /local PostgreSQL host/
+        /127\.0\.0\.1/
     );
     assert.throws(
         () => getDatabaseSetupConfig({
             ...validEnvironment,
-            TEST_DATABASE_URL: "postgres://localhost:5432/production",
+            TEST_DATABASE_URL: "postgres://127.0.0.1:5433/micopesa_registration_test",
         }),
-        /exactly to micopesa_test/
+        /port 5544/
     );
     assert.throws(
         () => getDatabaseSetupConfig({
             ...validEnvironment,
-            TEST_DATABASE_ADMIN_URL: "postgres://localhost:5432/micopesa_test",
+            TEST_DATABASE_URL: "postgres://127.0.0.1:5544/micopesa_test",
+        }),
+        /exactly to micopesa_registration_test/
+    );
+    assert.throws(
+        () => getDatabaseSetupConfig({
+            ...validEnvironment,
+            TEST_DATABASE_ADMIN_URL: "postgres://127.0.0.1:5433/postgres",
+        }),
+        /127\.0\.0\.1:5544/
+    );
+    assert.throws(
+        () => getDatabaseSetupConfig({
+            ...validEnvironment,
+            TEST_DATABASE_ADMIN_URL: "postgres://127.0.0.1:5432/postgres",
+        }),
+        /127\.0\.0\.1:5544/
+    );
+    assert.throws(
+        () => getDatabaseSetupConfig({
+            ...validEnvironment,
+            TEST_DATABASE_ADMIN_URL: "postgres://127.0.0.1:5544/micopesa_registration_test",
         }),
         /separate database/
+    );
+    assert.throws(
+        () => getDatabaseSetupConfig({
+            ...validEnvironment,
+            TEST_DATABASE_ADMIN_URL: "postgres://127.0.0.1:5544/micopesa_test_admin",
+        }),
+        /127\.0\.0\.1:5544\/postgres/
+    );
+    assert.throws(
+        () => getDatabaseSetupConfig({
+            ...validEnvironment,
+            TEST_DATABASE_ADMIN_URL: "postgres://example.com:5544/postgres",
+        }),
+        /127\.0\.0\.1:5544\/postgres/
     );
 });
 
@@ -78,6 +121,11 @@ test("teardown has a distinct explicit opt-in", () => {
         ...validEnvironment,
         ALLOW_DESTRUCTIVE_TEST_DB_TEARDOWN: "1",
     }, "teardown"));
+    assert.throws(() => getDatabaseSetupConfig({
+        ...validEnvironment,
+        ALLOW_DESTRUCTIVE_TEST_DB_TEARDOWN: "1",
+        TEST_DATABASE_ADMIN_URL: "postgres://127.0.0.1:5544/micopesa_registration_test",
+    }, "teardown"), /separate database/);
 });
 
 test("integration tests require selected API test files and a local test database", () => {
@@ -91,6 +139,10 @@ test("integration tests require selected API test files and a local test databas
         /apps\/api\/tests/
     );
     assert.throws(() => getTargetDatabase({ ...validEnvironment, NODE_ENV: "production" }), /NODE_ENV=test/);
+    assert.throws(() => getTargetDatabase({
+        ...validEnvironment,
+        NODE_ENV: undefined,
+    }), /NODE_ENV=test/);
 });
 
 test("database identity and address checks reject unexpected servers", async () => {
@@ -102,22 +154,30 @@ test("database identity and address checks reject unexpected servers", async () 
             async query() {
                 return { rows: [{ database_name: "production", server_address: "127.0.0.1/32" }] };
             },
-        }, "micopesa_test"),
+        }, "micopesa_registration_test"),
         /identity did not match/
     );
     await assert.rejects(
         verifyDatabaseIdentity({
             async query() {
-                return { rows: [{ database_name: "micopesa_test", server_address: "203.0.113.1/32" }] };
+                return { rows: [{ database_name: "micopesa_registration_test", server_address: "203.0.113.1/32" }] };
             },
-        }, "micopesa_test"),
+        }, "micopesa_registration_test"),
         /loopback address/
+    );
+    await assert.rejects(
+        verifyDatabaseIdentity({
+            async query() {
+                return { rows: [{ database_name: "micopesa_registration_test", server_address: "127.0.0.2" }] };
+            },
+        }, "micopesa_registration_test"),
+        /127\.0\.0\.1/
     );
 });
 
 test("unit-test bootstrap blocks database access and external fetch calls", async () => {
     const { Pool } = apiRequire("pg");
-    const pool = new Pool({ connectionString: "postgres://localhost/micopesa_test" });
+    const pool = new Pool({ connectionString: "postgres://127.0.0.1:5544/micopesa_registration_test" });
     await assert.rejects(pool.query("SELECT 1"), {
         code: "DATABASE_ACCESS_DISABLED_IN_UNIT_TEST",
     });

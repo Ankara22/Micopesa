@@ -2,6 +2,7 @@ const crypto = require("node:crypto");
 const nodemailer = require("nodemailer");
 const pool = require("../db/database");
 const mobileSasaService = require("./mobileSasaService");
+const { captureRegistrationEmail, isCaptureModeRequested } = require("./localEmailCapture");
 
 const TOKEN_EXPIRY_MINUTES = {
     EMAIL_VERIFICATION: 30,
@@ -235,6 +236,21 @@ async function sendEmail({ to, subject, text, html, purpose = "GENERAL" }) {
         throw error;
     }
 
+    if (process.env.MICOPESA_TEST_MODE === "true" && !isCaptureModeRequested()) {
+        throw Object.assign(new Error("Test mode requires local email capture."), {
+            code: "EMAIL_CAPTURE_REQUIRED",
+        });
+    }
+
+    if (isCaptureModeRequested()) {
+        if (process.env.MICOPESA_EMAIL_CAPTURE !== "true") {
+            throw Object.assign(new Error("MICOPESA_EMAIL_CAPTURE must be explicitly set to true."), {
+                code: "EMAIL_CAPTURE_NOT_ENABLED",
+            });
+        }
+        return captureRegistrationEmail({ to, subject: subject.trim(), text: text.trim(), html, purpose });
+    }
+
     const provider = getEmailProvider();
     const configuration = assertEmailProviderConfigured();
     const message = {
@@ -264,6 +280,18 @@ async function issueEmailToken({ userId, email, purpose }) {
     if (!Object.hasOwn(TOKEN_EXPIRY_MINUTES, purpose)) {
         throw new Error("Unsupported email token purpose");
     }
+    if (process.env.MICOPESA_TEST_MODE === "true" && !isCaptureModeRequested()) {
+        throw Object.assign(new Error("Test mode requires local email capture."), {
+            code: "EMAIL_CAPTURE_REQUIRED",
+        });
+    }
+    if (isCaptureModeRequested()) {
+        const error = new Error(
+            "Local email capture is restricted to pending registration verification."
+        );
+        error.code = "EMAIL_CAPTURE_UNSUPPORTED_PURPOSE";
+        throw error;
+    }
     const token = crypto.randomBytes(32).toString("base64url");
     const tokenHash = hashOpaque(token);
     const frontendBaseUrl = getFrontendBaseUrl();
@@ -288,6 +316,33 @@ async function issueEmailToken({ userId, email, purpose }) {
         text: verification
             ? `Verify your email address using this link (expires in 30 minutes): ${link.href}`
             : `Reset your password using this link (expires in 30 minutes): ${link.href}`,
+    });
+}
+
+async function sendPendingRegistrationEmail({ email, token }) {
+    const frontendBaseUrl = getFrontendBaseUrl();
+    if (process.env.MICOPESA_TEST_MODE === "true" && !isCaptureModeRequested()) {
+        throw Object.assign(new Error("Test mode requires local email capture."), {
+            code: "EMAIL_CAPTURE_REQUIRED",
+        });
+    }
+    if (isCaptureModeRequested()) {
+        if (process.env.MICOPESA_EMAIL_CAPTURE !== "true") {
+            throw Object.assign(new Error("MICOPESA_EMAIL_CAPTURE must be explicitly set to true."), {
+                code: "EMAIL_CAPTURE_NOT_ENABLED",
+            });
+        }
+    } else {
+        assertEmailProviderConfigured();
+    }
+    const link = new URL("/verify-email", frontendBaseUrl);
+    link.searchParams.set("token", token);
+    link.searchParams.set("flow", "registration");
+    return sendEmail({
+        to: email,
+        subject: "Complete your MicoPesa registration",
+        purpose: "REGISTRATION_VERIFICATION",
+        text: `Complete your MicoPesa registration using this link (expires in 30 minutes): ${link.href}. If you did not request this, ignore this email.`,
     });
 }
 
@@ -343,6 +398,7 @@ module.exports = {
     issueEmailToken,
     logEmailDeliveryFailure,
     safeSmtpMessage,
+    sendPendingRegistrationEmail,
     sendEmail,
     sendEmailWithTransporter,
 };

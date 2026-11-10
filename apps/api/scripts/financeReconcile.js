@@ -1,7 +1,8 @@
-const { isIP } = require("node:net");
 const { Pool } = require("pg");
-
-const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+const {
+    TEST_DATABASE_NAME,
+    getTargetDatabase,
+} = require("../../../tests/scripts/testDatabaseSafety");
 
 const CHECKS = [
     {
@@ -184,51 +185,19 @@ const CHECKS = [
     },
 ];
 
-function isLoopbackAddress(address) {
-    if (typeof address !== "string") return false;
-    const normalized = address.toLowerCase().split("%")[0].split("/")[0];
-    if (normalized === "::1") return true;
-    if (normalized.startsWith("::ffff:")) return isLoopbackAddress(normalized.slice(7));
-    return isIP(normalized) === 4 && normalized.startsWith("127.");
+function validateTestDatabaseUrl(connectionString, environment = process.env) {
+    return getTargetDatabase({
+        ...environment,
+        TEST_DATABASE_URL: connectionString,
+    });
 }
 
-function validateTestDatabaseUrl(connectionString) {
-    let parsed;
-    try {
-        parsed = new URL(connectionString);
-    } catch {
-        throw new Error("Finance reconciliation requires a valid TEST_DATABASE_URL.");
-    }
-
-    const hostname = parsed.hostname.toLowerCase();
-    const hasHostOverride = parsed.searchParams.has("host");
-    const overriddenHost = parsed.searchParams.get("host");
-    const hasHostAddress = parsed.searchParams.has("hostaddr");
-    const hostAddress = parsed.searchParams.get("hostaddr");
-    const validHost = LOCAL_HOSTS.has(hostname);
-    const validOverrides =
-        (!hasHostOverride || (overriddenHost && LOCAL_HOSTS.has(overriddenHost.toLowerCase()))) &&
-        (!hasHostAddress || (hostAddress && isLoopbackAddress(hostAddress))) &&
-        !parsed.searchParams.has("service");
-    let databaseName;
-    try {
-        databaseName = decodeURIComponent(parsed.pathname.slice(1));
-    } catch {
-        databaseName = "";
-    }
-
-    if (!["postgres:", "postgresql:"].includes(parsed.protocol) ||
-        !validHost || !validOverrides || databaseName !== "micopesa_test") {
-        throw new Error("Finance reconciliation may connect only to local micopesa_test.");
-    }
+function isSafeServerAddress(address, expectedHost = "127.0.0.1") {
+    return typeof address === "string" && address.split("/")[0] === expectedHost;
 }
 
-function isSafeServerAddress(address) {
-    return address === null || isLoopbackAddress(address);
-}
-
-async function runReconciliation({ connectionString, PoolClass = Pool } = {}) {
-    validateTestDatabaseUrl(connectionString);
+async function runReconciliation({ connectionString, PoolClass = Pool, environment = process.env } = {}) {
+    validateTestDatabaseUrl(connectionString, environment);
     const pool = new PoolClass({ connectionString, max: 1 });
     let client;
     let transactionOpen = false;
@@ -243,9 +212,9 @@ async function runReconciliation({ connectionString, PoolClass = Pool } = {}) {
                     current_setting('transaction_read_only') AS read_only`
         );
         const target = targetResult.rows[0];
-        if (!target || target.database_name !== "micopesa_test" ||
+        if (!target || target.database_name !== TEST_DATABASE_NAME ||
             target.read_only !== "on" || !isSafeServerAddress(target.server_address)) {
-            throw new Error("Connected database did not verify as a local, read-only micopesa_test target.");
+            throw new Error(`Connected database did not verify as a read-only ${TEST_DATABASE_NAME} target.`);
         }
 
         const checks = [];

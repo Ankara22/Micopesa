@@ -57,7 +57,12 @@ async function requireAuth(req, res, next) {
             [decoded.userId]
         );
     } catch (error) {
-        console.error("Authentication user lookup failed:", error);
+        console.error("Authentication user lookup database diagnostic:", {
+            message: error?.message,
+            code: error?.code,
+            position: error?.position,
+            routine: error?.routine,
+        });
         return res.status(500).json({
             status: "error",
             message: "Authentication service temporarily unavailable",
@@ -141,4 +146,27 @@ function requireRole(...roles) {
     };
 }
 
-module.exports = { requireAuth, verifyToken, requireRole };
+async function requireVerifiedKyc(req, res, next) {
+    try {
+        const result = await pool.query(
+            "SELECT kyc_status FROM kyc_records WHERE user_id = $1",
+            [req.user.userId]
+        );
+        if (result.rows[0]?.kyc_status !== "VERIFIED") {
+            return res.status(403).json({
+                status: "error",
+                code: "KYC_VERIFICATION_REQUIRED",
+                message: "KYC verification is required to use this financial feature.",
+            });
+        }
+        return next();
+    } catch (error) {
+        console.error("KYC access check failed:", error.code || "KYC_ACCESS_CHECK_FAILED");
+        return res.status(500).json({
+            status: "error",
+            message: "Unable to verify account eligibility right now.",
+        });
+    }
+}
+
+module.exports = { requireAuth, verifyToken, requireRole, requireVerifiedKyc };

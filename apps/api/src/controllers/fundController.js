@@ -88,23 +88,42 @@ async function createFund(req, res) {
         return res.status(400).json({ status: "error", message: "expected_return must be a number" });
     }
 
+    let client;
+    let transactionStarted = false;
     try {
-        const result = await pool.query(
+        client = await pool.connect();
+        await client.query("BEGIN");
+        transactionStarted = true;
+        const result = await client.query(
             `INSERT INTO funds (managed_by, fund_name, administrator_name, risk_level, expected_return)
              VALUES ($1, $2, $3, $4, $5)
              RETURNING fund_id, managed_by, fund_name, administrator_name, risk_level,
                        expected_return, fund_status, created_at`,
             [userId, fund_name, administrator_name, risk_level, expectedReturn]
         );
+        const fund = result.rows[0];
+        await writeAuditLog(client, {
+            userId,
+            actionType: "CREATE",
+            entityName: "FUNDS",
+            entityId: fund.fund_id,
+        });
+        await client.query("COMMIT");
+        transactionStarted = false;
 
         return res.status(201).json({
             status: "success",
             message: "Fund created successfully",
-            data: { fund: result.rows[0] },
+            data: { fund },
         });
     } catch (error) {
+        if (client && transactionStarted) {
+            await client.query("ROLLBACK");
+        }
         console.error("Failed to create fund:", error);
         return res.status(500).json({ status: "error", message: "Failed to create fund due to a server error" });
+    } finally {
+        client?.release();
     }
 }
 
@@ -389,18 +408,30 @@ async function updateFund(req, res) {
         return res.status(400).json({ status: "error", message: "expected_return must be a number" });
     }
 
+    let client;
+    let transactionStarted = false;
     try {
-        const existing = await pool.query("SELECT managed_by FROM funds WHERE fund_id = $1", [fundId]);
+        client = await pool.connect();
+        await client.query("BEGIN");
+        transactionStarted = true;
+        const existing = await client.query(
+            "SELECT managed_by FROM funds WHERE fund_id = $1 FOR UPDATE",
+            [fundId]
+        );
 
         if (existing.rows.length === 0) {
+            await client.query("ROLLBACK");
+            transactionStarted = false;
             return res.status(404).json({ status: "error", message: "Fund not found" });
         }
 
         if (existing.rows[0].managed_by !== userId) {
+            await client.query("ROLLBACK");
+            transactionStarted = false;
             return res.status(403).json({ status: "error", message: "You do not manage this fund" });
         }
 
-        const result = await pool.query(
+        const result = await client.query(
             `UPDATE funds SET
                 fund_name = COALESCE($1, fund_name),
                 administrator_name = COALESCE($2, administrator_name),
@@ -408,7 +439,7 @@ async function updateFund(req, res) {
                 expected_return = COALESCE($4, expected_return),
                 fund_status = COALESCE($5, fund_status),
                 updated_at = now()
-             WHERE fund_id = $6
+             WHERE fund_id = $6 AND managed_by = $7
              RETURNING fund_id, managed_by, fund_name, administrator_name, risk_level,
                        expected_return, fund_status, created_at, updated_at`,
             [
@@ -418,17 +449,38 @@ async function updateFund(req, res) {
                 expected_return !== undefined ? Number(expected_return) : null,
                 fund_status ?? null,
                 fundId,
+                userId,
             ]
         );
+        const fund = result.rows[0];
+        if (!fund) {
+            await client.query("ROLLBACK");
+            transactionStarted = false;
+            return res.status(403).json({ status: "error", message: "You do not manage this fund" });
+        }
+
+        await writeAuditLog(client, {
+            userId,
+            actionType: "UPDATE",
+            entityName: "FUNDS",
+            entityId: fundId,
+        });
+        await client.query("COMMIT");
+        transactionStarted = false;
 
         return res.status(200).json({
             status: "success",
             message: "Fund updated successfully",
-            data: { fund: result.rows[0] },
+            data: { fund },
         });
     } catch (error) {
+        if (client && transactionStarted) {
+            await client.query("ROLLBACK");
+        }
         console.error("Failed to update fund:", error);
         return res.status(500).json({ status: "error", message: "Failed to update fund due to a server error" });
+    } finally {
+        client?.release();
     }
 }
 

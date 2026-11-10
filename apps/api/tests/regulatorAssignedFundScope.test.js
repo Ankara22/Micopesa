@@ -25,6 +25,9 @@ test("regulator compliance overview and report list bind every aggregate and row
     const calls = [];
     pool.query = async (sql, values = []) => {
         calls.push({ sql, values });
+        if (sql.includes("entity_name = 'KYC_RECORD'")) {
+            return { rows: [{ action_type: "APPROVE", kyc_status: "VERIFIED", timestamp: "2026-03-01T00:00:00Z" }] };
+        }
         if (sql.includes("FROM audit_logs al")) {
             return { rows: [{ events_last_24h: 1, last_event_at: "2026-03-01T00:00:00Z" }] };
         }
@@ -33,6 +36,9 @@ test("regulator compliance overview and report list bind every aggregate and row
         }
         if (sql.startsWith("SELECT report_id, rba_status, period_start")) {
             return { rows: [{ report_id: "assigned-report", rba_status: "SUBMITTED" }] };
+        }
+        if (sql.includes("FROM kyc_records")) {
+            return { rows: [{ kyc_status: "VERIFIED", count: 1 }] };
         }
         if (sql.startsWith("SELECT cr.report_id, cr.generated_by AS manager_id")) {
             return {
@@ -49,14 +55,63 @@ test("regulator compliance overview and report list bind every aggregate and row
         await regulator.getComplianceOverview({ user: { userId: "regulator-1" } }, overview);
         assert.equal(overview.statusCode, 200);
         assert.equal(overview.body.data.latest_rba_report.report_id, "assigned-report");
-        assert.equal(calls.length, 3);
-        assert.ok(calls.every(({ values }) => values[0] === "regulator-1"));
-        assert.ok(calls.every(({ sql }) => sql.includes("regulator_fund_assignments")));
-        assert.ok(calls.every(({ sql }) =>
+        assert.equal(calls.length, 5);
+        assert.ok(calls.slice(0, 3).every(({ values }) => values[0] === "regulator-1"));
+        assert.ok(calls.slice(0, 3).every(({ sql }) => sql.includes("regulator_fund_assignments")));
+        assert.ok(calls.slice(0, 3).every(({ sql }) =>
             sql.includes("(cr.is_legacy = TRUE OR cr.rba_status <> 'DRAFT')")
         ));
         assert.match(calls[0].sql, /al\.entity_name = 'COMPLIANCE_REPORTS'/);
         assert.match(calls[0].sql, /cr\.report_id = al\.entity_id/);
+        assert.deepEqual(overview.body.data.kyc_status_counts, [{ kyc_status: "VERIFIED", count: 1 }]);
+        assert.deepEqual(overview.body.data.kyc_review_history, [{
+            action_type: "APPROVE",
+            kyc_status: "VERIFIED",
+            timestamp: "2026-03-01T00:00:00Z",
+        }]);
+        assert.match(calls[3].sql, /GROUP BY kyc_status/);
+        assert.match(calls[4].sql, /entity_name = 'KYC_RECORD'/);
+        assert.doesNotMatch(calls[3].sql + calls[4].sql, /national_id|email|phone|full_name|user_id|kyc_id/);
+
+        calls.length = 0;
+        const filteredList = response();
+        await regulator.listReports({
+            user: { userId: "regulator-1" },
+            query: {
+                fund_id: "fund-1",
+                manager_id: "manager-1",
+                report_type: "RBA",
+                status: "SUBMITTED",
+                period_start: "2026-01-01",
+                period_end: "2026-03-31",
+                search: "synthetic",
+            },
+        }, filteredList);
+        assert.equal(filteredList.statusCode, 200);
+        assert.deepEqual(calls[0].values, [
+            "regulator-1",
+            "fund-1",
+            "manager-1",
+            "RBA",
+            "SUBMITTED",
+            "2026-01-01",
+            "2026-03-31",
+            "%synthetic%",
+            "%synthetic%",
+        ]);
+        assert.match(calls[0].sql, /cr\.period_end >= \$6/);
+        assert.match(calls[0].sql, /cr\.period_start <= \$7/);
+        assert.match(calls[0].sql, /rfa\.regulator_user_id = \$1/);
+        assert.match(calls[0].sql, /rfa\.active = TRUE/);
+
+        calls.length = 0;
+        const invalidDateRange = response();
+        await regulator.listReports({
+            user: { userId: "regulator-1" },
+            query: { period_start: "2026-04-01", period_end: "2026-03-31" },
+        }, invalidDateRange);
+        assert.equal(invalidDateRange.statusCode, 400);
+        assert.equal(calls.length, 0);
 
         calls.length = 0;
         const list = response();

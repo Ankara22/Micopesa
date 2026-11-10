@@ -7,20 +7,27 @@ const {
 } = require("../services/profilePhotoStorage");
 const authEmailService = require("../services/authEmailService");
 
+const PROFILE_USER_FIELDS = [
+    "users.user_id",
+    "users.full_name",
+    "users.email",
+    "users.pending_email",
+    "users.email_verified",
+    "users.phone",
+    "users.phone_verified_at",
+    "users.role",
+    "users.occupation",
+    "users.account_status",
+    "users.created_at",
+    "users.updated_at",
+    "(users.profile_photo_ref IS NOT NULL) AS profile_photo_available",
+];
+
 const PROFILE_FIELDS = [
-    "user_id",
-    "full_name",
-    "email",
-    "pending_email",
-    "email_verified",
-    "phone",
-    "phone_verified_at",
-    "role",
-    "occupation",
-    "account_status",
-    "created_at",
-    "updated_at",
-    "(profile_photo_ref IS NOT NULL) AS profile_photo_available",
+    ...PROFILE_USER_FIELDS,
+    "kyc.date_of_birth",
+    "right(kyc.national_id, 4) AS national_id_last_four",
+    "kyc.kyc_status",
 ];
 
 function normalizeFullName(value) {
@@ -52,19 +59,42 @@ function sendProfile(res, user) {
     });
 }
 
+function maskNationalId(lastFourDigits) {
+    return typeof lastFourDigits === "string" && /^\d{4}$/.test(lastFourDigits)
+        ? `****${lastFourDigits}`
+        : null;
+}
+
+async function getProfileByUserId(userId, queryable = pool) {
+    const result = await queryable.query(
+        `SELECT ${PROFILE_FIELDS.join(", ")}
+         FROM users
+         LEFT JOIN kyc_records kyc ON kyc.user_id = users.user_id
+         WHERE users.user_id = $1`,
+        [userId]
+    );
+    if (!result.rows[0]) return null;
+    const { national_id_last_four: lastFourDigits, ...user } = result.rows[0];
+    return {
+        ...user,
+        masked_national_id: maskNationalId(lastFourDigits),
+    };
+}
+
 async function getMyProfile(req, res) {
     try {
-        const result = await pool.query(
-            `SELECT ${PROFILE_FIELDS.join(", ")}
-             FROM users WHERE user_id = $1`,
-            [req.user.userId]
-        );
-        if (!result.rows[0]) {
+        const user = await getProfileByUserId(req.user.userId);
+        if (!user) {
             return res.status(404).json({ status: "error", message: "User not found" });
         }
-        return sendProfile(res, result.rows[0]);
+        return sendProfile(res, user);
     } catch (error) {
-        console.error("Failed to fetch profile:", error);
+        console.error("Profile fetch database diagnostic:", {
+            message: error?.message,
+            code: error?.code,
+            position: error?.position,
+            routine: error?.routine,
+        });
         return res.status(500).json({ status: "error", message: "Failed to fetch profile" });
     }
 }
@@ -134,10 +164,14 @@ async function updateMyProfile(req, res) {
             `UPDATE users
              SET ${updates.join(", ")}
              WHERE user_id = $${values.length}
-             RETURNING ${PROFILE_FIELDS.join(", ")}`,
+             RETURNING ${PROFILE_USER_FIELDS.join(", ")}`,
             values
         );
         if (!result.rows[0]) {
+            return res.status(404).json({ status: "error", message: "User not found" });
+        }
+        const user = await getProfileByUserId(req.user.userId);
+        if (!user) {
             return res.status(404).json({ status: "error", message: "User not found" });
         }
         if (emailToVerify) {
@@ -153,7 +187,7 @@ async function updateMyProfile(req, res) {
                 purpose: "EMAIL_VERIFICATION",
             });
         }
-        return sendProfile(res, result.rows[0]);
+        return sendProfile(res, user);
     } catch (error) {
         if (error.status === 429) {
             return res.status(429).json({ status: "error", message: error.message });
@@ -217,13 +251,25 @@ async function uploadMyProfilePhoto(req, res) {
             `UPDATE users
              SET profile_photo_ref = $1
              WHERE user_id = $2
-             RETURNING ${PROFILE_FIELDS.join(", ")}`,
+             RETURNING ${PROFILE_USER_FIELDS.join(", ")}`,
             [savedPhoto.reference, req.user.userId]
         );
+        if (!result.rows[0]) {
+            await client.query("ROLLBACK");
+            transactionStarted = false;
+            await removeProfilePhoto(savedPhoto.reference);
+            return res.status(404).json({ status: "error", message: "User not found" });
+        }
+        const user = await getProfileByUserId(req.user.userId, client);
+        if (!user) {
+            await client.query("ROLLBACK");
+            transactionStarted = false;
+            await removeProfilePhoto(savedPhoto.reference);
+            return res.status(404).json({ status: "error", message: "User not found" });
+        }
         commitAttempted = true;
         await client.query("COMMIT");
         transactionStarted = false;
-        const user = result.rows[0];
         if (previousPhotoRef && previousPhotoRef !== savedPhoto.reference) {
             await removeProfilePhoto(previousPhotoRef).catch((error) => {
                 console.error("Failed to remove replaced profile photo:", error);

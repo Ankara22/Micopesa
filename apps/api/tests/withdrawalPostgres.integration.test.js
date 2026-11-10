@@ -2,13 +2,15 @@ const { after, before, beforeEach, test } = require("node:test");
 const assert = require("node:assert/strict");
 const { isIP } = require("node:net");
 const { Pool } = require("pg");
-const { assertTestMode } = require("../../../tests/scripts/testDatabaseSafety");
+const {
+    TEST_DATABASE_NAME,
+    getTargetDatabase,
+} = require("../../../tests/scripts/testDatabaseSafety");
 
-const TEST_DATABASE_NAME = "micopesa_test";
 const REQUIRED_INDEX = "uq_withdrawal_claims_one_pending_per_account";
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 
-assertTestMode(process.env);
+const targetDatabase = getTargetDatabase(process.env);
 
 function isLoopbackAddress(address) {
     if (typeof address !== "string") return false;
@@ -48,7 +50,7 @@ function validateTestDatabaseUrl(connectionString) {
     }
 }
 
-const connectionString = process.env.TEST_DATABASE_URL;
+const connectionString = targetDatabase.url.toString();
 validateTestDatabaseUrl(connectionString);
 process.env.DATABASE_URL = connectionString;
 

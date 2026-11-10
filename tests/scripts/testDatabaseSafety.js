@@ -1,7 +1,9 @@
 const net = require("node:net");
 
-const TEST_DATABASE_NAME = "micopesa_test";
-const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
+const TEST_DATABASE_NAME = "micopesa_registration_test";
+const TEST_DATABASE_HOST = "127.0.0.1";
+const TEST_DATABASE_PORT = "5544";
+const TEST_DATABASE_ADMIN_NAME = "postgres";
 
 function assertTestMode(environment) {
     if (environment.NODE_ENV !== "test") {
@@ -13,7 +15,7 @@ function normalizeHost(hostname) {
     return hostname.replace(/^\[|\]$/g, "").toLowerCase();
 }
 
-function parseLocalDatabaseUrl(value, name, expectedDatabase) {
+function parseDatabaseUrl(value, name) {
     if (!value) {
         throw new Error(`${name} is required; configure the dedicated local test database.`);
     }
@@ -38,26 +40,30 @@ function parseLocalDatabaseUrl(value, name, expectedDatabase) {
     if (url.search || url.hash) {
         throw new Error(`${name} must not contain connection-routing options.`);
     }
-    if (!LOCAL_HOSTS.has(host)) {
-        throw new Error(`${name} must use a local PostgreSQL host.`);
-    }
     if (!databaseName) {
         throw new Error(`${name} must include a database name.`);
-    }
-    if (expectedDatabase && databaseName !== expectedDatabase) {
-        throw new Error(`${name} must point exactly to ${expectedDatabase}.`);
     }
 
     return { url, host, port: url.port || "5432", databaseName };
 }
 
+function parseDisposableTestDatabaseUrl(value, name) {
+    const target = parseDatabaseUrl(value, name);
+    if (target.host !== TEST_DATABASE_HOST) {
+        throw new Error(`${name} must use ${TEST_DATABASE_HOST}.`);
+    }
+    if (target.port !== TEST_DATABASE_PORT) {
+        throw new Error(`${name} must use port ${TEST_DATABASE_PORT}.`);
+    }
+    if (target.databaseName !== TEST_DATABASE_NAME) {
+        throw new Error(`${name} must point exactly to ${TEST_DATABASE_NAME}.`);
+    }
+    return target;
+}
+
 function getTargetDatabase(environment = process.env) {
     assertTestMode(environment);
-    return parseLocalDatabaseUrl(
-        environment.TEST_DATABASE_URL,
-        "TEST_DATABASE_URL",
-        TEST_DATABASE_NAME
-    );
+    return parseDisposableTestDatabaseUrl(environment.TEST_DATABASE_URL, "TEST_DATABASE_URL");
 }
 
 function getDatabaseSetupConfig(environment = process.env, operation = "setup") {
@@ -69,21 +75,18 @@ function getDatabaseSetupConfig(environment = process.env, operation = "setup") 
         throw new Error(`${requiredOptIn}=1 is required for database ${operation}.`);
     }
 
-    const target = parseLocalDatabaseUrl(
-        environment.TEST_DATABASE_URL,
-        "TEST_DATABASE_URL",
-        TEST_DATABASE_NAME
-    );
-    const admin = parseLocalDatabaseUrl(
-        environment.TEST_DATABASE_ADMIN_URL,
-        "TEST_DATABASE_ADMIN_URL",
-        null
-    );
+    const target = parseDisposableTestDatabaseUrl(environment.TEST_DATABASE_URL, "TEST_DATABASE_URL");
+    const admin = parseDatabaseUrl(environment.TEST_DATABASE_ADMIN_URL, "TEST_DATABASE_ADMIN_URL");
 
-    if (admin.databaseName === target.databaseName ||
-        admin.host !== target.host ||
-        admin.port !== target.port) {
-        throw new Error("TEST_DATABASE_ADMIN_URL must target a separate database on the same local server.");
+    if (admin.databaseName === target.databaseName) {
+        throw new Error("TEST_DATABASE_ADMIN_URL must target a separate database.");
+    }
+    if (admin.host !== TEST_DATABASE_HOST ||
+        admin.port !== TEST_DATABASE_PORT ||
+        admin.databaseName !== TEST_DATABASE_ADMIN_NAME) {
+        throw new Error(
+            `TEST_DATABASE_ADMIN_URL must target ${TEST_DATABASE_HOST}:${TEST_DATABASE_PORT}/${TEST_DATABASE_ADMIN_NAME}.`
+        );
     }
 
     return { target, admin };
@@ -107,17 +110,24 @@ async function verifyDatabaseIdentity(client, expectedDatabase) {
     if (!identity || identity.database_name !== expectedDatabase) {
         throw new Error(`Connected database identity did not match ${expectedDatabase}.`);
     }
-    if (!isLoopbackAddress(identity.server_address)) {
-        throw new Error("Connected PostgreSQL server did not report a loopback address.");
+    const serverAddress = typeof identity.server_address === "string"
+        ? identity.server_address.split("/")[0].toLowerCase()
+        : null;
+    if (!isLoopbackAddress(serverAddress) || serverAddress !== TEST_DATABASE_HOST) {
+        throw new Error(`Connected PostgreSQL server did not report ${TEST_DATABASE_HOST} as its loopback address.`);
     }
     return identity;
 }
 
 module.exports = {
     TEST_DATABASE_NAME,
+    TEST_DATABASE_HOST,
+    TEST_DATABASE_PORT,
+    TEST_DATABASE_ADMIN_NAME,
     assertTestMode,
     getDatabaseSetupConfig,
     getTargetDatabase,
     isLoopbackAddress,
+    parseDisposableTestDatabaseUrl,
     verifyDatabaseIdentity,
 };
