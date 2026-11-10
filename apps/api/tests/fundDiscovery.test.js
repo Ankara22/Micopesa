@@ -9,7 +9,9 @@ const { generateToken } = require("../src/utils/token");
 process.env.JWT_SECRET ||= "micopesa-fund-discovery-test-secret";
 
 const originalQuery = pool.query;
+const originalConnect = pool.connect;
 const originalJwtSecret = process.env.JWT_SECRET;
+const audit = [];
 const users = new Map([
     ["manager-1", { user_id: "manager-1", role: "FUND_MANAGER", account_status: "ACTIVE", auth_version: 0 }],
     ["manager-2", { user_id: "manager-2", role: "FUND_MANAGER", account_status: "ACTIVE", auth_version: 0 }],
@@ -22,9 +24,16 @@ const funds = [
     { fund_id: "closed-fund", managed_by: "manager-2", fund_name: "Closed Fund", administrator_name: "Admin B", risk_level: "HIGH", expected_return: "5.00", fund_status: "CLOSED" },
     { fund_id: "other-active", managed_by: "manager-2", fund_name: "Other Active Fund", administrator_name: "Admin B", risk_level: "MEDIUM", expected_return: "6.00", fund_status: "ACTIVE" },
 ];
+const regulatorAssignments = [
+    { regulator_user_id: "regulator-1", fund_id: "closed-fund", active: true },
+    { regulator_user_id: "regulator-1", fund_id: "suspended-fund", active: false },
+];
 
 pool.query = async (query, values = []) => {
-    if (query.includes("SELECT user_id, role, account_status, auth_version FROM users")) {
+    if (query.includes("SELECT kyc_status FROM kyc_records")) {
+        return { rows: [{ kyc_status: "VERIFIED" }] };
+    }
+    if (query.includes("SELECT user_id, role, account_status, auth_version")) {
         const user = users.get(values[0]);
         return { rows: user ? [user] : [] };
     }
@@ -64,15 +73,60 @@ pool.query = async (query, values = []) => {
         return { rows: funds.filter((fund) => fund.managed_by === values[0]) };
     }
 
-    if (query.includes("FROM funds ORDER BY created_at DESC")) {
-        return { rows: funds };
+    if (query.includes("FROM funds f") && query.includes("regulator_fund_assignments")) {
+        return {
+            rows: funds.filter((fund) => regulatorAssignments.some((assignment) =>
+                assignment.regulator_user_id === values[0] &&
+                assignment.fund_id === fund.fund_id &&
+                assignment.active
+            )),
+        };
     }
 
     assert.fail(`Unexpected database query in fund discovery test: ${query}`);
 };
 
+pool.connect = async () => {
+    let snapshot;
+    return {
+        async query(query, values = []) {
+            if (query === "BEGIN") {
+                snapshot = { funds: structuredClone(funds), audit: structuredClone(audit) };
+                return { rows: [] };
+            }
+            if (query === "ROLLBACK") {
+                funds.splice(0, funds.length, ...snapshot.funds);
+                audit.splice(0, audit.length, ...snapshot.audit);
+                return { rows: [] };
+            }
+            if (query === "COMMIT") return { rows: [] };
+            if (query.includes("INSERT INTO funds")) {
+                const [managed_by, fund_name, administrator_name, risk_level, expected_return] = values;
+                const fund = {
+                    fund_id: `created-${funds.length + 1}`,
+                    managed_by,
+                    fund_name,
+                    administrator_name,
+                    risk_level,
+                    expected_return: String(expected_return),
+                    fund_status: "ACTIVE",
+                };
+                funds.push(fund);
+                return { rows: [fund] };
+            }
+            if (query.includes("INSERT INTO audit_logs")) {
+                audit.push(values);
+                return { rows: [] };
+            }
+            assert.fail(`Unexpected transaction query in fund discovery test: ${query}`);
+        },
+        release() {},
+    };
+};
+
 after(() => {
     pool.query = originalQuery;
+    pool.connect = originalConnect;
     process.env.JWT_SECRET = originalJwtSecret;
 });
 
@@ -122,6 +176,7 @@ test("manager-created active funds appear in worker discovery while role permiss
         assert.equal(createdResponse.status, 201);
         const created = (await createdResponse.json()).data.fund;
         assert.equal(created.managed_by, "manager-1");
+        assert.deepEqual(audit[0].slice(0, 4), ["manager-1", "CREATE", "FUNDS", created.fund_id]);
 
         const workerFundsResponse = await request("/available", { userId: "worker-1" });
         assert.equal(workerFundsResponse.status, 200);
@@ -152,7 +207,7 @@ test("manager-created active funds appear in worker discovery while role permiss
 
         const regulatorListResponse = await request("/", { userId: "regulator-1" });
         const regulatorFunds = (await regulatorListResponse.json()).data;
-        assert.equal(regulatorFunds.length, funds.length);
+        assert.deepEqual(regulatorFunds.map((fund) => fund.fund_id), ["closed-fund"]);
     } finally {
         await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }

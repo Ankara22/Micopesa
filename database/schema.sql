@@ -45,6 +45,10 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 -- Drop existing objects (reverse dependency order)
 -- -----------------------------------------------------------------------------
 DROP TABLE IF EXISTS system_settings CASCADE;
+DROP TABLE IF EXISTS report_download_events CASCADE;
+DROP TABLE IF EXISTS report_generation_history CASCADE;
+DROP TABLE IF EXISTS notification_audit_events CASCADE;
+DROP TABLE IF EXISTS regulator_fund_assignments CASCADE;
 DROP TABLE IF EXISTS compliance_reports CASCADE;
 DROP TABLE IF EXISTS audit_logs CASCADE;
 DROP TABLE IF EXISTS ussd_sessions CASCADE;
@@ -98,6 +102,7 @@ CREATE TABLE users (
     user_id         VARCHAR(25)  PRIMARY KEY DEFAULT generate_short_id(),
     full_name       VARCHAR(100) NOT NULL,
     phone           VARCHAR(15)  NOT NULL,
+    phone_verified_at TIMESTAMP WITH TIME ZONE,
     email           VARCHAR(254),
     pending_email   VARCHAR(254),
     email_verified  BOOLEAN      NOT NULL DEFAULT FALSE,
@@ -130,6 +135,29 @@ CREATE UNIQUE INDEX uq_users_pending_email_lower
     ON users (lower(pending_email))
     WHERE pending_email IS NOT NULL;
 
+CREATE UNIQUE INDEX uq_users_phone_normalized
+    ON users ((
+        CASE
+            WHEN regexp_replace(COALESCE(phone, ''), '[[:space:]()-]', '', 'g')
+                ~ '^0[17][0-9]{8}$'
+                THEN '+254' || substring(
+                    regexp_replace(COALESCE(phone, ''), '[[:space:]()-]', '', 'g')
+                    FROM 2
+                )
+            WHEN regexp_replace(COALESCE(phone, ''), '[[:space:]()-]', '', 'g')
+                ~ '^[+]?254[17][0-9]{8}$'
+                THEN '+' || regexp_replace(
+                    regexp_replace(COALESCE(phone, ''), '[[:space:]()-]', '', 'g'),
+                    '^[+]',
+                    ''
+                )
+            ELSE NULLIF(
+                regexp_replace(COALESCE(phone, ''), '[[:space:]()-]', '', 'g'),
+                ''
+            )
+        END
+    ));
+
 CREATE INDEX idx_users_role ON users (role);
 CREATE INDEX idx_users_account_status ON users (account_status);
 
@@ -137,6 +165,42 @@ CREATE TRIGGER trg_users_set_updated_at
     BEFORE UPDATE ON users
     FOR EACH ROW
     EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE phone_change_verifications (
+    user_id VARCHAR(25) PRIMARY KEY
+        REFERENCES users (user_id) ON DELETE CASCADE,
+    pending_phone VARCHAR(15),
+    code_hash BYTEA,
+    code_salt BYTEA,
+    expires_at TIMESTAMP WITH TIME ZONE,
+    send_count INTEGER NOT NULL DEFAULT 0
+        CHECK (send_count BETWEEN 0 AND 3),
+    window_started_at TIMESTAMP WITH TIME ZONE,
+    last_sent_at TIMESTAMP WITH TIME ZONE,
+    attempt_count INTEGER NOT NULL DEFAULT 0
+        CHECK (attempt_count BETWEEN 0 AND 5),
+    attempt_window_started_at TIMESTAMP WITH TIME ZONE,
+    locked_until TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    CONSTRAINT chk_phone_change_pending_phone_e164 CHECK (
+        pending_phone IS NULL OR pending_phone ~ '^[+]254[17][0-9]{8}$'
+    ),
+    CONSTRAINT chk_phone_change_code_state CHECK (
+        (pending_phone IS NULL AND code_hash IS NULL AND code_salt IS NULL AND expires_at IS NULL)
+        OR
+        (pending_phone IS NOT NULL AND code_hash IS NOT NULL AND code_salt IS NOT NULL
+            AND octet_length(code_hash) = 32 AND octet_length(code_salt) = 16
+            AND expires_at IS NOT NULL)
+    )
+);
+
+CREATE UNIQUE INDEX uq_phone_change_pending_phone
+    ON phone_change_verifications (pending_phone)
+    WHERE pending_phone IS NOT NULL;
+
+CREATE INDEX idx_phone_change_verifications_expiry
+    ON phone_change_verifications (expires_at)
+    WHERE pending_phone IS NOT NULL;
 
 -- -----------------------------------------------------------------------------
 -- KYC_RECORDS  (1:1 with USERS)
@@ -148,16 +212,48 @@ CREATE TABLE kyc_records (
     date_of_birth   DATE        NOT NULL,
     kyc_status      VARCHAR(15) NOT NULL DEFAULT 'PENDING'
         CHECK (kyc_status IN ('PENDING', 'VERIFIED', 'REJECTED')),
+    duplicate_submission BOOLEAN NOT NULL DEFAULT FALSE,
     verified_at     TIMESTAMP WITH TIME ZONE,
     created_at      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
     updated_at      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
     CONSTRAINT uq_kyc_records_user_id UNIQUE (user_id),
-    CONSTRAINT uq_kyc_records_national_id UNIQUE (national_id),
     CONSTRAINT fk_kyc_records_user FOREIGN KEY (user_id)
         REFERENCES users (user_id) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_kyc_records_kyc_status ON kyc_records (kyc_status);
+CREATE UNIQUE INDEX uq_kyc_records_verified_national_id
+    ON kyc_records (national_id)
+    WHERE kyc_status = 'VERIFIED';
+CREATE INDEX idx_kyc_records_duplicate_pending
+    ON kyc_records (created_at, kyc_id)
+    WHERE duplicate_submission IS TRUE AND kyc_status = 'PENDING';
+
+CREATE OR REPLACE FUNCTION flag_duplicate_kyc_national_id()
+RETURNS TRIGGER AS $$
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(NEW.national_id, 0));
+    NEW.duplicate_submission := EXISTS (
+        SELECT 1
+        FROM kyc_records
+        WHERE national_id = NEW.national_id
+          AND kyc_id IS DISTINCT FROM NEW.kyc_id
+    );
+    IF NEW.duplicate_submission THEN
+        UPDATE kyc_records
+        SET duplicate_submission = TRUE
+        WHERE national_id = NEW.national_id
+          AND kyc_id IS DISTINCT FROM NEW.kyc_id
+          AND duplicate_submission IS FALSE;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_kyc_records_flag_duplicate_national_id
+    BEFORE INSERT OR UPDATE OF national_id, kyc_status ON kyc_records
+    FOR EACH ROW
+    EXECUTE FUNCTION flag_duplicate_kyc_national_id();
 
 CREATE TRIGGER trg_kyc_records_set_updated_at
     BEFORE UPDATE ON kyc_records
@@ -312,9 +408,14 @@ CREATE TABLE transactions (
         CHECK (transaction_type IN ('CONTRIBUTION', 'WITHDRAWAL')),
     amount                NUMERIC(12,2) NOT NULL CHECK (amount > 0),
     mpesa_receipt         VARCHAR(25),
-    checkout_request_id   VARCHAR(25),
+    checkout_request_id   VARCHAR(100),
+    mpesa_phone           VARCHAR(12),
+    mpesa_result_code     INTEGER,
+    mpesa_result_description VARCHAR(255),
     transaction_status    VARCHAR(15)  NOT NULL DEFAULT 'PENDING'
-        CHECK (transaction_status IN ('PENDING', 'COMPLETED', 'FAILED', 'REVERSED')),
+        CHECK (transaction_status IN (
+            'PENDING', 'COMPLETED', 'FAILED', 'REVERSED', 'CANCELLED', 'TIMED_OUT'
+        )),
     initiated_at          TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
     completed_at          TIMESTAMP WITH TIME ZONE,
     updated_at            TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
@@ -344,11 +445,15 @@ CREATE TABLE contributions (
     channel               VARCHAR(20)  NOT NULL
         CHECK (channel IN ('MPESA', 'BANK', 'USSD')),
     contribution_status   VARCHAR(15)  NOT NULL DEFAULT 'PENDING'
-        CHECK (contribution_status IN ('PENDING', 'COMPLETED', 'FAILED')),
+        CHECK (contribution_status IN (
+            'PENDING', 'COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'
+        )),
     created_at            TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
     updated_at            TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
     CONSTRAINT uq_contributions_transaction_id UNIQUE (transaction_id),
     CONSTRAINT uq_contributions_id_account UNIQUE (contribution_id, account_id),
+    CONSTRAINT uq_contributions_id_account_transaction
+        UNIQUE (contribution_id, account_id, transaction_id),
     CONSTRAINT fk_contributions_account FOREIGN KEY (account_id)
         REFERENCES pension_accounts (account_id) ON DELETE CASCADE,
     CONSTRAINT fk_contributions_transaction FOREIGN KEY (transaction_id)
@@ -360,6 +465,282 @@ CREATE INDEX idx_contributions_contribution_status ON contributions (contributio
 
 CREATE TRIGGER trg_contributions_set_updated_at
     BEFORE UPDATE ON contributions
+    FOR EACH ROW
+    EXECUTE FUNCTION set_updated_at();
+
+-- -----------------------------------------------------------------------------
+-- MPESA_PAYMENT_ATTEMPTS
+--   PAYMENT_ATTEMPTS N --- 1 CONTRIBUTIONS : retries without duplicate contributions
+-- -----------------------------------------------------------------------------
+CREATE TABLE mpesa_payment_attempts (
+    attempt_id                  VARCHAR(25) PRIMARY KEY DEFAULT generate_short_id(),
+    account_id                  VARCHAR(25) NOT NULL,
+    contribution_id             VARCHAR(25) NOT NULL,
+    transaction_id              VARCHAR(25) NOT NULL,
+    idempotency_key             VARCHAR(128) NOT NULL,
+    expected_amount             NUMERIC(12,2) NOT NULL
+        CHECK (expected_amount > 0 AND expected_amount = trunc(expected_amount)),
+    mpesa_phone                 VARCHAR(12) NOT NULL
+        CHECK (mpesa_phone ~ '^254[17][0-9]{8}$'),
+    attempt_status              VARCHAR(25) NOT NULL DEFAULT 'PENDING'
+        CHECK (attempt_status IN (
+            'PENDING',
+            'PROMPT_ACCEPTED',
+            'OUTCOME_UNKNOWN',
+            'FAILED',
+            'CANCELLED',
+            'TIMED_OUT'
+        )),
+    checkout_request_id         VARCHAR(100),
+    merchant_request_id         VARCHAR(100),
+    provider_result_code        VARCHAR(30),
+    provider_result_description VARCHAR(255),
+    created_at                  TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    updated_at                  TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    provider_accepted_at        TIMESTAMP WITH TIME ZONE,
+    CONSTRAINT uq_mpesa_payment_attempts_idempotency_key UNIQUE (idempotency_key),
+    CONSTRAINT uq_mpesa_payment_attempts_checkout_request_id UNIQUE (checkout_request_id),
+    CONSTRAINT uq_mpesa_payment_attempts_merchant_request_id UNIQUE (merchant_request_id),
+    CONSTRAINT fk_mpesa_payment_attempts_contribution
+        FOREIGN KEY (contribution_id, account_id, transaction_id)
+        REFERENCES contributions (contribution_id, account_id, transaction_id)
+        ON DELETE CASCADE,
+    CONSTRAINT chk_mpesa_payment_attempts_provider_code
+        CHECK (provider_result_code IS NULL OR provider_result_code ~ '^-?[0-9]{1,30}$'),
+    CONSTRAINT chk_mpesa_payment_attempts_accepted_timestamp
+        CHECK (
+            attempt_status <> 'PROMPT_ACCEPTED'
+            OR (
+                checkout_request_id IS NOT NULL
+                AND merchant_request_id IS NOT NULL
+                AND provider_accepted_at IS NOT NULL
+            )
+        )
+);
+
+CREATE INDEX idx_mpesa_payment_attempts_account_created
+    ON mpesa_payment_attempts (account_id, created_at DESC);
+CREATE INDEX idx_mpesa_payment_attempts_contribution_created
+    ON mpesa_payment_attempts (contribution_id, created_at DESC);
+CREATE INDEX idx_mpesa_payment_attempts_transaction
+    ON mpesa_payment_attempts (transaction_id);
+CREATE INDEX idx_mpesa_payment_attempts_status_created
+    ON mpesa_payment_attempts (attempt_status, created_at);
+CREATE UNIQUE INDEX uq_mpesa_payment_attempts_one_active_per_contribution
+    ON mpesa_payment_attempts (contribution_id)
+    WHERE attempt_status IN ('PENDING', 'OUTCOME_UNKNOWN', 'PROMPT_ACCEPTED');
+
+CREATE TRIGGER trg_mpesa_payment_attempts_set_updated_at
+    BEFORE UPDATE ON mpesa_payment_attempts
+    FOR EACH ROW
+    EXECUTE FUNCTION set_updated_at();
+
+-- -------------------------------------------------------------------------
+-- MPESA_PAYMENT_VERIFICATIONS
+--   Append-only provider verification evidence; never settles a payment.
+-- -------------------------------------------------------------------------
+CREATE TABLE mpesa_payment_verifications (
+    verification_id             BIGSERIAL PRIMARY KEY,
+    attempt_id                  VARCHAR(25) NOT NULL
+        REFERENCES mpesa_payment_attempts (attempt_id) ON DELETE CASCADE,
+    verification_source         VARCHAR(20) NOT NULL
+        CHECK (verification_source IN ('CALLBACK', 'RECONCILIATION')),
+    callback_fingerprint        CHAR(64) UNIQUE,
+    callback_result_code        VARCHAR(30),
+    callback_amount_matches     BOOLEAN,
+    callback_phone_matches      BOOLEAN,
+    callback_receipt            VARCHAR(25),
+    provider_result_code        VARCHAR(30),
+    provider_result_description VARCHAR(255),
+    verification_status         VARCHAR(25) NOT NULL
+        CHECK (verification_status IN (
+            'PROCESSING',
+            'UNVERIFIED',
+            'INCONSISTENT',
+            'VERIFIED_SUCCESS',
+            'VERIFIED_FAILURE'
+        )),
+    created_at                  TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    updated_at                  TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    completed_at                TIMESTAMP WITH TIME ZONE,
+    checkout_request_id         VARCHAR(100),
+    merchant_request_id         VARCHAR(100),
+    CONSTRAINT chk_mpesa_verifications_callback_fingerprint
+        CHECK (
+            (verification_source = 'CALLBACK' AND callback_fingerprint IS NOT NULL)
+            OR (verification_source = 'RECONCILIATION' AND callback_fingerprint IS NULL)
+        ),
+    CONSTRAINT chk_mpesa_verifications_callback_code
+        CHECK (
+            callback_result_code IS NULL
+            OR callback_result_code ~ '^-?[0-9]{1,30}$'
+        ),
+    CONSTRAINT chk_mpesa_verifications_callback_code_required
+        CHECK (
+            verification_source <> 'CALLBACK'
+            OR callback_result_code IS NOT NULL
+        ),
+    CONSTRAINT chk_mpesa_verifications_checkout_id
+        CHECK (
+            checkout_request_id IS NULL
+            OR checkout_request_id ~ '^[A-Za-z0-9_-]{1,100}$'
+        ),
+    CONSTRAINT chk_mpesa_verifications_merchant_id
+        CHECK (
+            merchant_request_id IS NULL
+            OR merchant_request_id ~ '^[A-Za-z0-9_-]{1,100}$'
+        ),
+    CONSTRAINT chk_mpesa_verifications_provider_code
+        CHECK (
+            provider_result_code IS NULL
+            OR provider_result_code ~ '^-?[0-9]{1,30}$'
+        ),
+    CONSTRAINT chk_mpesa_verifications_callback_match_flags
+        CHECK (
+            verification_source <> 'RECONCILIATION'
+            OR (callback_amount_matches IS NULL AND callback_phone_matches IS NULL)
+        ),
+    CONSTRAINT chk_mpesa_verifications_callback_success_metadata
+        CHECK (
+            verification_source <> 'CALLBACK'
+            OR callback_result_code <> '0'
+            OR (
+                callback_amount_matches IS NOT NULL
+                AND callback_phone_matches IS NOT NULL
+                AND callback_receipt IS NOT NULL
+            )
+        ),
+    CONSTRAINT chk_mpesa_verifications_callback_receipt
+        CHECK (
+            callback_receipt IS NULL
+            OR callback_receipt ~ '^[A-Za-z0-9]{1,25}$'
+        ),
+    CONSTRAINT chk_mpesa_verifications_verified_success
+        CHECK (
+            verification_status <> 'VERIFIED_SUCCESS'
+            OR (
+                checkout_request_id IS NOT NULL
+                AND merchant_request_id IS NOT NULL
+                AND provider_result_code = '0'
+                AND (
+                    (
+                        verification_source = 'CALLBACK'
+                        AND callback_result_code = '0'
+                        AND callback_amount_matches IS TRUE
+                        AND callback_phone_matches IS TRUE
+                        AND callback_receipt IS NOT NULL
+                    )
+                    OR (
+                        verification_source = 'RECONCILIATION'
+                        AND callback_result_code IS NULL
+                        AND callback_amount_matches IS NULL
+                        AND callback_phone_matches IS NULL
+                        AND callback_receipt IS NULL
+                    )
+                )
+            )
+        ),
+    CONSTRAINT chk_mpesa_verifications_verified_failure
+        CHECK (
+            verification_status <> 'VERIFIED_FAILURE'
+            OR (
+                provider_result_code IS NOT NULL
+                AND provider_result_code <> '0'
+            )
+        ),
+    CONSTRAINT chk_mpesa_verifications_completed_at
+        CHECK (
+            (verification_status = 'PROCESSING' AND completed_at IS NULL)
+            OR (verification_status <> 'PROCESSING' AND completed_at IS NOT NULL)
+        )
+);
+
+CREATE UNIQUE INDEX uq_mpesa_payment_verifications_processing_attempt
+    ON mpesa_payment_verifications (attempt_id)
+    WHERE verification_status = 'PROCESSING';
+CREATE INDEX idx_mpesa_payment_verifications_attempt_created
+    ON mpesa_payment_verifications (attempt_id, created_at DESC);
+CREATE INDEX idx_mpesa_payment_verifications_provider_ids
+    ON mpesa_payment_verifications (checkout_request_id, merchant_request_id);
+
+CREATE TRIGGER trg_mpesa_payment_verifications_set_updated_at
+    BEFORE UPDATE ON mpesa_payment_verifications
+    FOR EACH ROW
+    EXECUTE FUNCTION set_updated_at();
+
+-- -------------------------------------------------------------------------
+-- MPESA_CALLBACK_INBOX
+--   Durable receipt for provider callbacks, including callbacks arriving
+--   before their payment attempt identifiers have been persisted.
+-- -------------------------------------------------------------------------
+CREATE TABLE mpesa_callback_inbox (
+    callback_id                 BIGSERIAL PRIMARY KEY,
+    callback_fingerprint        CHAR(64) NOT NULL UNIQUE
+        CHECK (callback_fingerprint ~ '^[a-f0-9]{64}$'),
+    checkout_request_id         VARCHAR(100) NOT NULL
+        CHECK (checkout_request_id ~ '^[A-Za-z0-9_-]{1,100}$'),
+    merchant_request_id         VARCHAR(100) NOT NULL
+        CHECK (merchant_request_id ~ '^[A-Za-z0-9_-]{1,100}$'),
+    callback_result_code        VARCHAR(30) NOT NULL
+        CHECK (callback_result_code ~ '^-?[0-9]{1,30}$'),
+    callback_amount             NUMERIC(12,2),
+    callback_phone              VARCHAR(12)
+        CHECK (callback_phone IS NULL OR callback_phone ~ '^254[17][0-9]{8}$'),
+    callback_receipt            VARCHAR(25)
+        CHECK (callback_receipt IS NULL OR callback_receipt ~ '^[A-Za-z0-9]{1,25}$'),
+    callback_status             VARCHAR(20) NOT NULL DEFAULT 'UNMATCHED'
+        CHECK (callback_status IN ('UNMATCHED', 'CORRELATED', 'VERIFIED', 'REJECTED')),
+    attempt_id                  VARCHAR(25)
+        REFERENCES mpesa_payment_attempts (attempt_id) ON DELETE RESTRICT,
+    verification_id             BIGINT
+        REFERENCES mpesa_payment_verifications (verification_id) ON DELETE RESTRICT,
+    rejection_code              VARCHAR(64),
+    duplicate_count             INTEGER NOT NULL DEFAULT 0 CHECK (duplicate_count >= 0),
+    received_at                 TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    correlated_at               TIMESTAMP WITH TIME ZONE,
+    verified_at                 TIMESTAMP WITH TIME ZONE,
+    updated_at                  TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    CONSTRAINT ck_mpesa_callback_success_metadata CHECK (
+        callback_result_code <> '0'
+        OR (
+            callback_amount IS NOT NULL
+            AND callback_amount > 0
+            AND callback_amount = trunc(callback_amount)
+            AND callback_phone IS NOT NULL
+            AND callback_receipt IS NOT NULL
+        )
+    ),
+    CONSTRAINT ck_mpesa_callback_lifecycle CHECK (
+        (callback_status = 'UNMATCHED'
+            AND attempt_id IS NULL
+            AND verification_id IS NULL
+            AND rejection_code IS NULL)
+        OR (callback_status = 'CORRELATED'
+            AND attempt_id IS NOT NULL
+            AND verification_id IS NULL
+            AND correlated_at IS NOT NULL
+            AND rejection_code IS NULL)
+        OR (callback_status = 'VERIFIED'
+            AND attempt_id IS NOT NULL
+            AND verification_id IS NOT NULL
+            AND correlated_at IS NOT NULL
+            AND verified_at IS NOT NULL
+            AND rejection_code IS NULL)
+        OR (callback_status = 'REJECTED'
+            AND rejection_code IS NOT NULL)
+    )
+);
+
+CREATE INDEX idx_mpesa_callback_inbox_status_received
+    ON mpesa_callback_inbox (callback_status, received_at);
+CREATE INDEX idx_mpesa_callback_inbox_provider_ids
+    ON mpesa_callback_inbox (checkout_request_id, merchant_request_id);
+CREATE INDEX idx_mpesa_callback_inbox_attempt
+    ON mpesa_callback_inbox (attempt_id)
+    WHERE attempt_id IS NOT NULL;
+
+CREATE TRIGGER trg_mpesa_callback_inbox_set_updated_at
+    BEFORE UPDATE ON mpesa_callback_inbox
     FOR EACH ROW
     EXECUTE FUNCTION set_updated_at();
 
@@ -496,6 +877,23 @@ CREATE TABLE auth_tokens (
 CREATE INDEX idx_auth_tokens_user_purpose_created
     ON auth_tokens (user_id, purpose, created_at DESC);
 
+CREATE TABLE pending_registrations (
+    pending_registration_id VARCHAR(25) PRIMARY KEY DEFAULT generate_short_id(),
+    full_name VARCHAR(100) NOT NULL,
+    email VARCHAR(254) NOT NULL,
+    phone VARCHAR(15) NOT NULL,
+    password_hash VARCHAR(255),
+    occupation VARCHAR(50) NOT NULL,
+    national_id VARCHAR(25) NOT NULL,
+    date_of_birth DATE NOT NULL,
+    token_hash CHAR(64) NOT NULL UNIQUE,
+    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_pending_registrations_expiry
+    ON pending_registrations (expires_at);
+
 CREATE TABLE auth_rate_limits (
     scope           VARCHAR(20) NOT NULL CHECK (scope IN ('IP', 'EMAIL', 'ACCOUNT')),
     action          VARCHAR(30) NOT NULL,
@@ -520,16 +918,89 @@ CREATE TRIGGER trg_fund_allocations_set_updated_at
 -- -----------------------------------------------------------------------------
 CREATE TABLE notifications (
     notification_id     VARCHAR(25)  PRIMARY KEY DEFAULT generate_short_id(),
-    user_id             VARCHAR(25)  NOT NULL,
+    user_id             VARCHAR(25),
     created_by          VARCHAR(25),
     notification_type   VARCHAR(20)  NOT NULL
         CHECK (notification_type IN ('SMS', 'EMAIL', 'PUSH', 'USSD')),
-    message             VARCHAR(255) NOT NULL,
-    delivery_status     VARCHAR(15)  NOT NULL DEFAULT 'PENDING'
-        CHECK (delivery_status IN ('PENDING', 'SENT', 'FAILED')),
+    message             TEXT         NOT NULL,
+    recipient_phone     VARCHAR(16),
+    recipient_email     VARCHAR(254),
+    email_subject       VARCHAR(255),
+    email_html_body     TEXT,
+    push_title          VARCHAR(100),
+    notification_category VARCHAR(40) NOT NULL DEFAULT 'GENERAL'
+        CHECK (notification_category IN (
+            'GENERAL', 'ANNOUNCEMENT', 'CONTRIBUTION_REMINDER', 'SCHEME_UPDATE',
+            'ACCOUNT_SERVICE', 'REGULATORY_ADVISORY', 'COMPLIANCE_NOTICE',
+            'DEADLINE_REMINDER', 'WORKER_EDUCATION'
+        )),
+    scope_fund_id       VARCHAR(25) REFERENCES funds (fund_id) ON DELETE SET NULL,
+    deduplication_key   VARCHAR(128),
+    admin_request_key   UUID,
+    provider_message_id VARCHAR(128),
+    provider_accepted_at TIMESTAMP WITH TIME ZONE,
+    delivered_at        TIMESTAMP WITH TIME ZONE,
+    delivery_result     JSONB,
+    delivery_status     VARCHAR(20)  NOT NULL DEFAULT 'PENDING'
+        CONSTRAINT ck_notifications_delivery_status
+        CHECK (delivery_status IN (
+            'PENDING', 'PROCESSING', 'PROVIDER_ACCEPTED', 'DELIVERED', 'FAILED', 'UNKNOWN'
+        )),
+    attempt_count       INTEGER NOT NULL DEFAULT 0
+        CONSTRAINT ck_notifications_attempt_count CHECK (attempt_count >= 0),
+    next_attempt_at     TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    claimed_at          TIMESTAMP WITH TIME ZONE,
+    claim_token         UUID,
+    last_attempt_at     TIMESTAMP WITH TIME ZONE,
+    last_error_code     VARCHAR(64),
+    external_recipient_consent_at TIMESTAMP WITH TIME ZONE,
     created_at          TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
     sent_at             TIMESTAMP WITH TIME ZONE,
     updated_at          TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    CONSTRAINT ck_notifications_claim_fields CHECK (
+        (delivery_status = 'PROCESSING'
+            AND claimed_at IS NOT NULL
+            AND claim_token IS NOT NULL)
+        OR
+        (delivery_status <> 'PROCESSING'
+            AND claimed_at IS NULL
+            AND claim_token IS NULL)
+    ),
+    CONSTRAINT ck_notifications_delivery_timestamps CHECK (
+        (delivery_status NOT IN ('PROVIDER_ACCEPTED', 'DELIVERED')
+            OR provider_accepted_at IS NOT NULL)
+        AND
+        (delivery_status <> 'DELIVERED' OR delivered_at IS NOT NULL)
+    ),
+    CONSTRAINT ck_notifications_admin_channel_snapshot CHECK (
+        admin_request_key IS NULL
+        OR (
+            (created_by IS NOT NULL OR user_id IS NULL)
+            AND notification_type IN ('SMS', 'EMAIL', 'PUSH')
+            AND (
+                (notification_type = 'SMS' AND recipient_phone IS NOT NULL)
+                OR (notification_type = 'EMAIL'
+                    AND recipient_email IS NOT NULL
+                    AND email_subject IS NOT NULL)
+                OR (notification_type = 'PUSH' AND push_title IS NOT NULL)
+            )
+        )
+    ),
+    CONSTRAINT ck_notifications_external_recipient CHECK (
+        (
+            user_id IS NOT NULL
+            AND external_recipient_consent_at IS NULL
+        )
+        OR
+        (
+            user_id IS NULL
+            AND notification_type = 'SMS'
+            AND recipient_phone IS NOT NULL
+            AND recipient_phone ~ '^[+]254[17][0-9]{8}$'
+            AND admin_request_key IS NOT NULL
+            AND external_recipient_consent_at IS NOT NULL
+        )
+    ),
     CONSTRAINT fk_notifications_user FOREIGN KEY (user_id)
         REFERENCES users (user_id) ON DELETE CASCADE,
     -- created_by traces administrative/broadcast notifications back to the
@@ -542,12 +1013,113 @@ CREATE TABLE notifications (
 
 CREATE INDEX idx_notifications_user_id ON notifications (user_id);
 CREATE INDEX idx_notifications_created_by ON notifications (created_by);
+CREATE INDEX idx_notifications_scope_fund_created
+    ON notifications (scope_fund_id, created_at DESC)
+    WHERE scope_fund_id IS NOT NULL;
 CREATE INDEX idx_notifications_delivery_status ON notifications (delivery_status);
+CREATE UNIQUE INDEX uq_notifications_sms_deduplication_key
+    ON notifications (deduplication_key)
+    WHERE notification_type = 'SMS' AND deduplication_key IS NOT NULL;
+CREATE UNIQUE INDEX uq_notifications_admin_request_channel
+    ON notifications (admin_request_key, user_id, notification_type)
+    WHERE admin_request_key IS NOT NULL;
+CREATE UNIQUE INDEX uq_notifications_external_request
+    ON notifications (admin_request_key)
+    WHERE user_id IS NULL;
+CREATE INDEX idx_notifications_external_admin_created
+    ON notifications (created_by, created_at DESC)
+    WHERE user_id IS NULL;
+CREATE UNIQUE INDEX uq_notifications_provider_message_id
+    ON notifications (provider_message_id)
+    WHERE provider_message_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_notifications_claim_token
+    ON notifications (claim_token)
+    WHERE claim_token IS NOT NULL;
+CREATE INDEX idx_notifications_sms_pending_schedule
+    ON notifications (next_attempt_at, created_at)
+    WHERE notification_type = 'SMS' AND delivery_status = 'PENDING';
+CREATE INDEX idx_notifications_sms_processing_claim
+    ON notifications (claimed_at)
+    WHERE notification_type = 'SMS' AND delivery_status = 'PROCESSING';
 
 CREATE TRIGGER trg_notifications_set_updated_at
     BEFORE UPDATE ON notifications
     FOR EACH ROW
     EXECUTE FUNCTION set_updated_at();
+
+-- -------------------------------------------------------------------------
+-- PUSH_SUBSCRIPTIONS
+--   Browser subscriptions are private per-user endpoints and device keys.
+-- -------------------------------------------------------------------------
+CREATE TABLE push_subscriptions (
+    subscription_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id VARCHAR(25) NOT NULL
+        REFERENCES users (user_id) ON DELETE CASCADE,
+    endpoint TEXT NOT NULL UNIQUE,
+    p256dh_key VARCHAR(255) NOT NULL,
+    auth_key VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    CONSTRAINT ck_push_subscriptions_endpoint CHECK (
+        endpoint ~ '^https://'
+    ),
+    CONSTRAINT ck_push_subscriptions_keys CHECK (
+        p256dh_key ~ '^[A-Za-z0-9_-]{40,200}$'
+        AND auth_key ~ '^[A-Za-z0-9_-]{16,100}$'
+    )
+);
+
+CREATE INDEX idx_push_subscriptions_user_id
+    ON push_subscriptions (user_id);
+
+CREATE TRIGGER trg_push_subscriptions_set_updated_at
+    BEFORE UPDATE ON push_subscriptions
+    FOR EACH ROW
+    EXECUTE FUNCTION set_updated_at();
+
+-- Explicit assignments define each regulator's read/notification scope;
+-- assignments are independent of fund-manager approval.
+CREATE TABLE regulator_fund_assignments (
+    assignment_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    regulator_user_id VARCHAR(25) NOT NULL
+        REFERENCES users (user_id) ON DELETE CASCADE,
+    fund_id VARCHAR(25) NOT NULL
+        REFERENCES funds (fund_id) ON DELETE CASCADE,
+    assigned_by VARCHAR(25)
+        REFERENCES users (user_id) ON DELETE SET NULL,
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    CONSTRAINT uq_regulator_fund_assignment UNIQUE (regulator_user_id, fund_id)
+);
+
+CREATE INDEX idx_regulator_fund_assignments_active
+    ON regulator_fund_assignments (regulator_user_id, fund_id)
+    WHERE active = TRUE;
+
+CREATE OR REPLACE FUNCTION enforce_regulator_fund_assignment_roles()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM users
+        WHERE user_id = NEW.regulator_user_id AND role = 'REGULATOR'
+    ) THEN
+        RAISE EXCEPTION 'regulator_user_id must reference a REGULATOR';
+    END IF;
+    IF NEW.assigned_by IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM users
+        WHERE user_id = NEW.assigned_by AND role = 'ADMIN'
+    ) THEN
+        RAISE EXCEPTION 'assigned_by must reference an ADMIN';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_regulator_fund_assignment_roles
+    BEFORE INSERT OR UPDATE OF regulator_user_id, assigned_by
+    ON regulator_fund_assignments
+    FOR EACH ROW
+    EXECUTE FUNCTION enforce_regulator_fund_assignment_roles();
 
 -- -----------------------------------------------------------------------------
 -- USSD_SESSIONS
@@ -598,6 +1170,44 @@ CREATE INDEX idx_audit_logs_user_id ON audit_logs (user_id);
 CREATE INDEX idx_audit_logs_action_type ON audit_logs (action_type);
 CREATE INDEX idx_audit_logs_entity ON audit_logs (entity_name, entity_id);
 
+CREATE TABLE notification_audit_events (
+    audit_event_id BIGSERIAL PRIMARY KEY,
+    request_id UUID NOT NULL,
+    sender_user_id VARCHAR(25),
+    sender_role VARCHAR(20) NOT NULL
+        CHECK (sender_role IN ('ADMIN', 'FUND_MANAGER', 'REGULATOR', 'SYSTEM')),
+    recipient_user_id VARCHAR(25),
+    scope_fund_id VARCHAR(25),
+    notification_category VARCHAR(40) NOT NULL,
+    channels JSONB NOT NULL
+        CHECK (jsonb_typeof(channels) = 'array'),
+    notification_ids JSONB NOT NULL DEFAULT '[]'::jsonb
+        CHECK (jsonb_typeof(notification_ids) = 'array'),
+    authorization_outcome VARCHAR(20) NOT NULL
+        CHECK (authorization_outcome IN ('AUTHORIZED', 'DENIED')),
+    outcome_code VARCHAR(64),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_notification_audit_sender_created
+    ON notification_audit_events (sender_user_id, created_at DESC);
+CREATE INDEX idx_notification_audit_scope_created
+    ON notification_audit_events (scope_fund_id, created_at DESC);
+CREATE INDEX idx_notification_audit_recipient_created
+    ON notification_audit_events (recipient_user_id, created_at DESC);
+
+CREATE OR REPLACE FUNCTION reject_notification_audit_mutation()
+RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION 'notification audit events are append-only';
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_notification_audit_append_only
+    BEFORE UPDATE OR DELETE ON notification_audit_events
+    FOR EACH ROW
+    EXECUTE FUNCTION reject_notification_audit_mutation();
+
 -- -----------------------------------------------------------------------------
 -- COMPLIANCE_REPORTS
 -- -----------------------------------------------------------------------------
@@ -630,6 +1240,52 @@ CREATE INDEX idx_compliance_reports_generated_by ON compliance_reports (generate
 CREATE INDEX idx_compliance_reports_rba_status ON compliance_reports (rba_status);
 CREATE INDEX idx_compliance_reports_fund ON compliance_reports (fund_id);
 CREATE INDEX idx_compliance_reports_submitted ON compliance_reports (rba_status, submitted_at DESC);
+
+CREATE TABLE report_generation_history (
+    report_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    generated_by VARCHAR(25)
+        REFERENCES users (user_id) ON DELETE SET NULL,
+    generator_role VARCHAR(20) NOT NULL
+        CHECK (generator_role IN ('ADMIN', 'FUND_MANAGER', 'REGULATOR')),
+    report_key VARCHAR(60) NOT NULL,
+    export_format VARCHAR(10) NOT NULL
+        CHECK (export_format IN ('CSV', 'XLSX', 'PDF')),
+    applied_filters JSONB NOT NULL DEFAULT '{}'::jsonb
+        CHECK (jsonb_typeof(applied_filters) = 'object'),
+    scope_fund_ids JSONB NOT NULL DEFAULT '[]'::jsonb
+        CHECK (jsonb_typeof(scope_fund_ids) = 'array'),
+    generation_status VARCHAR(20) NOT NULL
+        CHECK (generation_status IN ('SUCCEEDED', 'FAILED')),
+    result_count INTEGER NOT NULL DEFAULT 0 CHECK (result_count >= 0),
+    generated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_report_generation_history_user_created
+    ON report_generation_history (generated_by, generated_at DESC);
+
+CREATE TABLE report_download_events (
+    download_event_id BIGSERIAL PRIMARY KEY,
+    report_id UUID NOT NULL,
+    downloaded_by VARCHAR(25),
+    downloaded_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    outcome VARCHAR(20) NOT NULL
+        CHECK (outcome IN ('SUCCEEDED', 'DENIED', 'FAILED'))
+);
+
+CREATE INDEX idx_report_download_events_report
+    ON report_download_events (report_id, downloaded_at DESC);
+
+CREATE OR REPLACE FUNCTION reject_report_download_mutation()
+RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION 'report download events are append-only';
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_report_download_events_append_only
+    BEFORE UPDATE OR DELETE ON report_download_events
+    FOR EACH ROW
+    EXECUTE FUNCTION reject_report_download_mutation();
 
 CREATE TRIGGER trg_compliance_reports_set_updated_at
     BEFORE UPDATE ON compliance_reports

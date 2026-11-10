@@ -42,6 +42,20 @@
     font-size: 14px;
 }
 
+.deposit-simulator-notice {
+    padding: 12px;
+    border: 2px solid #b45309;
+    border-radius: 8px;
+    color: #78350f;
+    background: #fef3c7;
+    font-size: 14px;
+    line-height: 1.5;
+}
+
+.deposit-payment-state .deposit-simulator-notice {
+    margin: 0 0 9px;
+}
+
 .deposit-payment-state {
     display: flex;
     align-items: flex-start;

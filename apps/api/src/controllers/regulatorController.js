@@ -7,26 +7,66 @@ const REPORT_STATUSES = new Set(["DRAFT", "SUBMITTED", "REVISION_REQUESTED", "AC
 const DECISIONS = new Set(["ACCEPTED", "REJECTED", "REVISION_REQUESTED"]);
 
 async function getComplianceOverview(req, res) {
+    const regulatorId = req.user?.userId;
+    const assignedFundScope = `EXISTS (
+        SELECT 1
+        FROM regulator_fund_assignments rfa
+        WHERE rfa.regulator_user_id = $1
+          AND rfa.fund_id = cr.fund_id
+          AND rfa.active = TRUE
+    )`;
     try {
-        const [audit, reports, latestRba] = await Promise.all([
+        const [audit, reports, latestRba, kycStatuses, kycReviews] = await Promise.all([
             pool.query(
-                `SELECT count(*)::int AS events_last_24h, max("timestamp") AS last_event_at
-                 FROM audit_logs
-                 WHERE "timestamp" >= now() - interval '24 hours'`
+                `SELECT count(*)::int AS events_last_24h, max(al."timestamp") AS last_event_at
+                 FROM audit_logs al
+                 WHERE al."timestamp" >= now() - interval '24 hours'
+                   AND al.entity_name = 'COMPLIANCE_REPORTS'
+                   AND EXISTS (
+                       SELECT 1
+                       FROM compliance_reports cr
+                       JOIN regulator_fund_assignments rfa
+                         ON rfa.fund_id = cr.fund_id
+                        AND rfa.regulator_user_id = $1
+                        AND rfa.active = TRUE
+                       WHERE cr.report_id = al.entity_id
+                         AND (cr.is_legacy = TRUE OR cr.rba_status <> 'DRAFT')
+                   )`,
+                [regulatorId]
             ),
             pool.query(
                 `SELECT rba_status, count(*)::int AS count
-                 FROM compliance_reports
-                WHERE report_type = 'RBA' AND rba_status <> 'DRAFT'
-                 GROUP BY rba_status
-                 ORDER BY rba_status`
+                 FROM compliance_reports cr
+                WHERE cr.report_type = 'RBA'
+                  AND (cr.is_legacy = TRUE OR cr.rba_status <> 'DRAFT')
+                  AND ${assignedFundScope}
+                 GROUP BY cr.rba_status
+                 ORDER BY cr.rba_status`,
+                [regulatorId]
             ),
             pool.query(
                 `SELECT report_id, rba_status, period_start, period_end, generated_at
-                 FROM compliance_reports
-                 WHERE report_type = 'RBA' AND rba_status <> 'DRAFT'
-                 ORDER BY COALESCE(last_submitted_at, generated_at) DESC
-                 LIMIT 1`
+                 FROM compliance_reports cr
+                 WHERE cr.report_type = 'RBA'
+                   AND (cr.is_legacy = TRUE OR cr.rba_status <> 'DRAFT')
+                   AND ${assignedFundScope}
+                 ORDER BY COALESCE(cr.last_submitted_at, cr.generated_at) DESC
+                 LIMIT 1`,
+                [regulatorId]
+            ),
+            pool.query(
+                `SELECT kyc_status, count(*)::int AS count
+                 FROM kyc_records
+                 GROUP BY kyc_status
+                 ORDER BY kyc_status`
+            ),
+            pool.query(
+                `SELECT action_type, details->>'status' AS kyc_status, al."timestamp"
+                 FROM audit_logs al
+                 WHERE entity_name = 'KYC_RECORD'
+                   AND action_type IN ('APPROVE', 'REJECT')
+                 ORDER BY al."timestamp" DESC
+                 LIMIT 10`
             ),
         ]);
 
@@ -46,6 +86,8 @@ async function getComplianceOverview(req, res) {
                 rba_compliance_status: complianceStatus,
                 rba_reports_by_status: reports.rows,
                 latest_rba_report: latest,
+                kyc_status_counts: kycStatuses.rows,
+                kyc_review_history: kycReviews.rows,
                 rba_parameter_checks: {
                     status: "NOT_CONFIGURED",
                     details: "The database schema contains no RBA-specific limits or parameter configuration to evaluate.",
@@ -62,6 +104,7 @@ async function getComplianceOverview(req, res) {
 }
 
 async function listReports(req, res) {
+    const regulatorId = req.user?.userId;
     const { fund_id, manager_id, report_type, status, period_start, period_end, search } = req.query;
     if (report_type && !REPORT_TYPES.has(report_type)) {
         return res.status(400).json({ status: "error", message: "Invalid report_type filter" });
@@ -84,8 +127,16 @@ async function listReports(req, res) {
         return res.status(400).json({ status: "error", message: "period_end must not be before period_start" });
     }
 
-    const conditions = ["(cr.is_legacy = TRUE OR cr.rba_status <> 'DRAFT')"];
-    const values = [];
+    const conditions = [
+        "(cr.is_legacy = TRUE OR cr.rba_status <> 'DRAFT')",
+        `EXISTS (
+            SELECT 1 FROM regulator_fund_assignments rfa
+            WHERE rfa.regulator_user_id = $1
+              AND rfa.fund_id = cr.fund_id
+              AND rfa.active = TRUE
+        )`,
+    ];
+    const values = [regulatorId];
     const addFilter = (sql, value) => {
         values.push(value);
         conditions.push(sql.replace("?", `$${values.length}`));
@@ -156,8 +207,14 @@ async function getComplianceReport(req, res) {
         await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
         const visible = await client.query(
             `SELECT report_id FROM compliance_reports
-             WHERE report_id = $1 AND (is_legacy = TRUE OR rba_status <> 'DRAFT')`,
-            [req.params.reportId]
+             WHERE report_id = $1 AND (is_legacy = TRUE OR rba_status <> 'DRAFT')
+               AND EXISTS (
+                   SELECT 1 FROM regulator_fund_assignments rfa
+                   WHERE rfa.regulator_user_id = $2
+                     AND rfa.fund_id = compliance_reports.fund_id
+                     AND rfa.active = TRUE
+               )`,
+            [req.params.reportId, req.user?.userId]
         );
         if (!visible.rows[0]) {
             await client.query("ROLLBACK");
@@ -199,11 +256,31 @@ async function reviewComplianceReport(req, res) {
                         SELECT 1 FROM compliance_report_submissions
                         WHERE report_id = compliance_reports.report_id
                     ) AS has_submission
-             FROM compliance_reports WHERE report_id = $1 FOR UPDATE`,
-            [req.params.reportId]
+             FROM compliance_reports
+             WHERE report_id = $1
+               AND EXISTS (
+                   SELECT 1
+                   FROM regulator_fund_assignments rfa
+                   WHERE rfa.regulator_user_id = $2
+                     AND rfa.fund_id = compliance_reports.fund_id
+                     AND rfa.active = TRUE
+               )
+             FOR UPDATE`,
+            [req.params.reportId, req.user.userId]
         );
         const report = reportResult.rows[0];
         if (!report || (report.rba_status === "DRAFT" && !report.is_legacy)) {
+            await client.query("ROLLBACK");
+            return res.status(404).json({ status: "error", message: "Submitted compliance report not found" });
+        }
+        const assignmentResult = await client.query(
+            `SELECT fund_id
+             FROM regulator_fund_assignments
+             WHERE regulator_user_id = $1 AND fund_id = $2 AND active = TRUE
+             FOR SHARE`,
+            [req.user.userId, report.fund_id]
+        );
+        if (!assignmentResult.rows[0]) {
             await client.query("ROLLBACK");
             return res.status(404).json({ status: "error", message: "Submitted compliance report not found" });
         }

@@ -57,6 +57,7 @@ describe("WorkerDashboard", () => {
         expect(screen.getByText("Recorded total KSh 2,500.00")).toBeInTheDocument();
         expect(screen.getByText("Goal KSh 500,000.00")).toBeInTheDocument();
         expect(screen.getByRole("link", { name: /My Funds & Allocation/ })).toHaveAttribute("href", "/worker/funds");
+        expect(screen.getByRole("link", { name: /My Analytics/ })).toHaveAttribute("href", "/worker/analytics");
         expect(screen.getByRole("link", { name: /Financial Literacy/ })).toHaveAttribute("href", "/worker/literacy");
         expect(screen.queryByRole("heading", { name: "My Fund Allocation" })).not.toBeInTheDocument();
         expect(screen.queryByRole("heading", { name: "Insights for your next step" })).not.toBeInTheDocument();

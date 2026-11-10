@@ -16,6 +16,8 @@ const originalQuery = pool.query;
 const originalConnect = pool.connect;
 const originalHash = bcrypt.hash;
 const originalIssueEmailToken = authEmailService.issueEmailToken;
+const originalSendPendingRegistrationEmail = authEmailService.sendPendingRegistrationEmail;
+const originalEnforceRequestLimits = authEmailService.enforceRequestLimits;
 const originalFlag = process.env.ALLOW_PRIVILEGED_SIGNUP;
 
 afterEach(() => {
@@ -23,6 +25,8 @@ afterEach(() => {
     pool.connect = originalConnect;
     bcrypt.hash = originalHash;
     authEmailService.issueEmailToken = originalIssueEmailToken;
+    authEmailService.sendPendingRegistrationEmail = originalSendPendingRegistrationEmail;
+    authEmailService.enforceRequestLimits = originalEnforceRequestLimits;
     if (originalFlag === undefined) {
         delete process.env.ALLOW_PRIVILEGED_SIGNUP;
     } else {
@@ -175,27 +179,13 @@ async function registerWithMocks(body) {
     pool.connect = async () => ({
         async query(query, values) {
             calls.push({ query, values });
-            if (query.includes("INSERT INTO users")) {
-                return {
-                    rows: [{
-                        user_id: "new-worker",
-                        full_name: body.full_name,
-                        phone: body.phone,
-                        email: values[2],
-                        role: values[4],
-                        occupation: values[5],
-                        login_method: "EMAIL",
-                        email_verified: false,
-                        account_status: "ACTIVE",
-                    }],
-                };
-            }
             return { rows: [] };
         },
         release() {},
     });
     bcrypt.hash = async (password) => `hashed:${password}`;
-    authEmailService.issueEmailToken = async () => {};
+    authEmailService.enforceRequestLimits = async () => {};
+    authEmailService.sendPendingRegistrationEmail = async () => {};
 
     const res = createResponse();
     await register({ body }, res);
@@ -208,17 +198,24 @@ const workerRegistration = {
     phone: "07000000001",
     password: "password123",
     occupation: "OTHER_INFORMAL_WORKER",
+    national_id: "12345678",
+    date_of_birth: "1990-04-15",
 };
 
-test("public registration without a role creates a worker", async () => {
+test("public registration without a role creates a pending worker registration without storing its password", async () => {
     const { res, calls } = await registerWithMocks({ ...workerRegistration });
-    assert.equal(res.statusCode, 201);
-    assert.equal(res.body.data.user.role, "WORKER");
-    assert.equal(res.body.data.user.email, "worker@example.com");
-    assert.equal(res.body.data.user.email_verified, false);
-    assert.equal(res.body.data.user.login_method, "EMAIL");
-    assert.equal(res.body.data.token, undefined);
-    assert.ok(calls.some(({ query, values }) => query.includes("INSERT INTO users") && values[4] === "WORKER" && query.includes("'EMAIL'")));
+    assert.equal(res.statusCode, 202);
+    assert.deepEqual(res.body, {
+        status: "accepted",
+        message: "If we can complete your registration, we will send verification instructions to the provided email address.",
+    });
+    const pendingInsert = calls.find(({ query }) => query.includes("INSERT INTO pending_registrations"));
+    assert.ok(pendingInsert);
+    assert.equal(pendingInsert.values[1], "worker@example.com");
+    assert.equal(pendingInsert.values.includes("hashed:password123"), false);
+    assert.equal(pendingInsert.values[4], "12345678");
+    assert.equal(pendingInsert.values[5], "1990-04-15");
+    assert.equal(calls.some(({ query }) => query.includes("INSERT INTO users")), false);
 });
 
 for (const role of ["ADMIN", "FUND_MANAGER", "REGULATOR"]) {
@@ -229,19 +226,22 @@ for (const role of ["ADMIN", "FUND_MANAGER", "REGULATOR"]) {
             role,
             is_admin: true,
         });
-        assert.equal(res.statusCode, 201);
-        assert.equal(res.body.data.user.role, "WORKER");
-        assert.ok(calls.some(({ query, values }) => query.includes("INSERT INTO users") && values[4] === "WORKER" && query.includes("'EMAIL'")));
+        assert.equal(res.statusCode, 202);
+        assert.ok(calls.some(({ query }) => query.includes("INSERT INTO pending_registrations")));
+        assert.equal(calls.some(({ query }) => query.includes("INSERT INTO users")), false);
     });
 }
 
-test("legitimate worker registration retains hashing and pension-account creation", async () => {
+test("pending registration retains KYC data and defers password hashing until verification", async () => {
     const { res, calls } = await registerWithMocks({ ...workerRegistration, phone: "07000000003" });
-    assert.equal(res.statusCode, 201);
-    const userInsert = calls.find(({ query }) => query.includes("INSERT INTO users"));
-    assert.equal(userInsert.values[3], "hashed:password123");
-    assert.equal(userInsert.values[2], "worker@example.com");
-    assert.ok(calls.some(({ query }) => query.includes("INSERT INTO pension_accounts")));
+    assert.equal(res.statusCode, 202);
+    const pendingInsert = calls.find(({ query }) => query.includes("INSERT INTO pending_registrations"));
+    assert.equal(pendingInsert.values.includes("hashed:password123"), false);
+    assert.equal(pendingInsert.values[1], "worker@example.com");
+    assert.equal(pendingInsert.values[4], "12345678");
+    assert.equal(pendingInsert.values[5], "1990-04-15");
+    assert.equal(calls.some(({ query }) => query.includes("INSERT INTO pension_accounts")), false);
+    assert.equal(calls.some(({ query }) => query.includes("INSERT INTO kyc_records")), false);
 });
 
 test("production startup fails when privileged signup is enabled", () => {
@@ -251,17 +251,27 @@ test("production startup fails when privileged signup is enabled", () => {
 
     const startup = spawnSync(
         process.execPath,
-        ["-e", "require('./apps/api/src/server')"],
+        [
+            "--require",
+            path.resolve(__dirname, "../../../tests/scripts/noEnvironmentFilesPreload.js"),
+            "-e",
+            "let startupError; try { require('./apps/api/src/server'); } catch (error) { startupError = error; } if (global.__micopesaDotenvConfigCalls !== 1 || startupError?.message !== 'ALLOW_PRIVILEGED_SIGNUP must be disabled in production') { process.exitCode = 1; } else { process.stdout.write('DOTENV_STUB_VERIFIED'); }",
+        ],
         {
             cwd: path.resolve(__dirname, "../../.."),
             encoding: "utf8",
             env: {
-                ...process.env,
+                PATH: process.env.PATH,
+                SystemRoot: process.env.SystemRoot,
+                WINDIR: process.env.WINDIR,
+                TEMP: process.env.TEMP,
+                TMP: process.env.TMP,
                 NODE_ENV: " production ",
                 ALLOW_PRIVILEGED_SIGNUP: " YES ",
+                MICOPESA_TEST_DOTENV_STUB: "enabled",
             },
         }
     );
-    assert.notEqual(startup.status, 0);
-    assert.match(startup.stderr, /ALLOW_PRIVILEGED_SIGNUP must be disabled in production/);
+    assert.equal(startup.status, 0);
+    assert.equal(startup.stdout, "DOTENV_STUB_VERIFIED");
 });

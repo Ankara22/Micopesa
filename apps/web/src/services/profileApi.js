@@ -19,6 +19,20 @@ export async function updateMyProfile(profile) {
     return response.data.data.user;
 }
 
+export async function requestPhoneChange({ newPhone, currentPassword, confirmed }) {
+    const response = await api.post("/api/profile/me/phone-change/request", {
+        new_phone: newPhone,
+        current_password: currentPassword,
+        confirmed,
+    });
+    return response.data.data;
+}
+
+export async function verifyPhoneChange(code) {
+    const response = await api.post("/api/profile/me/phone-change/verify", { code });
+    return response.data.data;
+}
+
 export async function uploadMyProfilePhoto(file) {
     const response = await api.put("/api/profile/me/photo", file, {
         headers: { "Content-Type": file.type },

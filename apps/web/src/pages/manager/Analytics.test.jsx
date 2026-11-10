@@ -4,19 +4,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import FundAnalytics from "./Analytics";
 
 const mocks = vi.hoisted(() => ({
-    getFundAllocations: vi.fn(),
-    listFunds: vi.fn(),
+    getReportAnalytics: vi.fn(),
 }));
 
-vi.mock("../../services/fundService", () => ({
-    getFundAllocations: mocks.getFundAllocations,
-    listFunds: mocks.listFunds,
+vi.mock("../../services/reportsApi", () => ({
+    getReportAnalytics: mocks.getReportAnalytics,
 }));
-vi.mock("./FundManagerCharts", () => ({
-    default: ({ funds, allocationEntries }) => (
-        <div data-testid="fund-manager-charts">
-            {funds.length} funds, {allocationEntries.length} allocation histories
-        </div>
+vi.mock("../analytics/AnalyticsCharts", () => ({
+    FundManagerAnalyticsCharts: ({ trends }) => (
+        <div data-testid="fund-manager-charts">{trends.length} contribution trends</div>
     ),
 }));
 
@@ -29,44 +25,57 @@ describe("FundAnalytics", () => {
 
     beforeEach(() => {
         vi.clearAllMocks();
-        mocks.listFunds.mockResolvedValue([{ fund_id: "fund-1", fund_name: "Growth" }]);
-        mocks.getFundAllocations.mockResolvedValue([
-            { percentage: "100.00", effective_from: "2026-01-01", effective_to: null },
-        ]);
+        mocks.getReportAnalytics.mockReset();
+        mocks.getReportAnalytics.mockResolvedValue({
+            contribution_trends: [
+                { period: "2026-01-01", status: "COMPLETED", contribution_count: 2, allocated_amount: "100.00" },
+            ],
+        });
     });
 
-    it("loads real fund allocation records into the existing chart component", async () => {
+    it("loads scoped contribution aggregates into the analytics charts", async () => {
         renderPage();
 
-        expect(await screen.findByTestId("fund-manager-charts")).toHaveTextContent("1 funds, 1 allocation histories");
+        expect(await screen.findByTestId("fund-manager-charts")).toHaveTextContent("1 contribution trends");
         expect(screen.getByRole("heading", { name: "Fund Analytics" })).toBeInTheDocument();
-        expect(mocks.listFunds).toHaveBeenCalledOnce();
-        expect(mocks.getFundAllocations).toHaveBeenCalledWith("fund-1");
+        expect(mocks.getReportAnalytics).toHaveBeenCalledWith({ start_date: "", end_date: "" });
         expect(screen.getByRole("link", { name: "Manage funds" })).toHaveAttribute("href", "/manager/funds");
     });
 
     it("shows a loading skeleton before chart data arrives", () => {
-        mocks.listFunds.mockReturnValue(new Promise(() => {}));
+        mocks.getReportAnalytics.mockReturnValue(new Promise(() => {}));
         renderPage();
         expect(screen.getByRole("status", { name: "Loading fund analytics" })).toBeInTheDocument();
         expect(screen.queryByTestId("fund-manager-charts")).not.toBeInTheDocument();
     });
 
     it("surfaces API failures and retries loading chart data", async () => {
-        mocks.listFunds
+        mocks.getReportAnalytics
             .mockRejectedValueOnce(new Error("Fund analytics unavailable"))
-            .mockResolvedValueOnce([{ fund_id: "fund-1", fund_name: "Growth" }]);
+            .mockResolvedValueOnce({ contribution_trends: [{ period: "2026-01-01" }] });
         renderPage();
 
-        const alert = (await screen.findByText("Fund analytics unavailable")).closest('[role="alert"]');
+        const alert = (await screen.findByText("Unable to load fund analytics right now. Please try again.")).closest('[role="alert"]');
         fireEvent.click(within(alert).getByRole("button", { name: "Try again" }));
-        expect(await screen.findByTestId("fund-manager-charts")).toHaveTextContent("1 funds, 1 allocation histories");
-        expect(mocks.listFunds).toHaveBeenCalledTimes(2);
+        expect(await screen.findByTestId("fund-manager-charts")).toHaveTextContent("1 contribution trends");
+        expect(mocks.getReportAnalytics).toHaveBeenCalledTimes(2);
     });
 
-    it("passes empty successful data to the existing charts for their meaningful empty states", async () => {
-        mocks.listFunds.mockResolvedValue([]);
+    it("passes empty successful aggregates to charts with meaningful empty states", async () => {
+        mocks.getReportAnalytics.mockResolvedValue({ contribution_trends: [] });
         renderPage();
-        expect(await screen.findByTestId("fund-manager-charts")).toHaveTextContent("0 funds, 0 allocation histories");
+        expect(await screen.findByTestId("fund-manager-charts")).toHaveTextContent("0 contribution trends");
+    });
+
+    it("applies the selected date range without losing other filter values", async () => {
+        renderPage();
+        await screen.findByTestId("fund-manager-charts");
+        fireEvent.change(screen.getByLabelText("From date"), { target: { value: "2026-01-01" } });
+        await screen.findByTestId("fund-manager-charts");
+
+        expect(mocks.getReportAnalytics).toHaveBeenLastCalledWith({
+            start_date: "2026-01-01",
+            end_date: "",
+        });
     });
 });

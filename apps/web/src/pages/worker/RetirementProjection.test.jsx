@@ -127,6 +127,30 @@ describe("RetirementProjection", () => {
         expect(screen.getByRole("button", { name: "Calculate Projection" })).toBeInTheDocument();
     });
 
+    it.each([
+        ["negative balances", (series) => series.map((point, index) =>
+            index === series.length - 1 ? { ...point, projectedBalance: -1 } : point
+        )],
+        ["an incorrect final age", (series) => series.map((point, index) =>
+            index === series.length - 1 ? { ...point, age: point.age - 1 } : point
+        )],
+        ["a mismatched final balance", (series) => series.map((point, index) =>
+            index === series.length - 1 ? { ...point, projectedBalance: point.projectedBalance + 1 } : point
+        )],
+    ])("does not display a chart for saved projection data with %s", async (_issue, updateSeries) => {
+        serviceMocks.getMyPlan.mockResolvedValue({
+            ...planResponse,
+            projection: {
+                ...planResponse.projection,
+                yearly_projection: updateSeries(planResponse.projection.yearly_projection),
+            },
+        });
+        renderPage();
+
+        expect(await screen.findByText(/A year-by-year projection is not available/)).toBeInTheDocument();
+        expect(screen.queryByTestId("projection-chart-data")).not.toBeInTheDocument();
+    });
+
     it("shows retry after an unexpected API failure instead of leaving the page blank", async () => {
         serviceMocks.getMyPlan.mockRejectedValue(new Error("Retirement service unavailable"));
         renderPage();

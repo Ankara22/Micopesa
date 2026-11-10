@@ -1,11 +1,19 @@
 const crypto = require("node:crypto");
 const nodemailer = require("nodemailer");
 const pool = require("../db/database");
+const mobileSasaService = require("./mobileSasaService");
+const { captureRegistrationEmail, isCaptureModeRequested } = require("./localEmailCapture");
 
 const TOKEN_EXPIRY_MINUTES = {
     EMAIL_VERIFICATION: 30,
     PASSWORD_RESET: 30,
 };
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const EMAIL_HEADER_CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
+const MOBILE_SASA_DOMAIN_UUID_PATTERN =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const MAX_EMAIL_TEXT_LENGTH = 5000;
+const MAX_EMAIL_HTML_LENGTH = 10000;
 
 function hashOpaque(value) {
     return crypto.createHash("sha256").update(value).digest("hex");
@@ -48,12 +56,12 @@ function getFrontendBaseUrl() {
     return url.origin;
 }
 
-function getEmailConfiguration() {
-    const user = typeof process.env.GMAIL_USER === "string"
-        ? process.env.GMAIL_USER.trim().toLowerCase()
+function getEmailConfiguration(environment = process.env) {
+    const user = typeof environment.GMAIL_USER === "string"
+        ? environment.GMAIL_USER.trim().toLowerCase()
         : "";
-    const password = typeof process.env.GMAIL_APP_PASSWORD === "string"
-        ? process.env.GMAIL_APP_PASSWORD.replace(/\s/g, "")
+    const password = typeof environment.GMAIL_APP_PASSWORD === "string"
+        ? environment.GMAIL_APP_PASSWORD.replace(/\s/g, "")
         : "";
     const missingVariables = [];
     if (!user) missingVariables.push("GMAIL_USER");
@@ -79,10 +87,50 @@ function getEmailConfiguration() {
     return { user, password };
 }
 
+function getEmailProvider(environment = process.env) {
+    const provider = environment.EMAIL_PROVIDER?.trim().toUpperCase() || "GMAIL";
+    if (provider !== "GMAIL" && provider !== "MOBILE_SASA") {
+        const error = new Error("The configured email provider is unsupported.");
+        error.code = "EMAIL_CONFIGURATION_MISSING";
+        throw error;
+    }
+    return provider;
+}
+
+function assertEmailProviderConfigured(environment = process.env) {
+    if (getEmailProvider(environment) === "GMAIL") return getEmailConfiguration(environment);
+    if (!mobileSasaService.isEmailConfigured(environment)) {
+        const error = new Error("Mobile Sasa email configuration is incomplete.");
+        error.code = "EMAIL_CONFIGURATION_MISSING";
+        const missingVariables = [];
+        if (environment.MOBILESASA_EMAIL_ENABLED !== "true") {
+            missingVariables.push("MOBILESASA_EMAIL_ENABLED");
+        }
+        if (typeof environment.MOBILE_SASA_EMAIL_API_TOKEN !== "string" ||
+            !environment.MOBILE_SASA_EMAIL_API_TOKEN.trim().startsWith("mbs_")) {
+            missingVariables.push("MOBILE_SASA_EMAIL_API_TOKEN");
+        }
+        if (typeof environment.MOBILE_SASA_EMAIL_FROM !== "string" ||
+            !environment.MOBILE_SASA_EMAIL_FROM.trim()) {
+            missingVariables.push("MOBILE_SASA_EMAIL_FROM");
+        }
+        error.missingVariables = missingVariables;
+        if (environment.MOBILE_SASA_EMAIL_DOMAIN_UUID &&
+            !MOBILE_SASA_DOMAIN_UUID_PATTERN.test(environment.MOBILE_SASA_EMAIL_DOMAIN_UUID.trim())) {
+            error.invalidVariables = ["MOBILE_SASA_EMAIL_DOMAIN_UUID"];
+        }
+        throw error;
+    }
+    return null;
+}
+
 function createEmailTransporter(configuration = getEmailConfiguration()) {
     return nodemailer.createTransport({
         service: "gmail",
         auth: { user: configuration.user, pass: configuration.password },
+        connectionTimeout: 10000,
+        greetingTimeout: 10000,
+        socketTimeout: 20000,
     });
 }
 
@@ -117,11 +165,23 @@ function logEmailDeliveryFailure(purpose, error) {
     }));
 }
 
-async function sendEmailWithTransporter(transporter, { to, subject, text, purpose = "GENERAL" }) {
+async function sendEmailWithTransporter(transporter, {
+    to,
+    subject,
+    text,
+    html,
+    purpose = "GENERAL",
+}) {
     const sender = getEmailConfiguration().user;
     let info;
     try {
-        info = await transporter.sendMail({ from: sender, to, subject, text });
+        info = await transporter.sendMail({
+            from: sender,
+            to,
+            subject,
+            text,
+            ...(typeof html === "string" && html ? { html } : {}),
+        });
     } catch (error) {
         error.smtpErrorClass = error.name || "Error";
         error.smtpCode = typeof error.code === "string" ? error.code : undefined;
@@ -146,19 +206,96 @@ async function sendEmailWithTransporter(transporter, { to, subject, text, purpos
     return { messageId };
 }
 
-async function sendEmail({ to, subject, text, purpose = "GENERAL" }) {
-    const transporter = createEmailTransporter();
-    return sendEmailWithTransporter(transporter, { to, subject, text, purpose });
+function textToHtml(text) {
+    const escaped = text.replace(/[&<>"']/g, (character) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        "\"": "&quot;",
+        "'": "&#39;",
+    })[character]);
+    return `<p>${escaped.replace(/\r?\n/g, "<br>")}</p>`;
+}
+
+async function sendEmail({ to, subject, text, html, purpose = "GENERAL" }) {
+    if (
+        typeof to !== "string" ||
+        !EMAIL_PATTERN.test(to) ||
+        typeof subject !== "string" ||
+        !subject.trim() ||
+        subject.length > 255 ||
+        EMAIL_HEADER_CONTROL_CHARS.test(subject) ||
+        typeof text !== "string" ||
+        !text.trim() ||
+        text.length > MAX_EMAIL_TEXT_LENGTH ||
+        (html !== undefined &&
+            (typeof html !== "string" || html.length > MAX_EMAIL_HTML_LENGTH))
+    ) {
+        const error = new Error("Email message data is invalid.");
+        error.code = "EMAIL_INVALID_INPUT";
+        throw error;
+    }
+
+    if (process.env.MICOPESA_TEST_MODE === "true" && !isCaptureModeRequested()) {
+        throw Object.assign(new Error("Test mode requires local email capture."), {
+            code: "EMAIL_CAPTURE_REQUIRED",
+        });
+    }
+
+    if (isCaptureModeRequested()) {
+        if (process.env.MICOPESA_EMAIL_CAPTURE !== "true") {
+            throw Object.assign(new Error("MICOPESA_EMAIL_CAPTURE must be explicitly set to true."), {
+                code: "EMAIL_CAPTURE_NOT_ENABLED",
+            });
+        }
+        return captureRegistrationEmail({ to, subject: subject.trim(), text: text.trim(), html, purpose });
+    }
+
+    const provider = getEmailProvider();
+    const configuration = assertEmailProviderConfigured();
+    const message = {
+        to,
+        subject: subject.trim(),
+        text: text.trim(),
+        ...(typeof html === "string" && html.trim() ? { html } : {}),
+        purpose,
+    };
+    if (provider === "MOBILE_SASA") {
+        const result = await mobileSasaService.sendEmail({
+            ...message,
+            html: message.html || textToHtml(message.text),
+        });
+        return {
+            accepted: true,
+            status: "PROVIDER_ACCEPTED",
+            messageId: result.messageId || null,
+            ...(result.deliveryResult ? { deliveryResult: result.deliveryResult } : {}),
+        };
+    }
+    const transporter = createEmailTransporter(configuration);
+    return sendEmailWithTransporter(transporter, message);
 }
 
 async function issueEmailToken({ userId, email, purpose }) {
     if (!Object.hasOwn(TOKEN_EXPIRY_MINUTES, purpose)) {
         throw new Error("Unsupported email token purpose");
     }
+    if (process.env.MICOPESA_TEST_MODE === "true" && !isCaptureModeRequested()) {
+        throw Object.assign(new Error("Test mode requires local email capture."), {
+            code: "EMAIL_CAPTURE_REQUIRED",
+        });
+    }
+    if (isCaptureModeRequested()) {
+        const error = new Error(
+            "Local email capture is restricted to pending registration verification."
+        );
+        error.code = "EMAIL_CAPTURE_UNSUPPORTED_PURPOSE";
+        throw error;
+    }
     const token = crypto.randomBytes(32).toString("base64url");
     const tokenHash = hashOpaque(token);
     const frontendBaseUrl = getFrontendBaseUrl();
-    getEmailConfiguration();
+    assertEmailProviderConfigured();
     const verification = purpose === "EMAIL_VERIFICATION";
     const link = new URL(verification ? "/verify-email" : "/reset-password", frontendBaseUrl);
     link.searchParams.set("token", token);
@@ -179,6 +316,33 @@ async function issueEmailToken({ userId, email, purpose }) {
         text: verification
             ? `Verify your email address using this link (expires in 30 minutes): ${link.href}`
             : `Reset your password using this link (expires in 30 minutes): ${link.href}`,
+    });
+}
+
+async function sendPendingRegistrationEmail({ email, token }) {
+    const frontendBaseUrl = getFrontendBaseUrl();
+    if (process.env.MICOPESA_TEST_MODE === "true" && !isCaptureModeRequested()) {
+        throw Object.assign(new Error("Test mode requires local email capture."), {
+            code: "EMAIL_CAPTURE_REQUIRED",
+        });
+    }
+    if (isCaptureModeRequested()) {
+        if (process.env.MICOPESA_EMAIL_CAPTURE !== "true") {
+            throw Object.assign(new Error("MICOPESA_EMAIL_CAPTURE must be explicitly set to true."), {
+                code: "EMAIL_CAPTURE_NOT_ENABLED",
+            });
+        }
+    } else {
+        assertEmailProviderConfigured();
+    }
+    const link = new URL("/verify-email", frontendBaseUrl);
+    link.searchParams.set("token", token);
+    link.searchParams.set("flow", "registration");
+    return sendEmail({
+        to: email,
+        subject: "Complete your MicoPesa registration",
+        purpose: "REGISTRATION_VERIFICATION",
+        text: `Complete your MicoPesa registration using this link (expires in 30 minutes): ${link.href}. If you did not request this, ignore this email.`,
     });
 }
 
@@ -225,13 +389,16 @@ async function enforceRequestLimits({ req, action, email, userId }) {
 
 module.exports = {
     createEmailTransporter,
+    assertEmailProviderConfigured,
     enforceRequestLimits,
     getEmailConfiguration,
+    getEmailProvider,
     hashOpaque,
     hashRateKey,
     issueEmailToken,
     logEmailDeliveryFailure,
     safeSmtpMessage,
+    sendPendingRegistrationEmail,
     sendEmail,
     sendEmailWithTransporter,
 };

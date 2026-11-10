@@ -1,7 +1,7 @@
 import { useCallback, useState } from "react";
 import { useTranslation } from "react-i18next";
 import useApi from "../../hooks/useApi";
-import { getMyBalance, getMyContributions } from "../../services/accountService";
+import { downloadMyStatement, getMyBalance, getMyContributions } from "../../services/accountService";
 import { getMyAllocations, listAvailableFunds } from "../../services/fundService";
 import { StatCard } from "../../components/ui/Card";
 import DataTable from "../../components/ui/DataTable";
@@ -11,12 +11,19 @@ import LoadingState from "../../components/ui/LoadingState";
 import StatusBadge from "../../components/ui/StatusBadge";
 import Button from "../../components/ui/Button";
 import ContributionModal from "../../components/Contribution/ContributionModal";
+import DepositModal from "../../components/Deposit/DepositModal";
 import { formatDateTime, formatKes, formatNumber } from "../../i18n/formatters";
 
 const getColumns = (t, language) => [
     { key: "created_at", header: t("worker.contributions.date"), render: (row) => formatDateTime(row.created_at, language) },
     { key: "amount", header: t("worker.contributions.amount"), render: (row) => formatKes(row.amount, language) || t("worker.common.notAvailable") },
-    { key: "channel", header: t("worker.contributions.channel") },
+    {
+        key: "channel",
+        header: t("worker.contributions.channel"),
+        render: (row) => row.payment_provider === "SIMULATED"
+            ? t("worker.contributions.simulated")
+            : row.channel,
+    },
     {
         key: "fund_allocations",
         header: t("worker.contributions.fundAllocation"),
@@ -28,21 +35,71 @@ const getColumns = (t, language) => [
     },
     { key: "contribution_status", header: t("worker.contributions.contribution"), render: (row) => <StatusBadge status={row.contribution_status} label={t(`worker.common.statuses.${row.contribution_status}`, { defaultValue: row.contribution_status })} /> },
     { key: "transaction_status", header: t("worker.contributions.payment"), render: (row) => <StatusBadge status={row.transaction_status} label={t(`worker.common.statuses.${row.transaction_status}`, { defaultValue: row.transaction_status })} /> },
-    { key: "mpesa_result_description", header: t("worker.contributions.paymentDetails"), render: (row) => row.mpesa_result_description || "-" },
+    {
+        key: "mpesa_result_description",
+        header: t("worker.contributions.paymentDetails"),
+        render: (row) => {
+            const details = row.mpesa_result_description || "";
+            const simulated = row.payment_provider === "SIMULATED";
+            const reference = simulated
+                ? (row.checkout_request_id || row.mpesa_receipt)
+                : row.payment_provider === "DARAJA" ? row.mpesa_receipt : null;
+            return [
+                simulated
+                    ? t("worker.contributions.simulatedNoMoney")
+                    : "",
+                reference
+                    ? `${t(simulated
+                        ? "worker.contributions.syntheticReference"
+                        : "worker.depositModal.receipt")}: ${reference}`
+                    : "",
+                details,
+            ].filter(Boolean).join(" — ") || "-";
+        },
+    },
 ];
 
 function Contributions() {
     const { t, i18n } = useTranslation();
     const [contributionOpen, setContributionOpen] = useState(false);
+    const [depositOpen, setDepositOpen] = useState(false);
+    const [statementDownloading, setStatementDownloading] = useState(false);
+    const [statementError, setStatementError] = useState("");
     const balanceApi = useApi(getMyBalance, []);
     const contributionsApi = useApi(getMyContributions, []);
     const fundsApi = useApi(listAvailableFunds, []);
     const allocationsApi = useApi(getMyAllocations, []);
+    const { refetch: refetchBalance } = balanceApi;
     const { refetch: refetchContributions } = contributionsApi;
     const handleContributionCreated = useCallback(async () => {
         const refreshed = await refetchContributions();
         return refreshed !== null;
     }, [refetchContributions]);
+    const handleDepositCompleted = useCallback(async () => {
+        await Promise.all([
+            refetchBalance(true),
+            refetchContributions(true),
+        ]);
+    }, [refetchBalance, refetchContributions]);
+    const handleStatementDownload = async (format) => {
+        setStatementError("");
+        setStatementDownloading(true);
+        try {
+            const response = await downloadMyStatement(format);
+            const url = URL.createObjectURL(response.data);
+            const link = document.createElement("a");
+            link.href = url;
+            link.download = `micopesa-my-statement-${new Date().toISOString().slice(0, 10)}.${format.toLowerCase()}`;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+        } catch (error) {
+            setStatementError(error.message || t("worker.contributions.statementError"));
+        } finally {
+            setStatementDownloading(false);
+        }
+    };
 
     return (
         <div>
@@ -75,10 +132,29 @@ function Contributions() {
                     {t("worker.contributions.paymentUnavailable")}
                 </p>
                 <Button variant="primary" onClick={() => setContributionOpen(true)}>{t("worker.contributions.recordContribution")}</Button>
+                <Button variant="secondary" onClick={() => setDepositOpen(true)}>{t("worker.contributions.mpesaDeposit")}</Button>
             </div>
 
             <div className="section">
                 <h2 className="card-title">{t("worker.contributions.history")}</h2>
+                <div
+                    aria-label={t("worker.contributions.statementDownloads")}
+                    style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}
+                >
+                    {["CSV", "XLSX", "PDF"].map((format) => (
+                        <Button
+                            key={format}
+                            variant="secondary"
+                            disabled={statementDownloading}
+                            onClick={() => handleStatementDownload(format)}
+                        >
+                            {statementDownloading
+                                ? t("worker.contributions.statementDownloading")
+                                : t(`worker.contributions.download${format}`)}
+                        </Button>
+                    ))}
+                </div>
+                {statementError && <p role="alert">{statementError}</p>}
                 <DataTable
                     columns={getColumns(t, i18n.language)}
                     rows={contributionsApi.data}
@@ -111,6 +187,11 @@ function Contributions() {
                     allocationsApi.refetch(true);
                 }}
                 onCreated={handleContributionCreated}
+            />
+            <DepositModal
+                open={depositOpen}
+                onClose={() => setDepositOpen(false)}
+                onCompleted={handleDepositCompleted}
             />
         </div>
     );

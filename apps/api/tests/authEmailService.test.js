@@ -1,29 +1,60 @@
-const { after, beforeEach, test } = require("node:test");
+const { after, afterEach, beforeEach, test } = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs/promises");
+const os = require("node:os");
+const path = require("node:path");
 const nodemailer = require("nodemailer");
 const pool = require("../src/db/database");
 const authEmailService = require("../src/services/authEmailService");
+const mobileSasaService = require("../src/services/mobileSasaService");
+const { initializeTestModeJwtSecret } = require("../src/utils/testModeConfiguration");
 
 const originalQuery = pool.query;
 const originalCreateTransport = nodemailer.createTransport;
+const originalMobileSasaSendEmail = mobileSasaService.sendEmail;
 const originalConsoleInfo = console.info;
 const originalConsoleError = console.error;
 const originalEnvironment = {
     GMAIL_USER: process.env.GMAIL_USER,
     GMAIL_APP_PASSWORD: process.env.GMAIL_APP_PASSWORD,
     FRONTEND_BASE_URL: process.env.FRONTEND_BASE_URL,
+    EMAIL_PROVIDER: process.env.EMAIL_PROVIDER,
+    MOBILESASA_EMAIL_ENABLED: process.env.MOBILESASA_EMAIL_ENABLED,
+    MOBILE_SASA_EMAIL_API_TOKEN: process.env.MOBILE_SASA_EMAIL_API_TOKEN,
+    MOBILE_SASA_EMAIL_FROM: process.env.MOBILE_SASA_EMAIL_FROM,
+    MOBILE_SASA_EMAIL_DOMAIN_UUID: process.env.MOBILE_SASA_EMAIL_DOMAIN_UUID,
+    JWT_SECRET: process.env.JWT_SECRET,
+    MICOPESA_EMAIL_CAPTURE: process.env.MICOPESA_EMAIL_CAPTURE,
+    MICOPESA_EMAIL_CAPTURE_DIR: process.env.MICOPESA_EMAIL_CAPTURE_DIR,
+    MICOPESA_TEST_MODE: process.env.MICOPESA_TEST_MODE,
+    NODE_ENV: process.env.NODE_ENV,
 };
 let queryCount;
+let captureDirectory;
 
 beforeEach(() => {
     queryCount = 0;
+    delete process.env.MICOPESA_EMAIL_CAPTURE;
+    delete process.env.MICOPESA_EMAIL_CAPTURE_DIR;
+    delete process.env.MICOPESA_TEST_MODE;
+    process.env.NODE_ENV = "test";
     process.env.GMAIL_USER = "  MicoPesa.Test@GMAIL.COM ";
     process.env.GMAIL_APP_PASSWORD = "abcd efgh ijkl mnop";
     process.env.FRONTEND_BASE_URL = "https://micopesa.example.test";
+    process.env.EMAIL_PROVIDER = "GMAIL";
     pool.query = async () => {
         queryCount += 1;
         return { rows: [] };
     };
+});
+
+afterEach(() => {
+    mobileSasaService.sendEmail = originalMobileSasaSendEmail;
+    if (captureDirectory) {
+        return fs.rm(captureDirectory, { recursive: true, force: true }).then(() => {
+            captureDirectory = undefined;
+        });
+    }
 });
 
 after(() => {
@@ -128,4 +159,276 @@ test("SMTP must explicitly accept the user's recipient before delivery is report
         }),
         (error) => error.code === "EMAIL_SMTP_RECIPIENT_REJECTED",
     );
+});
+
+test("authentication verification and reset templates can select Mobile Sasa", async () => {
+    process.env.EMAIL_PROVIDER = "MOBILE_SASA";
+    process.env.MOBILESASA_EMAIL_ENABLED = "true";
+    process.env.MOBILE_SASA_EMAIL_API_TOKEN = "mbs_test-token";
+    process.env.MOBILE_SASA_EMAIL_FROM = "notifications@example.test";
+    const messages = [];
+    mobileSasaService.sendEmail = async (message) => {
+        messages.push(message);
+        return {
+            accepted: true,
+            status: "PROVIDER_ACCEPTED",
+            deliveryResult: { provider: "MOBILE_SASA", accepted: 1, suppressed: 0, failed: 0 },
+        };
+    };
+    nodemailer.createTransport = () => {
+        assert.fail("Mobile Sasa selection must not fall back to Gmail.");
+    };
+
+    await authEmailService.issueEmailToken({
+        userId: "mock-user",
+        email: "worker@example.test",
+        purpose: "EMAIL_VERIFICATION",
+    });
+    await authEmailService.issueEmailToken({
+        userId: "mock-user",
+        email: "worker@example.test",
+        purpose: "PASSWORD_RESET",
+    });
+
+    assert.equal(messages.length, 2);
+    assert.match(messages[0].subject, /Verify your MicoPesa email/);
+    assert.match(messages[0].text, /\/verify-email\?token=/);
+    assert.match(messages[0].html, /\/verify-email\?token=/);
+    assert.match(messages[1].subject, /Reset your MicoPesa password/);
+    assert.match(messages[1].text, /\/reset-password\?token=/);
+    assert.match(messages[1].html, /\/reset-password\?token=/);
+});
+
+test("verification email links use the configured frontend origin without sending email", async () => {
+    process.env.EMAIL_PROVIDER = "GMAIL";
+    process.env.FRONTEND_BASE_URL = "http://localhost:4178";
+    let outgoingMessage;
+    nodemailer.createTransport = () => ({
+        sendMail: async (message) => {
+            outgoingMessage = message;
+            return { accepted: ["worker@example.test"], rejected: [], messageId: "mock-message-id" };
+        },
+    });
+    console.info = () => {};
+
+    await authEmailService.issueEmailToken({
+        userId: "mock-user",
+        email: "worker@example.test",
+        purpose: "EMAIL_VERIFICATION",
+    });
+
+    const urlMatch = outgoingMessage.text.match(/http:\/\/localhost:4178\/verify-email\?token=[^\s]+/);
+    assert.ok(urlMatch);
+    const verificationUrl = new URL(urlMatch[0]);
+    assert.equal(verificationUrl.origin, "http://localhost:4178");
+    assert.equal(verificationUrl.pathname, "/verify-email");
+    assert.ok(verificationUrl.searchParams.get("token"));
+    assert.equal([...verificationUrl.searchParams.keys()].join(","), "token");
+});
+
+test("pending registration email uses one field-neutral verification message", async () => {
+    process.env.EMAIL_PROVIDER = "GMAIL";
+    process.env.FRONTEND_BASE_URL = "http://localhost:4178";
+    let outgoingMessage;
+    nodemailer.createTransport = () => ({
+        sendMail: async (message) => {
+            outgoingMessage = message;
+            return { accepted: ["worker@example.test"], rejected: [], messageId: "mock-pending-registration" };
+        },
+    });
+    console.info = () => {};
+
+    await authEmailService.sendPendingRegistrationEmail({
+        email: "worker@example.test",
+        token: "mock-registration-token",
+    });
+
+    const url = new URL(outgoingMessage.text.match(/https?:\/\/\S+/)[0].replace(/\.$/, ""));
+    assert.equal(url.origin, "http://localhost:4178");
+    assert.equal(url.pathname, "/verify-email");
+    assert.equal(url.searchParams.get("token"), "mock-registration-token");
+    assert.equal(url.searchParams.get("flow"), "registration");
+    assert.equal(outgoingMessage.subject, "Complete your MicoPesa registration");
+    assert.match(outgoingMessage.text, /If you did not request this, ignore this email/);
+    assert.doesNotMatch(outgoingMessage.text, /National ID|date of birth|phone|12345678/i);
+    assert.equal(queryCount, 0);
+});
+
+test("an ambiguous Mobile Sasa authentication email outcome never triggers Gmail fallback", async () => {
+    process.env.EMAIL_PROVIDER = "MOBILE_SASA";
+    process.env.MOBILESASA_EMAIL_ENABLED = "true";
+    process.env.MOBILE_SASA_EMAIL_API_TOKEN = "mbs_test-token";
+    process.env.MOBILE_SASA_EMAIL_FROM = "notifications@example.test";
+    let gmailCalls = 0;
+    mobileSasaService.sendEmail = async () => {
+        const error = new Error("Provider outcome is unknown.");
+        error.code = "EMAIL_UNKNOWN_OUTCOME";
+        throw error;
+    };
+    nodemailer.createTransport = () => {
+        gmailCalls += 1;
+        throw new Error("Gmail must not be used as automatic fallback.");
+    };
+
+    await assert.rejects(authEmailService.sendEmail({
+        to: "worker@example.test",
+        subject: "Reset password",
+        text: "Reset instructions",
+    }), { code: "EMAIL_UNKNOWN_OUTCOME" });
+    assert.equal(gmailCalls, 0);
+});
+
+test("local capture stores registration verification without invoking an email provider", async () => {
+    captureDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "micopesa-email-capture-test-"));
+    process.env.MICOPESA_EMAIL_CAPTURE = "true";
+    process.env.MICOPESA_EMAIL_CAPTURE_DIR = captureDirectory;
+    process.env.FRONTEND_BASE_URL = "http://localhost:4178";
+    delete process.env.GMAIL_USER;
+    delete process.env.GMAIL_APP_PASSWORD;
+    process.env.EMAIL_PROVIDER = "MOBILE_SASA";
+    let gmailCalls = 0;
+    let mobileSasaCalls = 0;
+    nodemailer.createTransport = () => {
+        gmailCalls += 1;
+        throw new Error("Capture must never fall back to Gmail.");
+    };
+    mobileSasaService.sendEmail = async () => {
+        mobileSasaCalls += 1;
+        throw new Error("Capture must never call Mobile Sasa.");
+    };
+
+    await authEmailService.sendPendingRegistrationEmail({
+        email: "worker@example.test",
+        token: "local-registration-token",
+    });
+
+    const captureFile = path.join(captureDirectory, "registration-messages.jsonl");
+    const records = (await fs.readFile(captureFile, "utf8"))
+        .trim()
+        .split(/\r?\n/)
+        .map((line) => JSON.parse(line));
+    assert.equal(records.length, 1);
+    assert.equal(records[0].to, "worker@example.test");
+    assert.equal(records[0].purpose, "REGISTRATION_VERIFICATION");
+    const link = new URL(records[0].text.match(/https?:\/\/\S+/)[0].replace(/\.$/, ""));
+    assert.equal(link.origin, "http://localhost:4178");
+    assert.equal(link.pathname, "/verify-email");
+    assert.equal(link.searchParams.get("token"), "local-registration-token");
+    assert.equal(link.searchParams.get("flow"), "registration");
+    assert.equal(gmailCalls, 0);
+    assert.equal(mobileSasaCalls, 0);
+    assert.equal(queryCount, 0);
+});
+
+test("capture mode fails closed for production and non-registration email", async () => {
+    captureDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "micopesa-email-capture-test-"));
+    process.env.MICOPESA_EMAIL_CAPTURE = "true";
+    process.env.MICOPESA_EMAIL_CAPTURE_DIR = captureDirectory;
+    process.env.NODE_ENV = "production";
+    let providerCalls = 0;
+    nodemailer.createTransport = () => {
+        providerCalls += 1;
+        throw new Error("Capture must not fall back to SMTP.");
+    };
+    mobileSasaService.sendEmail = async () => {
+        providerCalls += 1;
+        throw new Error("Capture must not call Mobile Sasa.");
+    };
+
+    await assert.rejects(authEmailService.sendPendingRegistrationEmail({
+        email: "worker@example.test",
+        token: "local-registration-token",
+    }), { code: "EMAIL_CAPTURE_PRODUCTION_FORBIDDEN" });
+    process.env.NODE_ENV = "test";
+    await assert.rejects(authEmailService.sendEmail({
+        to: "worker@example.test",
+        subject: "Reset password",
+        text: "Reset instructions",
+        purpose: "PASSWORD_RESET",
+    }), { code: "EMAIL_CAPTURE_UNSUPPORTED_PURPOSE" });
+    assert.equal(providerCalls, 0);
+    assert.equal(queryCount, 0);
+});
+
+test("capture mode rejects invalid opt-in and capture paths without provider fallback", async () => {
+    process.env.MICOPESA_EMAIL_CAPTURE = "enabled";
+    let providerCalls = 0;
+    nodemailer.createTransport = () => {
+        providerCalls += 1;
+        throw new Error("Capture configuration errors must not fall back to SMTP.");
+    };
+    await assert.rejects(authEmailService.sendPendingRegistrationEmail({
+        email: "worker@example.test",
+        token: "local-registration-token",
+    }), { code: "EMAIL_CAPTURE_NOT_ENABLED" });
+
+    process.env.MICOPESA_EMAIL_CAPTURE = "true";
+    process.env.MICOPESA_EMAIL_CAPTURE_DIR = path.resolve(os.tmpdir(), "..", "micopesa-unsafe-capture");
+    await assert.rejects(authEmailService.sendPendingRegistrationEmail({
+        email: "worker@example.test",
+        token: "local-registration-token",
+    }), { code: "EMAIL_CAPTURE_DIRECTORY_UNSAFE" });
+    assert.equal(providerCalls, 0);
+});
+
+test("test mode refuses all email delivery unless registration capture is enabled", async () => {
+    process.env.MICOPESA_TEST_MODE = "true";
+    let providerCalls = 0;
+    nodemailer.createTransport = () => {
+        providerCalls += 1;
+        throw new Error("Test mode must never use SMTP.");
+    };
+    mobileSasaService.sendEmail = async () => {
+        providerCalls += 1;
+        throw new Error("Test mode must never call Mobile Sasa.");
+    };
+
+    await assert.rejects(authEmailService.sendEmail({
+        to: "worker@example.test",
+        subject: "Verify",
+        text: "Verification instructions",
+    }), { code: "EMAIL_CAPTURE_REQUIRED" });
+    await assert.rejects(authEmailService.sendPendingRegistrationEmail({
+        email: "worker@example.test",
+        token: "local-registration-token",
+    }), { code: "EMAIL_CAPTURE_REQUIRED" });
+    assert.equal(providerCalls, 0);
+    assert.equal(queryCount, 0);
+});
+
+test("isolated test mode initializes the HMAC secret needed by registration rate limiting", async () => {
+    const original = {
+        NODE_ENV: process.env.NODE_ENV,
+        MICOPESA_TEST_MODE: process.env.MICOPESA_TEST_MODE,
+        JWT_SECRET: process.env.JWT_SECRET,
+    };
+    try {
+        process.env.NODE_ENV = "test";
+        process.env.MICOPESA_TEST_MODE = "true";
+        delete process.env.JWT_SECRET;
+        pool.query = async () => {
+            queryCount += 1;
+            return { rows: [{ request_count: 1 }] };
+        };
+
+        await assert.rejects(authEmailService.enforceRequestLimits({
+            req: { ip: "127.0.0.1" },
+            action: "REGISTRATION",
+            email: "worker@example.test",
+        }), /JWT_SECRET is not configured/);
+        assert.equal(queryCount, 0);
+
+        assert.equal(initializeTestModeJwtSecret(), true);
+        await authEmailService.enforceRequestLimits({
+            req: { ip: "127.0.0.1" },
+            action: "REGISTRATION",
+            email: "worker@example.test",
+        });
+        assert.equal(queryCount, 2);
+    } finally {
+        for (const [name, value] of Object.entries(original)) {
+            if (value === undefined) delete process.env[name];
+            else process.env[name] = value;
+        }
+    }
 });

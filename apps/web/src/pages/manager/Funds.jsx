@@ -1,12 +1,74 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import useApi from "../../hooks/useApi";
-import { listFunds, createFund, updateFund } from "../../services/fundService";
+import { listFunds, createFund, updateFund, getFundAllocations } from "../../services/fundService";
 import DataTable from "../../components/ui/DataTable";
 import StatusBadge from "../../components/ui/StatusBadge";
 import Button from "../../components/ui/Button";
 import Modal from "../../components/ui/Modal";
 import FormField from "../../components/ui/FormField";
 import { useToast } from "../../components/ui/ToastContext";
+
+function FundAllocationHistory({ fund, onClose }) {
+    const { t } = useTranslation();
+    const [allocations, setAllocations] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(null);
+    const [retryCount, setRetryCount] = useState(0);
+
+    useEffect(() => {
+        let cancelled = false;
+        getFundAllocations(fund.fund_id)
+            .then((rows) => {
+                if (!cancelled) setAllocations(rows);
+            })
+            .catch((requestError) => {
+                if (!cancelled) setError(requestError.message || "Unable to load allocation history.");
+            })
+            .finally(() => {
+                if (!cancelled) setLoading(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [fund.fund_id, retryCount]);
+
+    function retry() {
+        setAllocations(null);
+        setLoading(true);
+        setError(null);
+        setRetryCount((count) => count + 1);
+    }
+
+    const accountLabels = new Map();
+    allocations?.forEach(({ account_id }) => {
+        if (!accountLabels.has(account_id)) {
+            accountLabels.set(account_id, `Account ${accountLabels.size + 1}`);
+        }
+    });
+    const columns = [
+        { key: "account_id", header: t("dashboards.manager.fundsPage.workerAccount"), render: (row) => accountLabels.get(row.account_id) || t("dashboards.manager.fundsPage.account") },
+        { key: "percentage", header: t("dashboards.manager.fundsPage.allocation"), render: (row) => `${Number(row.percentage).toFixed(2)}%` },
+        { key: "effective_from", header: t("dashboards.manager.fundsPage.effectiveFrom") },
+        { key: "effective_to", header: t("dashboards.manager.fundsPage.effectiveThrough"), render: (row) => row.effective_to || t("dashboards.manager.fundsPage.current") },
+    ];
+
+    return (
+        <Modal open title={t("dashboards.manager.fundsPage.historyTitle", { fund: fund.fund_name })} onClose={onClose}>
+            <DataTable
+                columns={columns}
+                rows={allocations}
+                rowKey="allocation_id"
+                loading={loading}
+                error={error}
+                onRetry={retry}
+                emptyMessage={t("dashboards.manager.fundsPage.emptyHistory")}
+                loadingLabel={t("dashboards.manager.fundsPage.loadingHistory")}
+                errorTitle={t("dashboards.manager.fundsPage.historyErrorTitle")}
+            />
+        </Modal>
+    );
+}
 
 const RISK_OPTIONS = [
     { value: "LOW", label: "Low" },
@@ -23,10 +85,12 @@ const STATUS_OPTIONS = [
 const EMPTY_FORM = { fund_name: "", administrator_name: "", risk_level: "MEDIUM", expected_return: "" };
 
 function Funds() {
+    const { t } = useTranslation();
     const fundsApi = useApi(listFunds, []);
     const toast = useToast();
     const [modalOpen, setModalOpen] = useState(false);
     const [editingFund, setEditingFund] = useState(null);
+    const [viewingFund, setViewingFund] = useState(null);
     const [form, setForm] = useState(EMPTY_FORM);
     const [submitting, setSubmitting] = useState(false);
     const submissionInProgressRef = useRef(false);
@@ -87,12 +151,17 @@ function Funds() {
         { key: "expected_return", header: "Expected Return", render: (row) => `${row.expected_return}%` },
         { key: "fund_status", header: "Status", render: (row) => <StatusBadge status={row.fund_status} /> },
         {
-            key: "actions",
-            header: "",
+            key: "allocations",
+            header: t("dashboards.manager.fundsPage.allocationsColumn"),
             render: (row) => (
-                <Button variant="secondary" size="sm" onClick={() => openEditModal(row)}>
-                    Edit
-                </Button>
+                <div className="table-actions">
+                    <Button variant="secondary" size="sm" onClick={() => setViewingFund(row)}>
+                        {t("dashboards.manager.fundsPage.viewAllocations")}
+                    </Button>
+                    <Button variant="secondary" size="sm" onClick={() => openEditModal(row)}>
+                        {t("dashboards.manager.fundsPage.editFund")}
+                    </Button>
+                </div>
             ),
         },
     ];
@@ -177,6 +246,13 @@ function Funds() {
                     </div>
                 </form>
             </Modal>
+            {viewingFund && (
+                <FundAllocationHistory
+                    key={viewingFund.fund_id}
+                    fund={viewingFund}
+                    onClose={() => setViewingFund(null)}
+                />
+            )}
         </div>
     );
 }

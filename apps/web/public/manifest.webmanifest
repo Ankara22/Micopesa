@@ -1,0 +1,10 @@
+{
+  "name": "MicoPesa",
+  "short_name": "MicoPesa",
+  "description": "MicoPesa savings and pension account",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#0b6b53"
+}

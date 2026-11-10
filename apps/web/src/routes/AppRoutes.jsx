@@ -17,6 +17,7 @@ import Unauthorized from "../pages/Unauthorized";
 
 // Worker pages
 import WorkerDashboard from "../pages/worker/Dashboard";
+import WorkerAnalytics from "../pages/worker/Analytics";
 import WorkerContributions from "../pages/worker/Contributions";
 import WorkerBalanceHistory from "../pages/worker/BalanceHistory";
 import WorkerFunds from "../pages/worker/Funds";
@@ -38,15 +39,22 @@ import ManagerProfile from "../pages/manager/Profile";
 
 // Regulator pages
 import RegulatorDashboard from "../pages/regulator/Dashboard";
+import RegulatorAnalytics from "../pages/regulator/Analytics";
 import RegulatorFundOversight from "../pages/regulator/FundOversight";
 import RegulatorComplianceReports from "../pages/regulator/ComplianceReports";
 import RegulatorAuditLogs from "../pages/regulator/AuditLogs";
 import RegulatorProfile from "../pages/regulator/Profile";
+import RoleNotifications from "../pages/notifications/RoleNotifications";
+import NotificationAuditPage from "../pages/notifications/NotificationAuditPage";
+import ReportsPage from "../pages/reports/ReportsPage";
 
 // Admin pages
 import AdminDashboard from "../pages/admin/Dashboard";
+import AdminKycReview from "../pages/admin/KycReview";
+import AdminAnalytics from "../pages/admin/Analytics";
 import AdminUserManagement from "../pages/admin/UserManagement";
 import AdminRolesPermissions from "../pages/admin/RolesPermissions";
+import AdminRegulatorScopes from "../pages/admin/RegulatorScopes";
 import AdminSystemSettings from "../pages/admin/SystemSettings";
 import AdminNotifications from "../pages/admin/Notifications";
 import AdminSystemActivity from "../pages/admin/SystemActivity";
@@ -96,6 +104,7 @@ function AppRoutes() {
                 }
             >
                 <Route path="/worker/dashboard" element={<WorkerDashboard />} />
+                <Route path="/worker/analytics" element={<WorkerAnalytics />} />
                 <Route path="/worker/contributions" element={<WorkerContributions />} />
                 <Route path="/worker/balance" element={<WorkerBalanceHistory />} />
                 <Route path="/worker/funds" element={<WorkerFunds />} />
@@ -121,7 +130,10 @@ function AppRoutes() {
                 <Route path="/manager/withdrawal-requests" element={<ManagerWithdrawalRequests />} />
                 <Route path="/manager/reports" element={<ManagerOperationalReports />} />
                 <Route path="/manager/audit-logs" element={<ManagerAuditLogs />} />
-                <Route path="/manager/notifications" element={<WorkerNotifications />} />
+                <Route path="/manager/notifications" element={<RoleNotifications />} />
+                <Route path="/manager/notification-audit-log" element={<NotificationAuditPage />} />
+                <Route path="/manager/reports-exports" element={<ReportsPage />} />
+                <Route path="/manager/report-history" element={<ReportsPage historyOnly />} />
                 <Route path="/manager/profile" element={<ManagerProfile />} />
             </Route>
 
@@ -134,10 +146,14 @@ function AppRoutes() {
                 }
             >
                 <Route path="/regulator/dashboard" element={<RegulatorDashboard />} />
+                <Route path="/regulator/analytics" element={<RegulatorAnalytics />} />
                 <Route path="/regulator/funds" element={<RegulatorFundOversight />} />
                 <Route path="/regulator/compliance-reports" element={<RegulatorComplianceReports />} />
                 <Route path="/regulator/audit-logs" element={<RegulatorAuditLogs />} />
-                <Route path="/regulator/notifications" element={<WorkerNotifications />} />
+                <Route path="/regulator/notifications" element={<RoleNotifications />} />
+                <Route path="/regulator/notification-audit-log" element={<NotificationAuditPage />} />
+                <Route path="/regulator/reports" element={<ReportsPage />} />
+                <Route path="/regulator/report-history" element={<ReportsPage historyOnly />} />
                 <Route path="/regulator/profile" element={<RegulatorProfile />} />
             </Route>
 
@@ -150,10 +166,16 @@ function AppRoutes() {
                 }
             >
                 <Route path="/admin/dashboard" element={<AdminDashboard />} />
+                <Route path="/admin/analytics" element={<AdminAnalytics />} />
                 <Route path="/admin/users" element={<AdminUserManagement />} />
+                <Route path="/admin/kyc-review" element={<AdminKycReview />} />
                 <Route path="/admin/roles" element={<AdminRolesPermissions />} />
+                <Route path="/admin/regulator-scopes" element={<AdminRegulatorScopes />} />
                 <Route path="/admin/settings" element={<AdminSystemSettings />} />
                 <Route path="/admin/notifications" element={<AdminNotifications />} />
+                <Route path="/admin/notification-audit-log" element={<NotificationAuditPage />} />
+                <Route path="/admin/reports" element={<ReportsPage />} />
+                <Route path="/admin/report-history" element={<ReportsPage historyOnly />} />
                 <Route path="/admin/activity" element={<AdminSystemActivity />} />
                 <Route path="/admin/audit-logs" element={<AdminAuditLogs />} />
                 <Route path="/admin/profile" element={<AdminProfile />} />

@@ -88,30 +88,49 @@ async function createFund(req, res) {
         return res.status(400).json({ status: "error", message: "expected_return must be a number" });
     }
 
+    let client;
+    let transactionStarted = false;
     try {
-        const result = await pool.query(
+        client = await pool.connect();
+        await client.query("BEGIN");
+        transactionStarted = true;
+        const result = await client.query(
             `INSERT INTO funds (managed_by, fund_name, administrator_name, risk_level, expected_return)
              VALUES ($1, $2, $3, $4, $5)
              RETURNING fund_id, managed_by, fund_name, administrator_name, risk_level,
                        expected_return, fund_status, created_at`,
             [userId, fund_name, administrator_name, risk_level, expectedReturn]
         );
+        const fund = result.rows[0];
+        await writeAuditLog(client, {
+            userId,
+            actionType: "CREATE",
+            entityName: "FUNDS",
+            entityId: fund.fund_id,
+        });
+        await client.query("COMMIT");
+        transactionStarted = false;
 
         return res.status(201).json({
             status: "success",
             message: "Fund created successfully",
-            data: { fund: result.rows[0] },
+            data: { fund },
         });
     } catch (error) {
+        if (client && transactionStarted) {
+            await client.query("ROLLBACK");
+        }
         console.error("Failed to create fund:", error);
         return res.status(500).json({ status: "error", message: "Failed to create fund due to a server error" });
+    } finally {
+        client?.release();
     }
 }
 
 /**
  * GET /api/funds
  * FUND_MANAGER: sees only funds they manage.
- * REGULATOR: sees all funds (oversight/audit).
+ * REGULATOR: sees only funds with an active regulator assignment.
  */
 async function listFunds(req, res) {
     const { userId, role } = req.user;
@@ -120,9 +139,18 @@ async function listFunds(req, res) {
         const result =
             role === "REGULATOR"
                 ? await pool.query(
-                      `SELECT fund_id, managed_by, fund_name, administrator_name, risk_level,
-                              expected_return, fund_status, created_at, updated_at
-                       FROM funds ORDER BY created_at DESC`
+                      `SELECT f.fund_id, f.managed_by, f.fund_name, f.administrator_name, f.risk_level,
+                              f.expected_return, f.fund_status, f.created_at, f.updated_at
+                       FROM funds f
+                       WHERE EXISTS (
+                           SELECT 1
+                           FROM regulator_fund_assignments rfa
+                           WHERE rfa.fund_id = f.fund_id
+                             AND rfa.regulator_user_id = $1
+                             AND rfa.active = TRUE
+                       )
+                       ORDER BY f.created_at DESC`,
+                      [userId]
                   )
                 : await pool.query(
                       `SELECT fund_id, managed_by, fund_name, administrator_name, risk_level,
@@ -313,7 +341,7 @@ async function replaceMyAllocations(req, res) {
 
 /**
  * GET /api/funds/:fundId
- * FUND_MANAGER: only a fund they manage. REGULATOR: any fund.
+ * FUND_MANAGER: only a fund they manage. REGULATOR: only an actively assigned fund.
  */
 async function getFund(req, res) {
     const { userId, role } = req.user;
@@ -321,10 +349,18 @@ async function getFund(req, res) {
 
     try {
         const result = await pool.query(
-            `SELECT fund_id, managed_by, fund_name, administrator_name, risk_level,
-                    expected_return, fund_status, created_at, updated_at
-             FROM funds WHERE fund_id = $1`,
-            [fundId]
+            `SELECT f.fund_id, f.managed_by, f.fund_name, f.administrator_name, f.risk_level,
+                    f.expected_return, f.fund_status, f.created_at, f.updated_at
+             FROM funds f
+             WHERE f.fund_id = $1
+               AND ($2 <> 'REGULATOR' OR EXISTS (
+                   SELECT 1
+                   FROM regulator_fund_assignments rfa
+                   WHERE rfa.fund_id = f.fund_id
+                     AND rfa.regulator_user_id = $3
+                     AND rfa.active = TRUE
+               ))`,
+            [fundId, role, userId]
         );
 
         if (result.rows.length === 0) {
@@ -372,18 +408,30 @@ async function updateFund(req, res) {
         return res.status(400).json({ status: "error", message: "expected_return must be a number" });
     }
 
+    let client;
+    let transactionStarted = false;
     try {
-        const existing = await pool.query("SELECT managed_by FROM funds WHERE fund_id = $1", [fundId]);
+        client = await pool.connect();
+        await client.query("BEGIN");
+        transactionStarted = true;
+        const existing = await client.query(
+            "SELECT managed_by FROM funds WHERE fund_id = $1 FOR UPDATE",
+            [fundId]
+        );
 
         if (existing.rows.length === 0) {
+            await client.query("ROLLBACK");
+            transactionStarted = false;
             return res.status(404).json({ status: "error", message: "Fund not found" });
         }
 
         if (existing.rows[0].managed_by !== userId) {
+            await client.query("ROLLBACK");
+            transactionStarted = false;
             return res.status(403).json({ status: "error", message: "You do not manage this fund" });
         }
 
-        const result = await pool.query(
+        const result = await client.query(
             `UPDATE funds SET
                 fund_name = COALESCE($1, fund_name),
                 administrator_name = COALESCE($2, administrator_name),
@@ -391,7 +439,7 @@ async function updateFund(req, res) {
                 expected_return = COALESCE($4, expected_return),
                 fund_status = COALESCE($5, fund_status),
                 updated_at = now()
-             WHERE fund_id = $6
+             WHERE fund_id = $6 AND managed_by = $7
              RETURNING fund_id, managed_by, fund_name, administrator_name, risk_level,
                        expected_return, fund_status, created_at, updated_at`,
             [
@@ -401,46 +449,85 @@ async function updateFund(req, res) {
                 expected_return !== undefined ? Number(expected_return) : null,
                 fund_status ?? null,
                 fundId,
+                userId,
             ]
         );
+        const fund = result.rows[0];
+        if (!fund) {
+            await client.query("ROLLBACK");
+            transactionStarted = false;
+            return res.status(403).json({ status: "error", message: "You do not manage this fund" });
+        }
+
+        await writeAuditLog(client, {
+            userId,
+            actionType: "UPDATE",
+            entityName: "FUNDS",
+            entityId: fundId,
+        });
+        await client.query("COMMIT");
+        transactionStarted = false;
 
         return res.status(200).json({
             status: "success",
             message: "Fund updated successfully",
-            data: { fund: result.rows[0] },
+            data: { fund },
         });
     } catch (error) {
+        if (client && transactionStarted) {
+            await client.query("ROLLBACK");
+        }
         console.error("Failed to update fund:", error);
         return res.status(500).json({ status: "error", message: "Failed to update fund due to a server error" });
+    } finally {
+        client?.release();
     }
 }
 
 /**
  * GET /api/funds/:fundId/allocations
- * FUND_MANAGER (own fund) or REGULATOR (any fund).
+ * FUND_MANAGER (own fund) or REGULATOR (actively assigned fund).
  */
 async function getFundAllocations(req, res) {
     const { userId, role } = req.user;
     const { fundId } = req.params;
 
     try {
-        const fundResult = await pool.query("SELECT managed_by FROM funds WHERE fund_id = $1", [fundId]);
+        const result = await pool.query(
+            `SELECT f.managed_by, allocation.allocation_id, allocation.account_id, allocation.fund_id,
+                    allocation.percentage, allocation.effective_from, allocation.effective_to
+             FROM funds f
+             LEFT JOIN LATERAL (
+                 SELECT allocation_id, account_id, fund_id, percentage, effective_from, effective_to
+                 FROM fund_allocations
+                 WHERE fund_id = f.fund_id
+                   AND ($2 <> 'FUND_MANAGER' OR f.managed_by = $3)
+                 ORDER BY effective_from DESC
+             ) allocation ON TRUE
+             WHERE f.fund_id = $1
+               AND ($2 <> 'REGULATOR' OR EXISTS (
+                   SELECT 1
+                   FROM regulator_fund_assignments rfa
+                   WHERE rfa.fund_id = f.fund_id
+                     AND rfa.regulator_user_id = $3
+                     AND rfa.active = TRUE
+               ))
+             ORDER BY allocation.effective_from DESC`,
+            [fundId, role, userId]
+        );
 
-        if (fundResult.rows.length === 0) {
+        if (result.rows.length === 0) {
             return res.status(404).json({ status: "error", message: "Fund not found" });
         }
 
-        if (role === "FUND_MANAGER" && fundResult.rows[0].managed_by !== userId) {
+        if (role === "FUND_MANAGER" && result.rows[0].managed_by !== userId) {
             return res.status(403).json({ status: "error", message: "You do not manage this fund" });
         }
 
-        const result = await pool.query(
-            `SELECT allocation_id, account_id, fund_id, percentage, effective_from, effective_to
-             FROM fund_allocations WHERE fund_id = $1 ORDER BY effective_from DESC`,
-            [fundId]
-        );
-
-        return res.status(200).json({ status: "success", data: result.rows });
+        const allocations = result.rows
+            .filter((row) => row.allocation_id !== null)
+            .map(({ managed_by, ...allocation }) => allocation);
+        return res.status(200).json({ status: "success", data: allocations });
     } catch (error) {
         console.error("Failed to fetch fund allocations:", error);
         return res.status(500).json({

@@ -1,71 +1,8 @@
 const pool = require("../db/database");
-
-function parseAmountCents(amount) {
-    const text = typeof amount === "number" ? String(amount) : typeof amount === "string" ? amount.trim() : "";
-    if (!/^\d+(?:\.\d{1,2})?$/.test(text)) return null;
-    const [whole, fraction = ""] = text.split(".");
-    const cents = BigInt(whole) * 100n + BigInt(fraction.padEnd(2, "0"));
-    if (cents <= 0n || cents > 999999999999n) return null;
-    return { text, cents };
-}
-
-function parsePercentageHundredths(value) {
-    const text = String(value ?? "").trim();
-    if (!/^\d+(?:\.\d{1,2})?$/.test(text)) return null;
-    const [whole, fraction = ""] = text.split(".");
-    const hundredths = Number(whole) * 100 + Number(fraction.padEnd(2, "0"));
-    return Number.isSafeInteger(hundredths) && hundredths > 0 && hundredths <= 10000
-        ? hundredths
-        : null;
-}
-
-function distributeContributionAmount(amountCents, allocations) {
-    const weighted = allocations.map((allocation) => {
-        const weight = parsePercentageHundredths(allocation.percentage);
-        if (weight === null) throw new Error("Stored fund allocation percentage is invalid");
-        return { ...allocation, weight: BigInt(weight) };
-    }).sort((left, right) => left.fund_id.localeCompare(right.fund_id));
-    const totalWeight = weighted.reduce((sum, allocation) => sum + allocation.weight, 0n);
-    if (totalWeight <= 0n) throw new Error("No positive fund allocation weights were found");
-
-    let allocatedCents = 0n;
-    const shares = weighted.map((allocation) => {
-        const numerator = amountCents * allocation.weight;
-        const shareCents = numerator / totalWeight;
-        allocatedCents += shareCents;
-        return {
-            ...allocation,
-            shareCents,
-            remainder: numerator % totalWeight,
-        };
-    });
-
-    let remainingCents = amountCents - allocatedCents;
-    const byLargestRemainder = [...shares].sort((left, right) => {
-        if (left.remainder > right.remainder) return -1;
-        if (left.remainder < right.remainder) return 1;
-        return left.fund_id.localeCompare(right.fund_id);
-    });
-    for (let index = 0; remainingCents > 0n; index += 1, remainingCents -= 1n) {
-        byLargestRemainder[index % byLargestRemainder.length].shareCents += 1n;
-    }
-
-    let percentagesUsed = 0;
-    return shares.map((allocation, index) => {
-        const percentage = index === shares.length - 1
-            ? Number((100 - percentagesUsed).toFixed(10))
-            : Number(((Number(allocation.weight) / Number(totalWeight)) * 100).toFixed(10));
-        percentagesUsed += percentage;
-        const cents = allocation.shareCents.toString().padStart(3, "0");
-        return {
-            allocation_id: allocation.allocation_id,
-            fund_id: allocation.fund_id,
-            fund_name: allocation.fund_name,
-            allocation_percentage: percentage.toFixed(10),
-            allocated_amount: `${cents.slice(0, -2)}.${cents.slice(-2)}`,
-        };
-    });
-}
+const {
+    distributeContributionAmount,
+    parseAmountCents,
+} = require("../services/contributionAllocationService");
 
 /**
  * GET /api/accounts/my-balance
@@ -139,9 +76,22 @@ async function getMyContributions(req, res) {
                     c.contribution_status, c.created_at,
                     t.transaction_status, t.mpesa_receipt, t.mpesa_result_code,
                     t.mpesa_result_description, t.completed_at,
+                    a.checkout_request_id,
+                    CASE a.provider_mode
+                         WHEN 'SIMULATOR' THEN 'SIMULATED'
+                         WHEN 'DARAJA' THEN 'DARAJA'
+                         ELSE 'UNRESOLVED'
+                    END AS payment_provider,
                     COALESCE(fund_shares.fund_allocations, '[]'::jsonb) AS fund_allocations
                  FROM contributions c
                  JOIN transactions t ON t.transaction_id = c.transaction_id
+                 LEFT JOIN LATERAL (
+                     SELECT checkout_request_id, provider_mode
+                     FROM mpesa_payment_attempts
+                     WHERE transaction_id = c.transaction_id
+                     ORDER BY created_at DESC, attempt_id DESC
+                     LIMIT 1
+                 ) a ON TRUE
                  LEFT JOIN LATERAL (
                      SELECT jsonb_agg(
                          jsonb_build_object(
@@ -165,7 +115,10 @@ async function getMyContributions(req, res) {
             data: contributionsResult.rows,
         });
     } catch (error) {
-        console.error("Failed to fetch contributions:", error);
+        console.error("Failed to fetch contributions:", {
+            code: typeof error?.code === "string" ? error.code : "CONTRIBUTIONS_LOOKUP_ERROR",
+            message: typeof error?.message === "string" ? error.message : "Unknown contributions lookup error",
+        });
         return res.status(500).json({
             status: "error",
             message: "Failed to fetch contributions due to a server error",

@@ -13,6 +13,12 @@ function FundOversight() {
         () => (viewingFund ? getFundAllocations(viewingFund.fund_id) : Promise.resolve([])),
         [viewingFund]
     );
+    const accountLabels = new Map();
+    allocationsApi.data?.forEach(({ account_id }) => {
+        if (!accountLabels.has(account_id)) {
+            accountLabels.set(account_id, `Account ${accountLabels.size + 1}`);
+        }
+    });
 
     const columns = [
         { key: "fund_name", header: "Fund Name" },
@@ -32,13 +38,13 @@ function FundOversight() {
     ];
 
     const allocationColumns = [
-        { key: "account_id", header: "Account" },
-        { key: "percentage", header: "Percentage", render: (row) => `${row.percentage}%` },
-        { key: "effective_from", header: "Effective From", render: (row) => new Date(row.effective_from).toLocaleDateString() },
+        { key: "account_id", header: "Account", render: (row) => accountLabels.get(row.account_id) || "Account" },
+        { key: "percentage", header: "Percentage", render: (row) => `${Number(row.percentage).toFixed(2)}%` },
+        { key: "effective_from", header: "Effective From", render: (row) => formatDate(row.effective_from) },
         {
             key: "effective_to",
             header: "Effective To",
-            render: (row) => (row.effective_to ? new Date(row.effective_to).toLocaleDateString() : "Ongoing"),
+            render: (row) => (row.effective_to ? formatDate(row.effective_to) : "Ongoing"),
         },
     ];
 
@@ -47,7 +53,9 @@ function FundOversight() {
             <div className="page-header">
                 <div>
                     <h1 className="page-title">Fund Oversight</h1>
-                    <p className="page-subtitle">Read-only view of all pension funds on the platform.</p>
+                    <p className="page-subtitle">
+                        View pension funds available within your authorized regulatory scope.
+                    </p>
                 </div>
             </div>
 
@@ -59,7 +67,7 @@ function FundOversight() {
                 refreshing={fundsApi.refreshing}
                 error={fundsApi.error}
                 onRetry={fundsApi.refetch}
-                emptyMessage="No funds have been created yet."
+                emptyMessage="No funds are currently available within your authorized scope. Contact the platform administrator if you require fund access."
             />
 
             <Modal open={Boolean(viewingFund)} title={`Allocations - ${viewingFund?.fund_name || ""}`} onClose={() => setViewingFund(null)}>
@@ -70,11 +78,18 @@ function FundOversight() {
                     loading={allocationsApi.loading}
                     refreshing={allocationsApi.refreshing}
                     error={allocationsApi.error}
+                    onRetry={allocationsApi.refetch}
                     emptyMessage="No allocations recorded for this fund."
                 />
             </Modal>
         </div>
     );
+}
+
+function formatDate(value) {
+    if (!value) return "Unavailable";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? "Unavailable" : date.toLocaleDateString();
 }
 
 export default FundOversight;

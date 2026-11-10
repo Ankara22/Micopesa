@@ -1,4 +1,5 @@
 import { Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import useApi from "../../hooks/useApi";
 import { getActivitySummary } from "../../services/adminService";
 import { useAuth } from "../../context/AuthContext";
@@ -9,13 +10,15 @@ import ErrorState from "../../components/ui/ErrorState";
 import "./admin-dashboard.css";
 
 const ADMIN_LINKS = [
-    { label: "User Management", description: "Review accounts and update status.", to: "/admin/users" },
-    { label: "Roles & Permissions", description: "Manage user roles and access.", to: "/admin/roles" },
-    { label: "System Settings", description: "Manage configured platform settings.", to: "/admin/settings" },
-    { label: "Notifications", description: "Compose and review notifications.", to: "/admin/notifications" },
-    { label: "System Activity", description: "Review recorded activity and sessions.", to: "/admin/activity" },
-    { label: "Audit Logs", description: "Review recorded system actions.", to: "/admin/audit-logs" },
-    { label: "Profile", description: "View your administrator profile.", to: "/admin/profile" },
+    { key: "analytics", to: "/admin/analytics" },
+    { key: "users", to: "/admin/users" },
+    { key: "kyc", to: "/admin/kyc-review" },
+    { key: "roles", to: "/admin/roles" },
+    { key: "settings", to: "/admin/settings" },
+    { key: "notifications", to: "/admin/notifications" },
+    { key: "activity", to: "/admin/activity" },
+    { key: "audit", to: "/admin/audit-logs" },
+    { key: "profile", to: "/admin/profile" },
 ];
 
 function getCount(value) {
@@ -24,6 +27,7 @@ function getCount(value) {
 }
 
 function AdminDashboard() {
+    const { t, i18n } = useTranslation();
     const { user } = useAuth();
     const summaryApi = useApi(getActivitySummary, []);
     const summary = summaryApi.data;
@@ -38,40 +42,42 @@ function AdminDashboard() {
         <div className="admin-dashboard">
             <header className="page-header admin-dashboard-header">
                 <div>
-                    <p className="admin-dashboard-eyebrow">Administration</p>
-                    <h1 className="page-title">{firstName ? `Welcome, ${firstName}` : "Admin Dashboard"}</h1>
-                    <p className="page-subtitle">A concise overview of platform accounts and recorded activity.</p>
+                    <p className="admin-dashboard-eyebrow">{t("dashboards.admin.eyebrow")}</p>
+                    <h1 className="page-title">
+                        {firstName ? t("dashboards.welcome", { name: firstName }) : t("dashboards.admin.title")}
+                    </h1>
+                    <p className="page-subtitle">{t("dashboards.admin.subtitle")}</p>
                 </div>
             </header>
 
-            <section className="admin-dashboard-section" aria-label="Platform summary">
-                {summaryApi.refreshing && <LoadingState message="Refreshing platform summary..." />}
+            <section className="admin-dashboard-section" aria-label={t("dashboards.admin.summary")}>
+                {summaryApi.refreshing && <LoadingState message={t("dashboards.admin.refreshing")} />}
                 {summaryApi.loading && summaryApi.data === null ? (
-                    <SkeletonLoader variant="metrics" count={4} label="Loading platform summary" />
+                    <SkeletonLoader variant="metrics" count={4} label={t("dashboards.admin.loading")} />
                 ) : summaryApi.error && summaryApi.data === null ? (
-                    <ErrorState message={summaryApi.error} onRetry={summaryApi.refetch} />
+                    <ErrorState title={t("dashboards.admin.errorTitle")} message={t("dashboards.admin.loadError")} onRetry={summaryApi.refetch} />
                 ) : (
                     <>
-                        {summaryApi.error && <ErrorState message={summaryApi.error} onRetry={summaryApi.refetch} />}
+                        {summaryApi.error && <ErrorState title={t("dashboards.admin.errorTitle")} message={t("dashboards.admin.loadError")} onRetry={summaryApi.refetch} />}
                         <div className="stat-card-grid admin-dashboard-stats">
-                            <StatCard label="Total users" value={totalUsers} />
-                            <StatCard label="Active users" value={activeUsers} />
-                            <StatCard label="Active USSD sessions" value={getCount(summary?.active_sessions)} />
-                            <StatCard label="Audit actions (24 hours)" value={auditActionCount} />
+                            <StatCard label={t("dashboards.admin.totalUsers")} value={new Intl.NumberFormat(i18n.resolvedLanguage === "sw" ? "sw-KE" : "en-KE").format(totalUsers)} />
+                            <StatCard label={t("dashboards.admin.activeUsers")} value={new Intl.NumberFormat(i18n.resolvedLanguage === "sw" ? "sw-KE" : "en-KE").format(activeUsers)} />
+                            <StatCard label={t("dashboards.admin.activeSessions")} value={new Intl.NumberFormat(i18n.resolvedLanguage === "sw" ? "sw-KE" : "en-KE").format(getCount(summary?.active_sessions))} />
+                            <StatCard label={t("dashboards.admin.auditActions")} value={new Intl.NumberFormat(i18n.resolvedLanguage === "sw" ? "sw-KE" : "en-KE").format(auditActionCount)} />
                         </div>
                     </>
                 )}
             </section>
 
-            <nav className="admin-dashboard-card admin-dashboard-navigation" aria-label="Administration pages">
-                <p className="admin-dashboard-eyebrow">Administration</p>
-                <h2>Go to a feature</h2>
+            <nav className="admin-dashboard-card admin-dashboard-navigation" aria-label={t("dashboards.admin.eyebrow")}>
+                <p className="admin-dashboard-eyebrow">{t("dashboards.admin.eyebrow")}</p>
+                <h2>{t("dashboards.admin.goToFeature")}</h2>
                 <ul>
                     {ADMIN_LINKS.map((item) => (
                         <li key={item.to}>
                             <Link to={item.to}>
-                                <span>{item.label}</span>
-                                <small>{item.description}</small>
+                                <span>{t(`dashboards.admin.links.${item.key}`)}</span>
+                                <small>{t(`dashboards.admin.links.${item.key}Description`)}</small>
                             </Link>
                         </li>
                     ))}

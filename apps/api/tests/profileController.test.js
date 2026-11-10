@@ -47,6 +47,19 @@ function createRequest(body, extra = {}) {
     return { user: { userId, role: "WORKER" }, body, headers: {}, ...extra };
 }
 
+function profileRecord(overrides = {}) {
+    return {
+        user_id: userId,
+        full_name: "Amina Worker",
+        email: "worker@example.test",
+        role: "WORKER",
+        date_of_birth: "1990-04-15",
+        national_id_last_four: "1234",
+        kyc_status: "PENDING",
+        ...overrides,
+    };
+}
+
 async function useTempPhotoDirectory() {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "micopesa-profile-test-"));
     temporaryDirectories.push(directory);
@@ -81,6 +94,62 @@ afterEach(async () => {
     ));
 });
 
+test("returns only the authenticated user's KYC fields with a masked National ID", async () => {
+    let queryText;
+    let queryValues;
+    pool.query = async (query, values) => {
+        queryText = query;
+        queryValues = values;
+        return { rows: [{
+            user_id: userId,
+            full_name: "Amina Worker",
+            role: "WORKER",
+            date_of_birth: "1990-04-15",
+            national_id_last_four: "1234",
+            kyc_status: "PENDING",
+        }] };
+    };
+
+    const res = createResponse();
+    await controller.getMyProfile(createRequest(
+        { user_id: "another-user" },
+        { params: { userId: "another-user" }, query: { userId: "another-user" } }
+    ), res);
+
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(queryValues, [userId]);
+    assert.match(queryText, /LEFT JOIN kyc_records kyc ON kyc\.user_id = users\.user_id/);
+    assert.match(queryText, /right\(kyc\.national_id, 4\) AS national_id_last_four/i);
+    assert.doesNotMatch(queryText, /(?:^|,)\s*kyc\.national_id\s*(?:,|FROM)/i);
+    assert.equal(res.body.data.user.date_of_birth, "1990-04-15");
+    assert.equal(res.body.data.user.masked_national_id, "****1234");
+    assert.equal(res.body.data.user.kyc_status, "PENDING");
+    assert.equal(Object.hasOwn(res.body.data.user, "national_id"), false);
+    assert.equal(Object.hasOwn(res.body.data.user, "duplicate_submission"), false);
+});
+
+test("profile retrieval remains successful when the authenticated user has no KYC record", async () => {
+    pool.query = async (_query, values) => {
+        assert.deepEqual(values, [userId]);
+        return { rows: [{
+            user_id: userId,
+            full_name: "Legacy Worker",
+            role: "WORKER",
+            date_of_birth: null,
+            masked_national_id: null,
+            kyc_status: null,
+        }] };
+    };
+    const res = createResponse();
+    await controller.getMyProfile(createRequest(null), res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.data.user.full_name, "Legacy Worker");
+    assert.equal(res.body.data.user.date_of_birth, null);
+    assert.equal(res.body.data.user.masked_national_id, null);
+    assert.equal(res.body.data.user.kyc_status, null);
+});
+
 test("updates name and stores a normalized new email as pending until verified", async () => {
     let queryText;
     let queryValues;
@@ -88,16 +157,18 @@ test("updates name and stores a normalized new email as pending until verified",
     pool.query = async (query, values) => {
         calls.push({ query, values });
         if (query.includes("SELECT user_id FROM users")) return { rows: [] };
-        queryText = query;
-        queryValues = values;
-        return { rows: [{
-            user_id: userId,
-            full_name: values[0],
+        if (query.startsWith("UPDATE users")) {
+            queryText = query;
+            queryValues = values;
+            return { rows: [{ user_id: userId }] };
+        }
+        assert.match(query, /LEFT JOIN kyc_records kyc/);
+        return { rows: [profileRecord({
+            full_name: "Amina Wanjiku",
             email: null,
-            pending_email: values[1],
+            pending_email: "amina@example.com",
             email_verified: false,
-            role: "WORKER",
-        }] };
+        })] };
     };
     authEmailService.enforceRequestLimits = async () => {};
     authEmailService.issueEmailToken = async () => {};
@@ -112,9 +183,14 @@ test("updates name and stores a normalized new email as pending until verified",
     assert.deepEqual(queryValues, ["Amina Wanjiku", "amina@example.com", userId]);
     assert.match(queryText, /WHERE user_id = \$3/);
     assert.match(queryText, /SET full_name = \$1, pending_email = \$2/);
+    assert.match(queryText, /RETURNING users\.user_id/);
+    assert.doesNotMatch(queryText, /kyc\./i);
     assert.doesNotMatch(queryText, /SET[^]*role\s*=/i);
     assert.equal(res.body.data.user.role, "WORKER");
     assert.equal(res.body.data.user.email_verified, false);
+    assert.equal(res.body.data.user.kyc_status, "PENDING");
+    assert.equal(res.body.data.user.masked_national_id, "****1234");
+    assert.equal(Object.hasOwn(res.body.data.user, "national_id"), false);
     assert.ok(calls.some(({ query }) => query.includes("pending_email")));
 });
 
@@ -123,15 +199,16 @@ test("keeps a failed SMTP email change pending and reports that verification was
     const logged = [];
     pool.query = async (query, values) => {
         if (query.includes("SELECT user_id FROM users")) return { rows: [] };
-        updateValues = values;
-        return { rows: [{
-            user_id: userId,
+        if (query.startsWith("UPDATE users")) {
+            updateValues = values;
+            return { rows: [{ user_id: userId }] };
+        }
+        return { rows: [profileRecord({
             full_name: "Amina Wanjiku",
             email: null,
             pending_email: "amina@example.com",
             email_verified: false,
-            role: "WORKER",
-        }] };
+        })] };
     };
     authEmailService.enforceRequestLimits = async () => {};
     authEmailService.issueEmailToken = async () => {
@@ -159,16 +236,15 @@ test("updates Bradley Omondi Juma without requiring or changing the email", asyn
     let queryText;
     let queryValues;
     pool.query = async (query, values) => {
-        queryText = query;
-        queryValues = values;
-        return {
-            rows: [{
-                user_id: userId,
-                full_name: "Bradley Omondi Juma",
-                email: "unchanged@example.com",
-                role: "WORKER",
-            }],
-        };
+        if (query.startsWith("UPDATE users")) {
+            queryText = query;
+            queryValues = values;
+            return { rows: [{ user_id: userId }] };
+        }
+        return { rows: [profileRecord({
+            full_name: "Bradley Omondi Juma",
+            email: "unchanged@example.com",
+        })] };
     };
 
     const res = createResponse();
@@ -195,8 +271,11 @@ for (const name of [
     test(`accepts a legitimate full name: ${JSON.stringify(name)}`, async () => {
         let queryValues;
         pool.query = async (_query, values) => {
-            queryValues = values;
-            return { rows: [{ user_id: userId, full_name: values[0], email: "unchanged@example.com" }] };
+            if (_query.startsWith("UPDATE users")) {
+                queryValues = values;
+                return { rows: [{ user_id: userId }] };
+            }
+            return { rows: [profileRecord({ full_name: queryValues[0] })] };
         };
         const res = createResponse();
         await controller.updateMyProfile(createRequest({ full_name: name }), res);
@@ -210,18 +289,17 @@ test("saves a normalized email for verification without changing the existing em
     let queryValues;
     pool.query = async (query, values) => {
         if (query.includes("SELECT user_id FROM users")) return { rows: [] };
-        queryText = query;
-        queryValues = values;
-        return {
-            rows: [{
-                user_id: userId,
-                full_name: "Amina O'Connor-Smith",
-                email: "old@example.com",
-                pending_email: "amina@example.com",
-                email_verified: false,
-                role: "WORKER",
-            }],
-        };
+        if (query.startsWith("UPDATE users")) {
+            queryText = query;
+            queryValues = values;
+            return { rows: [{ user_id: userId }] };
+        }
+        return { rows: [profileRecord({
+            full_name: "Amina O'Connor-Smith",
+            email: "old@example.com",
+            pending_email: "amina@example.com",
+            email_verified: false,
+        })] };
     };
     authEmailService.enforceRequestLimits = async () => {};
     authEmailService.issueEmailToken = async () => {};
@@ -304,17 +382,16 @@ test("photo upload validates content, uses an opaque server reference, and serve
             }
             if (query.startsWith("UPDATE users")) {
                 assert.match(query, /WHERE user_id = \$2/);
+                assert.match(query, /RETURNING users\.user_id/);
+                assert.doesNotMatch(query, /kyc\./i);
                 assert.equal(values[1], userId);
                 photoReference = values[0];
-                return {
-                    rows: [{
-                        user_id: userId,
-                        full_name: "Amina Worker",
-                        profile_photo_available: true,
-                    }],
-                };
+                return { rows: [{ user_id: userId }] };
             }
-            return { rows: [] };
+            assert.match(query, /LEFT JOIN kyc_records kyc/);
+            assert.match(query, /right\(kyc\.national_id, 4\) AS national_id_last_four/i);
+            assert.doesNotMatch(query, /(?:^|,)\s*kyc\.national_id\s*(?:,|FROM)/i);
+            return { rows: [profileRecord({ profile_photo_available: true })] };
         },
         release() {},
     });
@@ -324,6 +401,9 @@ test("photo upload validates content, uses an opaque server reference, and serve
         headers: { "content-type": "image/png" },
     }), uploadRes);
     assert.equal(uploadRes.statusCode, 200);
+    assert.equal(uploadRes.body.data.user.kyc_status, "PENDING");
+    assert.equal(uploadRes.body.data.user.masked_national_id, "****1234");
+    assert.equal(Object.hasOwn(uploadRes.body.data.user, "national_id"), false);
     assert.match(photoReference, /^[a-f0-9]{32}\.png$/);
     assert.deepEqual(await fs.readFile(path.join(directory, photoReference)), png);
 
@@ -356,7 +436,10 @@ test("replacing a photo removes only the current user's prior generated file", a
             }
             if (query.startsWith("UPDATE users")) {
                 newRef = values[0];
-                return { rows: [{ user_id: userId, profile_photo_available: true }] };
+                return { rows: [{ user_id: userId }] };
+            }
+            if (query.includes("LEFT JOIN kyc_records")) {
+                return { rows: [profileRecord({ profile_photo_available: true })] };
             }
             return { rows: [] };
         },

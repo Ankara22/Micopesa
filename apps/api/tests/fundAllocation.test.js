@@ -40,6 +40,7 @@ function createState() {
             ["manager-1", { user_id: "manager-1", role: "FUND_MANAGER", account_status: "ACTIVE" }],
             ["manager-2", { user_id: "manager-2", role: "FUND_MANAGER", account_status: "ACTIVE" }],
             ["regulator-1", { user_id: "regulator-1", role: "REGULATOR", account_status: "ACTIVE" }],
+            ["admin-1", { user_id: "admin-1", role: "ADMIN", account_status: "ACTIVE" }],
         ]),
         allocations: [],
         audit: [],
@@ -56,9 +57,33 @@ function createState() {
 
 function createApi(state) {
     pool.query = async (query, values = []) => {
-        if (query.includes("SELECT user_id, role, account_status, auth_version FROM users")) {
+        if (query.includes("SELECT kyc_status FROM kyc_records")) {
+            return { rows: [{ kyc_status: "VERIFIED" }] };
+        }
+        if (query.includes("SELECT user_id, role, account_status, auth_version")) {
             const user = state.users.get(values[0]);
             return { rows: user ? [user] : [] };
+        }
+        if (query.includes("LEFT JOIN LATERAL")) {
+            const [fundId, role] = values;
+            const fund = state.funds.find(({ fund_id }) => fund_id === fundId);
+            if (!fund || role === "REGULATOR") return { rows: [] };
+            const allocations = state.allocations
+                .filter(({ fund_id }) => fund_id === fundId)
+                .map((allocation) => ({ managed_by: fund.managed_by, ...allocation }));
+            return {
+                rows: allocations.length > 0
+                    ? allocations
+                    : [{
+                        managed_by: fund.managed_by,
+                        allocation_id: null,
+                        account_id: null,
+                        fund_id: null,
+                        percentage: null,
+                        effective_from: null,
+                        effective_to: null,
+                    }],
+            };
         }
         if (query.includes("SELECT managed_by FROM funds WHERE fund_id")) {
             const fund = state.funds.find(({ fund_id }) => fund_id === values[0]);
@@ -328,7 +353,7 @@ test("valid replacements total 100%, preserve older history, and reject same-day
         assert.equal(firstRows.reduce((total, row) => total + Number(row.allocation_percentage), 0), 100);
         assert.ok(state.lockQueries.some((query) => query.includes("FOR UPDATE")));
         assert.ok(state.lockQueries.some((query) => query.includes("FOR SHARE")));
-        assert.deepEqual(state.audit[0], ["worker-1", "UPDATE", "FUND_ALLOCATIONS", "account-1"]);
+        assert.deepEqual(state.audit[0], ["worker-1", "UPDATE", "FUND_ALLOCATIONS", "account-1", null]);
         assert.equal(state.allocations.find((row) => row.allocation_id === "historical").effective_to, yesterday);
         assert.ok(state.allocations.filter((row) => row.effective_from === today)
             .every((row) => row.account_id === "account-1"));
@@ -367,6 +392,61 @@ test("Fund Manager allocation endpoint exposes worker-saved dated records", asyn
         assert.equal(rows[0].percentage, "100.00");
         assert.equal(rows[0].effective_from, today);
         assert.equal(rows[0].effective_to, null);
+    });
+});
+
+test("workers can replace only their own allocation records even if another account is included in the request", async () => {
+    await withApi(async ({ api, state }) => {
+        state.allocations.push({
+            allocation_id: "other-worker-current",
+            account_id: "account-2",
+            fund_id: "fund-2",
+            percentage: "100.00",
+            effective_from: yesterday,
+            effective_to: null,
+        });
+        const otherWorkerBefore = structuredClone(state.allocations[0]);
+
+        const response = await api.request("/my-allocations", {
+            userId: "worker-1",
+            method: "PUT",
+            body: {
+                account_id: "account-2",
+                user_id: "worker-2",
+                allocations: [{ fund_id: "fund-1", allocation_percentage: "100.00" }],
+            },
+        });
+
+        assert.equal(response.status, 200);
+        assert.deepEqual(state.allocations[0], otherWorkerBefore);
+        assert.deepEqual(
+            state.allocations.filter(({ account_id }) => account_id === "account-1")
+                .map(({ fund_id, percentage }) => ({ fund_id, percentage })),
+            [{ fund_id: "fund-1", percentage: "100.00" }]
+        );
+        assert.equal(state.audit.length, 1);
+        assert.equal(state.audit[0][0], "worker-1");
+    });
+});
+
+test("Fund Managers can view allocation records only for funds they manage", async () => {
+    await withApi(async ({ api, state }) => {
+        state.allocations.push({
+            allocation_id: "manager-two-record",
+            account_id: "account-2",
+            fund_id: "fund-inactive",
+            percentage: "100.00",
+            effective_from: yesterday,
+            effective_to: null,
+        });
+
+        const authorized = await api.request("/fund-inactive/allocations", { userId: "manager-2" });
+        assert.equal(authorized.status, 200);
+        assert.equal((await authorized.json()).data[0].allocation_id, "manager-two-record");
+
+        const otherManager = await api.request("/fund-inactive/allocations", { userId: "manager-1" });
+        assert.equal(otherManager.status, 403);
+        assert.equal((await otherManager.json()).message, "You do not manage this fund");
     });
 });
 
@@ -508,5 +588,7 @@ test("unauthenticated and non-worker writes are rejected while manager and regul
             body: { fund_status: "SUSPENDED" },
         });
         assert.equal(regulatorManagerRoute.status, 403);
+        assert.equal((await api.request("/fund-1", { userId: "admin-1" })).status, 403);
+        assert.equal((await api.request("/fund-1/allocations", { userId: "admin-1" })).status, 403);
     });
 });

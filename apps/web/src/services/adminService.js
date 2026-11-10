@@ -1,5 +1,16 @@
 import api from "./api";
 
+// --- KYC review ---
+export async function listPendingKycApplications() {
+    const res = await api.get("/api/admin/kyc/pending");
+    return res.data.data;
+}
+
+export async function reviewKycApplication(kycId, status) {
+    const res = await api.patch(`/api/admin/kyc/${encodeURIComponent(kycId)}/review`, { status });
+    return res.data.data.submission;
+}
+
 // --- Users ---
 export async function listUsers() {
     const res = await api.get("/api/admin/users");
@@ -74,7 +85,57 @@ export async function listNotifications() {
 
 export async function createNotification(payload) {
     const res = await api.post("/api/admin/notifications", payload);
+    return res.data.data.notifications;
+}
+
+export async function sendAdminTestSms(requestId) {
+    const res = await api.post("/api/admin/notifications/test-sms", {
+        request_id: requestId,
+        confirmed: true,
+    });
+    return res.data.data.notifications;
+}
+
+export async function getExternalSmsAvailability() {
+    const res = await api.get("/api/admin/notifications/external-sms/availability");
+    return res.data.data;
+}
+
+export async function sendExternalRecipientSms(payload) {
+    const res = await api.post("/api/admin/notifications/external-sms", payload);
     return res.data.data.notification;
+}
+
+export async function listNotificationRecipients(search = "") {
+    const res = await api.get("/api/admin/notifications/recipients", {
+        params: { search },
+    });
+    return res.data.data;
+}
+
+export async function listRegulatorFundAssignments() {
+    const res = await api.get("/api/admin/regulator-fund-assignments");
+    return res.data.data;
+}
+
+export async function getRegulatorFundAssignmentCandidates() {
+    const res = await api.get("/api/admin/regulator-fund-assignments/candidates");
+    return res.data.data;
+}
+
+export async function assignRegulatorFund(regulatorId, fundId) {
+    const res = await api.post("/api/admin/regulator-fund-assignments", {
+        regulator_id: regulatorId,
+        fund_id: fundId,
+    });
+    return res.data.data;
+}
+
+export async function revokeRegulatorFund(regulatorId, fundId) {
+    const res = await api.delete(
+        `/api/admin/regulator-fund-assignments/${encodeURIComponent(regulatorId)}/${encodeURIComponent(fundId)}`
+    );
+    return res.data;
 }
 
 // --- Activity ---

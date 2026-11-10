@@ -2,9 +2,11 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const { CHECKS, runReconciliation, validateTestDatabaseUrl } = require("../scripts/financeReconcile");
 
-const TEST_DATABASE_URL = "postgresql://user:password@127.0.0.1:5432/micopesa_test";
+const TEST_DATABASE_URL = "postgres://127.0.0.1:5544/micopesa_registration_test";
+process.env.NODE_ENV = "test";
+
 const VERIFIED_TARGET = {
-    database_name: "micopesa_test",
+    database_name: "micopesa_registration_test",
     server_address: "127.0.0.1/32",
     read_only: "on",
 };
@@ -53,20 +55,21 @@ function makePoolClass(options = {}) {
     };
 }
 
-test("accepts only local micopesa_test database URLs", () => {
-    assert.doesNotThrow(() => validateTestDatabaseUrl(TEST_DATABASE_URL));
+test("accepts only the disposable test database target in test mode", () => {
+    const environment = { NODE_ENV: "test" };
+    assert.doesNotThrow(() => validateTestDatabaseUrl(TEST_DATABASE_URL, environment));
     for (const url of [
-        "postgresql://user:password@example.com:5432/micopesa_test",
-        "postgresql://user:password@127.0.0.1:5432/production",
-        "postgresql://user:password@127.0.0.1:5432/micopesa_test?hostaddr=203.0.113.2",
-        "postgresql://user:password@127.0.0.1:5432/micopesa_test?host=",
-        "postgresql://user:password@127.0.0.1:5432/micopesa_test?service=production",
+        "postgres://example.com:5544/micopesa_registration_test",
+        "postgres://127.0.0.1:5433/micopesa_registration_test",
+        "postgres://127.0.0.1:5432/micopesa_registration_test",
+        "postgres://127.0.0.1:5544/micopesa_test",
+        "postgres://127.0.0.1:5544/micopesa_registration_test?hostaddr=203.0.113.2",
         "not a database url",
     ]) {
-        assert.throws(() => validateTestDatabaseUrl(url));
+        assert.throws(() => validateTestDatabaseUrl(url, environment));
     }
+    assert.throws(() => validateTestDatabaseUrl(TEST_DATABASE_URL, {}), /NODE_ENV=test/);
 });
-
 test("reports each mocked check's count and label independently", async () => {
     const rowsByCheck = Object.fromEntries(CHECKS.map(({ id }, index) => [
         id,
@@ -77,7 +80,7 @@ test("reports each mocked check's count and label independently", async () => {
     const report = await runReconciliation({ connectionString: TEST_DATABASE_URL, PoolClass });
 
     assert.deepEqual(report.database_target, {
-        database: "micopesa_test",
+        database: "micopesa_registration_test",
         host: "local",
         read_only_transaction: true,
     });
@@ -117,10 +120,10 @@ test("rejects an unsafe URL before constructing a pool", async () => {
 
     await assert.rejects(
         runReconciliation({
-            connectionString: "postgresql://user:password@db.example.com:5432/micopesa_test",
+            connectionString: "postgresql://user:password@db.example.com:5544/micopesa_registration_test",
             PoolClass: ForbiddenPool,
         }),
-        /only to local micopesa_test/
+        /127\.0\.0\.1/
     );
     assert.equal(poolConstructed, false);
 });
@@ -132,7 +135,7 @@ test("rejects an unsafe connected target before report queries and cleans up", a
 
     await assert.rejects(
         runReconciliation({ connectionString: TEST_DATABASE_URL, PoolClass }),
-        /did not verify as a local, read-only micopesa_test/
+        /did not verify as a read-only micopesa_registration_test/
     );
 
     const pool = PoolClass.lastInstance;

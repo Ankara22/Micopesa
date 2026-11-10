@@ -12,11 +12,14 @@ const {
 const originalConnect = pool.connect;
 const originalHash = bcrypt.hash;
 const originalSendSms = smsService.sendSms;
+const originalSmsProvider = process.env.TRANSACTIONAL_SMS_PROVIDER;
 
 after(() => {
     pool.connect = originalConnect;
     bcrypt.hash = originalHash;
     smsService.sendSms = originalSendSms;
+    if (originalSmsProvider === undefined) delete process.env.TRANSACTIONAL_SMS_PROVIDER;
+    else process.env.TRANSACTIONAL_SMS_PROVIDER = originalSmsProvider;
 });
 
 function response() {
@@ -44,13 +47,18 @@ test("normalizes valid Kenyan phone numbers and rejects unsupported formats", ()
 test("creates staff with a temporary password, activates only after SMS acceptance, and audits the actor", async () => {
     const calls = [];
     let active = false;
+    let smsRequest;
+    process.env.TRANSACTIONAL_SMS_PROVIDER = "MOBILE_SASA";
     bcrypt.hash = async (value) => {
         assert.ok(value.length >= 20);
         return "temporary-password-hash";
     };
-    smsService.sendSms = async ({ to, message }) => {
+    smsService.sendSms = async ({ to, message, trackingId }, options) => {
         assert.equal(to, "+254712345678");
         assert.match(message, /Temporary password:/);
+        assert.match(trackingId, /^[0-9a-f-]{36}$/i);
+        assert.equal(options.provider, "MOBILE_SASA");
+        smsRequest = { trackingId, provider: options.provider };
         return { accepted: true, messageId: "provider-message-1" };
     };
     pool.connect = async () => ({
@@ -91,15 +99,22 @@ test("creates staff with a temporary password, activates only after SMS acceptan
     assert.equal(res.body.data.user.account_status, "ACTIVE");
     assert.equal(active, true);
     const createAudit = calls.find(({ query, values }) =>
-        query.includes("INSERT INTO audit_logs") && values[2] === "STAFF_ONBOARDING"
+        query.includes("INSERT INTO audit_logs") &&
+        values[2] === "STAFF_ONBOARDING" &&
+        values[4]?.includes('"sms_provider"')
     );
     assert.ok(createAudit);
     assert.equal(createAudit.values[0], "ADMIN-USER-12345678901234567890");
+    const auditDetails = JSON.parse(createAudit.values[4]);
+    assert.equal(auditDetails.sms_provider, smsRequest.provider);
+    assert.equal(auditDetails.sms_tracking_id, smsRequest.trackingId);
+    assert.equal(auditDetails.provider_message_id, "provider-message-1");
     assert.equal(JSON.stringify(res.body).includes("temporary-password-hash"), false);
 });
 
 test("leaves a staff account inactive when the SMS provider rejects onboarding", async () => {
     let insertCount = 0;
+    let loggedFailure;
     bcrypt.hash = async () => "temporary-password-hash";
     smsService.sendSms = async () => {
         const error = new Error("provider rejection");
@@ -119,7 +134,9 @@ test("leaves a staff account inactive when the SMS provider rejects onboarding",
         release() {},
     });
     const originalConsoleError = console.error;
-    console.error = () => {};
+    console.error = (message) => {
+        loggedFailure = message;
+    };
     try {
         const res = response();
         await createStaff({
@@ -130,16 +147,50 @@ test("leaves a staff account inactive when the SMS provider rejects onboarding",
         assert.equal(res.body.data.sms_accepted, false);
         assert.match(res.body.message, /remains inactive/i);
         assert.equal(insertCount, 1);
+        assert.doesNotMatch(loggedFailure, /userId|B{25}|provider rejection/i);
     } finally {
         console.error = originalConsoleError;
     }
 });
 
+test("does not send a duplicate onboarding SMS when staff creation conflicts", async () => {
+    let smsCalls = 0;
+    bcrypt.hash = async () => "temporary-password-hash";
+    smsService.sendSms = async () => {
+        smsCalls += 1;
+        return { accepted: true, messageId: "unexpected" };
+    };
+    pool.connect = async () => ({
+        async query(query) {
+            if (query === "BEGIN" || query === "ROLLBACK") return { rows: [] };
+            if (query.includes("INSERT INTO users")) {
+                const error = new Error("duplicate account");
+                error.code = "23505";
+                throw error;
+            }
+            assert.fail(`Unexpected query: ${query}`);
+        },
+        release() {},
+    });
+
+    const res = response();
+    await createStaff({
+        user: { userId: "admin" },
+        body: { full_name: "New Staff", phone: "+254712345678", role: "REGULATOR" },
+    }, res);
+
+    assert.equal(res.statusCode, 409);
+    assert.equal(smsCalls, 0);
+});
+
 test("reissues credentials for a pending staff account without creating a duplicate user", async () => {
     const queries = [];
+    process.env.TRANSACTIONAL_SMS_PROVIDER = "MOBILE_SASA";
     bcrypt.hash = async () => "replacement-password-hash";
-    smsService.sendSms = async ({ to }) => {
+    smsService.sendSms = async ({ to, trackingId }, options) => {
         assert.equal(to, "+254712345678");
+        assert.match(trackingId, /^[0-9a-f-]{36}$/i);
+        assert.equal(options.provider, "MOBILE_SASA");
         return { accepted: true, messageId: "retry-message" };
     };
     pool.connect = async () => ({

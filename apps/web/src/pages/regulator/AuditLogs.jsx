@@ -7,6 +7,7 @@ function AuditLogs() {
             title="Operational Audit Logs"
             subtitle="Recent platform activity relevant to compliance oversight."
             fetcher={getOperationalLogs}
+            redacted
         />
     );
 }

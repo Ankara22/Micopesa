@@ -83,4 +83,36 @@ describe("worker language switching", () => {
         expect(screen.getByRole("button", { name: "Weka mchango unaosubiri" })).toBeInTheDocument();
         await waitFor(() => expect(window.localStorage.getItem("micopesa.language")).toBe("sw"));
     });
+
+    it("labels simulator references as synthetic and never infers provider from the reference", async () => {
+        mocks.getMyContributions.mockResolvedValue([{
+            contribution_id: "contribution-1",
+            created_at: "2026-10-12T10:00:00.000Z",
+            amount: "25.00",
+            channel: "MPESA",
+            contribution_status: "COMPLETED",
+            transaction_status: "COMPLETED",
+            payment_provider: "SIMULATED",
+            checkout_request_id: "SIM0123456789ABCDEF012345",
+            mpesa_result_description: "SIMULATED: no real money was transferred.",
+            fund_allocations: [],
+        }, {
+            contribution_id: "contribution-2",
+            created_at: "2026-10-11T10:00:00.000Z",
+            amount: "10.00",
+            channel: "MPESA",
+            contribution_status: "PENDING",
+            transaction_status: "PENDING",
+            payment_provider: "UNRESOLVED",
+            checkout_request_id: "SIM0123456789ABCDEF012346",
+            mpesa_result_description: "",
+            fund_allocations: [],
+        }]);
+
+        renderContributionsRoute();
+
+        expect(await screen.findByText(/SIMULATED — no real money transferred/)).toBeInTheDocument();
+        expect(screen.getByText(/Synthetic reference: SIM0123456789ABCDEF012345/)).toBeInTheDocument();
+        expect(screen.queryByText(/Synthetic reference: SIM0123456789ABCDEF012346/)).not.toBeInTheDocument();
+    });
 });

@@ -6,6 +6,11 @@
   "scripts": {
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
+    "test": "npm run test:unit",
+    "test:unit": "node ../../tests/scripts/runApiUnitTests.js",
+    "test:integration": "node ../../tests/scripts/runIntegrationTests.js",
+    "test:integration:kyc": "node --test tests/kycUniquenessPostgres.integration.test.js",
+    "test:db": "node ../../tests/scripts/runDatabaseTests.js",
     "email:diagnostic": "node scripts/emailDiagnostic.js"
   },
   "keywords": [],
@@ -16,11 +21,15 @@
     "bcrypt": "^6.0.0",
     "cors": "^2.8.6",
     "dotenv": "^18.0.1",
+    "exceljs": "^4.4.0",
     "express": "^5.2.1",
     "jsonwebtoken": "^9.0.3",
     "nodemailer": "^10.2.1",
+    "pdfkit": "^0.16.0",
     "pg": "^8.23.0",
-    "sharp": "^0.34.5"
+    "sanitize-html": "^2.18.1",
+    "sharp": "^0.34.5",
+    "web-push": "^3.6.7"
   },
   "devDependencies": {
     "nodemon": "^3.1.14"

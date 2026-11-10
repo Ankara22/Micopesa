@@ -1,167 +1,208 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ToastProvider } from '../ui/ToastContext'
-import DepositModal from './DepositModal'
-import { getStkPushStatus, initiateStkPush } from '../../services/mpesaApi'
-import i18n from '../../i18n'
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ToastProvider } from "../ui/ToastContext";
+import DepositModal from "./DepositModal";
+import {
+    confirmSimulatedPayment,
+    getPaymentProvider,
+    getStkPushStatus,
+    getStkPushStatusByIdempotencyKey,
+    initiateStkPush,
+} from "../../services/mpesaApi";
+import { getMyBalance, getMyContributions } from "../../services/accountService";
+import i18n from "../../i18n";
 
-vi.mock('../../services/mpesaApi', () => ({
-  getStkPushStatus: vi.fn(),
-  initiateStkPush: vi.fn(),
-}))
+vi.mock("../../services/mpesaApi", () => ({
+    confirmSimulatedPayment: vi.fn(),
+    getPaymentProvider: vi.fn(),
+    getStkPushStatus: vi.fn(),
+    getStkPushStatusByIdempotencyKey: vi.fn(),
+    initiateStkPush: vi.fn(),
+}));
 
-describe('DepositModal', () => {
-  afterEach(async () => {
-    cleanup()
-    vi.useRealTimers()
-    await i18n.changeLanguage('en')
-  })
+vi.mock("../../services/accountService", () => ({
+    getMyBalance: vi.fn(),
+    getMyContributions: vi.fn(),
+}));
 
-  beforeEach(() => {
-    vi.clearAllMocks()
-  })
+describe("DepositModal", () => {
+    afterEach(async () => {
+        cleanup();
+        window.sessionStorage.removeItem("micopesa.mpesa.lastPaymentAttempt");
+        window.sessionStorage.removeItem("micopesa.mpesa.paymentIdempotencyKey");
+        await i18n.changeLanguage("en");
+    });
 
-  it('submits an STK request and shows pending confirmation without claiming payment success', async () => {
-    initiateStkPush.mockResolvedValue({
-      transaction_id: 'transaction-test',
-      checkout_request_id: 'checkout-test',
-      transaction_status: 'PENDING',
-      amount: 2500,
-    })
-    render(
-      <ToastProvider>
-        <DepositModal open onClose={vi.fn()} />
-      </ToastProvider>,
-    )
+    beforeEach(() => {
+        vi.clearAllMocks();
+        window.sessionStorage.removeItem("micopesa.mpesa.lastPaymentAttempt");
+        window.sessionStorage.removeItem("micopesa.mpesa.paymentIdempotencyKey");
+        getPaymentProvider.mockResolvedValue({ provider: "DARAJA", simulator_enabled: false });
+        getStkPushStatus.mockResolvedValue({});
+        getStkPushStatusByIdempotencyKey.mockResolvedValue({});
+        getMyBalance.mockResolvedValue({ current_balance: 0 });
+        getMyContributions.mockResolvedValue([]);
+    });
 
-    fireEvent.change(screen.getByLabelText('Amount (KES)'), { target: { value: '2500' } })
-    fireEvent.change(screen.getByLabelText('M-Pesa phone number'), { target: { value: '07000000004' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Send STK Push' }))
+    it("keeps payment initiation disabled for real and simulated providers", async () => {
+        render(
+            <ToastProvider>
+                <DepositModal open onClose={vi.fn()} />
+            </ToastProvider>,
+        );
 
-    await waitFor(() => expect(initiateStkPush).toHaveBeenCalledWith({
-      amount: 2500,
-      phoneNumber: '07000000004',
-    }))
-    expect(await screen.findByRole('heading', { name: 'Awaiting PIN entry...' })).toBeInTheDocument()
-    expect(screen.getByText(/Enter your M-Pesa PIN/)).toBeInTheDocument()
-    expect(screen.queryByText('Deposit Successful!')).not.toBeInTheDocument()
-    expect(getStkPushStatus).not.toHaveBeenCalled()
-  })
+        expect(await screen.findByText(
+            "Deposits are temporarily unavailable. No real or simulated payment will be started.",
+        )).toBeInTheDocument();
 
-  it('reports completion to the dashboard only after the status API confirms it', async () => {
-    const onCompleted = vi.fn()
-    initiateStkPush.mockResolvedValue({
-      transaction_id: 'transaction-verified',
-      checkout_request_id: 'checkout-verified',
-      transaction_status: 'PENDING',
-      amount: 2500,
-    })
-    getStkPushStatus.mockResolvedValue({
-      transaction_id: 'transaction-verified',
-      checkout_request_id: 'checkout-verified',
-      transaction_status: 'COMPLETED',
-      amount: 2500,
-    })
-    vi.useFakeTimers()
-    render(
-      <ToastProvider>
-        <DepositModal open onClose={vi.fn()} onCompleted={onCompleted} />
-      </ToastProvider>,
-    )
+        const amount = screen.getByLabelText("Amount (KES)");
+        const phone = screen.getByLabelText("M-Pesa phone number");
+        const submit = screen.getByRole("button", { name: "Deposits unavailable" });
 
-    fireEvent.change(screen.getByLabelText('Amount (KES)'), { target: { value: '2500' } })
-    fireEvent.change(screen.getByLabelText('M-Pesa phone number'), { target: { value: '07000000004' } })
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Send STK Push' }))
-      await Promise.resolve()
-    })
+        expect(amount).toBeDisabled();
+        expect(phone).toBeDisabled();
+        expect(submit).toBeDisabled();
 
-    expect(onCompleted).not.toHaveBeenCalled()
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(3000)
-    })
+        fireEvent.submit(amount.closest("form"));
+        await waitFor(() => {
+            expect(initiateStkPush).not.toHaveBeenCalled();
+            expect(confirmSimulatedPayment).not.toHaveBeenCalled();
+        });
+    });
 
-    expect(getStkPushStatus).toHaveBeenCalledWith('checkout-verified')
-    expect(onCompleted).toHaveBeenCalledOnce()
-    expect(onCompleted).toHaveBeenCalledWith(expect.objectContaining({
-      transaction_status: 'COMPLETED',
-      transaction_id: 'transaction-verified',
-    }))
-    expect(screen.getByRole('heading', { name: 'Deposit Successful!' })).toBeInTheDocument()
-  })
+    it("restores a saved attempt and checks its status without initiating payment", async () => {
+        window.sessionStorage.setItem("micopesa.mpesa.lastPaymentAttempt", "attempt-recovery-1");
+        getStkPushStatus.mockResolvedValue({
+            attempt_id: "attempt-recovery-1",
+            attempt_status: "PENDING",
+            transaction_status: "PENDING",
+            contribution_status: "PENDING",
+            payment_provider: "DARAJA",
+        });
 
-  it('does not report timeout status as a completed deposit', async () => {
-    const onCompleted = vi.fn()
-    initiateStkPush.mockResolvedValue({
-      transaction_id: 'transaction-timeout',
-      checkout_request_id: 'checkout-timeout',
-      transaction_status: 'PENDING',
-      amount: 2500,
-    })
-    getStkPushStatus.mockResolvedValue({
-      transaction_id: 'transaction-timeout',
-      checkout_request_id: 'checkout-timeout',
-      transaction_status: 'TIMED_OUT',
-      amount: 2500,
-      mpesa_result_description: 'No response from user.',
-    })
-    vi.useFakeTimers()
-    render(
-      <ToastProvider>
-        <DepositModal open onClose={vi.fn()} onCompleted={onCompleted} />
-      </ToastProvider>,
-    )
+        render(
+            <ToastProvider>
+                <DepositModal open onClose={vi.fn()} />
+            </ToastProvider>,
+        );
 
-    fireEvent.change(screen.getByLabelText('Amount (KES)'), { target: { value: '2500' } })
-    fireEvent.change(screen.getByLabelText('M-Pesa phone number'), { target: { value: '07000000004' } })
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Send STK Push' }))
-      await Promise.resolve()
-    })
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(3000)
-    })
+        await waitFor(() => {
+            expect(getStkPushStatus).toHaveBeenCalledWith("attempt-recovery-1");
+        });
+        expect(initiateStkPush).not.toHaveBeenCalled();
+        expect(confirmSimulatedPayment).not.toHaveBeenCalled();
+        expect(await screen.findByText(
+            "M-Pesa did not return a definitive response. The transaction remains pending; no balance has been credited. Check your contribution history before retrying.",
+        )).toBeInTheDocument();
+    });
 
-    expect(onCompleted).not.toHaveBeenCalled()
-    expect(screen.getByRole('heading', { name: 'Payment Timed Out' })).toBeInTheDocument()
-    expect(screen.queryByRole('heading', { name: 'Deposit Successful!' })).not.toBeInTheDocument()
-  })
+    it("does not report success while transaction and contribution status disagree", async () => {
+        const onCompleted = vi.fn();
+        window.sessionStorage.setItem("micopesa.mpesa.lastPaymentAttempt", "attempt-pending-settlement");
+        getStkPushStatus.mockResolvedValue({
+            attempt_id: "attempt-pending-settlement",
+            attempt_status: "PENDING",
+            transaction_status: "COMPLETED",
+            contribution_status: "PENDING",
+            settlement_confirmed: false,
+            payment_provider: "DARAJA",
+        });
 
-  it('updates the deposit form and pending status in Kiswahili without losing entered values', async () => {
-    initiateStkPush.mockResolvedValue({
-      transaction_id: 'transaction-sw',
-      checkout_request_id: 'checkout-sw',
-      transaction_status: 'PENDING',
-      confirmation_pending: true,
-      amount: 2500,
-    })
-    render(
-      <ToastProvider>
-        <DepositModal open onClose={vi.fn()} />
-      </ToastProvider>,
-    )
+        render(
+            <ToastProvider>
+                <DepositModal open onClose={vi.fn()} onCompleted={onCompleted} />
+            </ToastProvider>,
+        );
 
-    fireEvent.change(screen.getByLabelText('Amount (KES)'), { target: { value: '2500' } })
-    fireEvent.change(screen.getByLabelText('M-Pesa phone number'), { target: { value: '07000000004' } })
-    await act(async () => {
-      await i18n.changeLanguage('sw')
-    })
+        expect(await screen.findByText(
+            "The payment and contribution records do not yet agree. No success is shown while confirmation is pending.",
+        )).toBeInTheDocument();
+        expect(onCompleted).not.toHaveBeenCalled();
+        expect(getMyBalance).not.toHaveBeenCalled();
+        expect(getMyContributions).not.toHaveBeenCalled();
+        expect(initiateStkPush).not.toHaveBeenCalled();
+        expect(confirmSimulatedPayment).not.toHaveBeenCalled();
+    });
 
-    expect(screen.getByRole('heading', { name: 'Ongeza kwenye akaunti yako ya pensheni' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Funga' })).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('tab', { name: 'Uhamisho wa benki / Paybill' }))
-    expect(screen.getByRole('heading', { name: 'Kuweka pesa kupitia benki bado hakupatikani' })).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('tab', { name: 'M-Pesa STK Push' }))
-    expect(screen.getByLabelText('Kiasi (KES)')).toHaveValue(2500)
-    expect(screen.getByLabelText('Nambari ya simu ya M-Pesa')).toHaveValue('07000000004')
+    it("reports completion only after a saved attempt is confirmed as fully settled", async () => {
+        const onCompleted = vi.fn();
+        const settledPayment = {
+            attempt_id: "attempt-settled",
+            attempt_status: "COMPLETED",
+            transaction_id: "transaction-settled",
+            transaction_status: "COMPLETED",
+            contribution_status: "COMPLETED",
+            settlement_confirmed: true,
+            payment_provider: "DARAJA",
+        };
+        window.sessionStorage.setItem("micopesa.mpesa.lastPaymentAttempt", "attempt-settled");
+        getStkPushStatus.mockResolvedValue(settledPayment);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Tuma ombi la STK Push' }))
-    await waitFor(() => expect(initiateStkPush).toHaveBeenCalledWith({
-      amount: 2500,
-      phoneNumber: '07000000004',
-    }))
-    expect(await screen.findByRole('heading', { name: 'Inasubiri uthibitisho wa mtoa huduma...' })).toBeInTheDocument()
-    expect(screen.getByText(/hakuna pesa iliyoongezwa kwenye salio/i)).toBeInTheDocument()
-    expect(getStkPushStatus).not.toHaveBeenCalled()
-  })
-})
+        render(
+            <ToastProvider>
+                <DepositModal open onClose={vi.fn()} onCompleted={onCompleted} />
+            </ToastProvider>,
+        );
+
+        await waitFor(() => {
+            expect(onCompleted).toHaveBeenCalledWith(
+                settledPayment,
+                { balance: { current_balance: 0 }, contributions: [] },
+            );
+        });
+        expect(await screen.findByText("Deposit successful.")).toBeInTheDocument();
+        expect(initiateStkPush).not.toHaveBeenCalled();
+        expect(confirmSimulatedPayment).not.toHaveBeenCalled();
+    });
+
+    it("shows a generic expired-session message when saved-attempt lookup fails", async () => {
+        window.sessionStorage.setItem("micopesa.mpesa.lastPaymentAttempt", "attempt-expired-session");
+        getStkPushStatus.mockRejectedValue(Object.assign(new Error("sensitive provider details"), {
+            status: 401,
+        }));
+
+        render(
+            <ToastProvider>
+                <DepositModal open onClose={vi.fn()} />
+            </ToastProvider>,
+        );
+
+        expect(await screen.findByText(
+            "Your session has expired. Sign in again before checking this payment.",
+        )).toBeInTheDocument();
+        expect(screen.queryByText("sensitive provider details")).not.toBeInTheDocument();
+        expect(initiateStkPush).not.toHaveBeenCalled();
+        expect(confirmSimulatedPayment).not.toHaveBeenCalled();
+    });
+
+    it("restores an attempt by saved idempotency key without submitting a new request", async () => {
+        window.sessionStorage.setItem("micopesa.mpesa.paymentIdempotencyKey", "saved-key-1");
+        getStkPushStatusByIdempotencyKey.mockResolvedValue({
+            attempt_id: "attempt-by-key",
+            attempt_status: "PENDING",
+            transaction_status: "PENDING",
+            contribution_status: "PENDING",
+            payment_provider: "DARAJA",
+        });
+        getStkPushStatus.mockResolvedValue({
+            attempt_id: "attempt-by-key",
+            attempt_status: "PENDING",
+            transaction_status: "PENDING",
+            contribution_status: "PENDING",
+            payment_provider: "DARAJA",
+        });
+
+        render(
+            <ToastProvider>
+                <DepositModal open onClose={vi.fn()} />
+            </ToastProvider>,
+        );
+
+        await waitFor(() => {
+            expect(getStkPushStatusByIdempotencyKey).toHaveBeenCalledWith("saved-key-1");
+            expect(getStkPushStatus).toHaveBeenCalledWith("attempt-by-key");
+        });
+        expect(initiateStkPush).not.toHaveBeenCalled();
+        expect(confirmSimulatedPayment).not.toHaveBeenCalled();
+    });
+});

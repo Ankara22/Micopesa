@@ -1,53 +1,58 @@
-import { lazy, Suspense, useCallback } from "react";
+import { lazy, Suspense, useCallback, useState } from "react";
 import { Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import useApi from "../../hooks/useApi";
-import { listFunds, getFundAllocations } from "../../services/fundService";
+import { getReportAnalytics } from "../../services/reportsApi";
 import ErrorState from "../../components/ui/ErrorState";
 import LoadingState from "../../components/ui/LoadingState";
 import SkeletonLoader from "../../components/ui/SkeletonLoader";
-import "./fund-manager-dashboard.css";
+import { StatCard } from "../../components/ui/Card";
+import { formatKes } from "../../i18n/formatters";
+import AnalyticsDateFilters from "../analytics/AnalyticsDateFilters";
+import "../analytics/analytics.css";
 
-const FundManagerCharts = lazy(() => import("./FundManagerCharts"));
+const FundManagerAnalyticsCharts = lazy(() => import("../analytics/AnalyticsCharts")
+    .then(({ FundManagerAnalyticsCharts: Charts }) => ({ default: Charts })));
 
 function FundAnalytics() {
-    const fetchChartData = useCallback(async () => {
-        const funds = await listFunds();
-        const allocationEntries = await Promise.all(
-            funds.map(async (fund) => ({
-                fund,
-                allocations: await getFundAllocations(fund.fund_id),
-            }))
-        );
-        return { funds, allocationEntries };
-    }, []);
-    const chartApi = useApi(fetchChartData, []);
-    const funds = chartApi.data?.funds || [];
-    const allocationEntries = chartApi.data?.allocationEntries || [];
+    const { t, i18n } = useTranslation();
+    const [filters, setFilters] = useState({ start_date: "", end_date: "" });
+    const fetchAnalytics = useCallback(() => getReportAnalytics(filters), [filters]);
+    const analyticsApi = useApi(fetchAnalytics, [fetchAnalytics]);
+    const trends = analyticsApi.data?.contribution_trends || [];
+    const summary = analyticsApi.data?.fund_summary || {};
+    const fundPerformance = analyticsApi.data?.fund_performance || [];
+    const settledTotal = fundPerformance.reduce((total, fund) => total + (Number(fund.settled_contributions) || 0), 0);
 
     return (
-        <div className="fund-manager-dashboard fund-manager-analytics">
-            <header className="page-header fund-manager-dashboard-header">
+        <div className="role-analytics-page">
+            <header className="page-header">
                 <div>
-                    <p className="fund-manager-eyebrow">Fund analytics</p>
-                    <h1 className="page-title">Fund Analytics</h1>
-                    <p className="page-subtitle">
-                        Explore currently effective allocation shares and history from recorded dated allocation entries.
-                        Percentages are not asset values or investment performance.
-                    </p>
+                    <h1 className="page-title">{t("analytics.managerTitle")}</h1>
+                    <p className="page-subtitle">{t("analytics.managerSubtitle")}</p>
                 </div>
             </header>
 
-            <p><Link className="fund-manager-link" to="/manager/funds">Manage funds</Link></p>
-            {chartApi.refreshing && <LoadingState message="Refreshing fund analytics..." />}
-            {chartApi.loading && chartApi.data === null ? (
-                <SkeletonLoader variant="chart" label="Loading fund analytics" />
-            ) : chartApi.error && chartApi.data === null ? (
-                <ErrorState message={chartApi.error} onRetry={chartApi.refetch} />
+            <p><Link className="analytics-navigation" to="/manager/funds">{t("analytics.manageFunds")}</Link></p>
+            <AnalyticsDateFilters filters={filters} setFilters={setFilters} />
+            {analyticsApi.refreshing && <LoadingState message={t("analytics.refreshingManager")} />}
+            {analyticsApi.loading && analyticsApi.data === null ? (
+                <SkeletonLoader variant="chart" count={4} label={t("analytics.loadingManager")} />
+            ) : analyticsApi.error && analyticsApi.data === null ? (
+                <ErrorState title={t("analytics.errorTitle")} message={t("analytics.managerLoadError")} onRetry={analyticsApi.refetch} />
             ) : (
                 <>
-                    {chartApi.error && <ErrorState message={chartApi.error} onRetry={chartApi.refetch} />}
-                    <Suspense fallback={<SkeletonLoader variant="chart" label="Loading fund charts" />}>
-                        <FundManagerCharts funds={funds} allocationEntries={allocationEntries} />
+                    {analyticsApi.error && <ErrorState title={t("analytics.errorTitle")} message={t("analytics.managerLoadError")} onRetry={analyticsApi.refetch} />}
+                    <div className="stat-card-grid">
+                        <StatCard label={t("analytics.managerFunds")} value={summary.managed_funds ?? 0} />
+                        <StatCard label={t("analytics.allocatedWorkers")} value={summary.allocated_workers ?? 0} />
+                        <StatCard
+                            label={t("analytics.settledFundTotal")}
+                            value={formatKes(settledTotal, i18n.resolvedLanguage) || "KSh 0.00"}
+                        />
+                    </div>
+                    <Suspense fallback={<SkeletonLoader variant="chart" count={4} label={t("analytics.chartLoading")} />}>
+                        <FundManagerAnalyticsCharts trends={trends} performance={fundPerformance} />
                     </Suspense>
                 </>
             )}

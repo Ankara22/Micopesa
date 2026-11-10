@@ -7,6 +7,16 @@ const { writeAuditLog } = require("../utils/auditLog");
 const STAFF_ROLES = ["FUND_MANAGER", "REGULATOR", "ADMIN"];
 const SALT_ROUNDS = 10;
 
+function getTransactionalSmsProvider(environment = process.env) {
+    const provider = environment.TRANSACTIONAL_SMS_PROVIDER?.trim().toUpperCase() || "AFRICAS_TALKING";
+    if (provider !== "AFRICAS_TALKING" && provider !== "MOBILE_SASA") {
+        const error = new Error("The configured transactional SMS provider is unsupported.");
+        error.code = "SMS_CONFIGURATION_MISSING";
+        throw error;
+    }
+    return provider;
+}
+
 function normalizeKenyanPhone(value) {
     if (typeof value !== "string") return null;
     let phone = value.replace(/[\s()-]/g, "");
@@ -19,10 +29,9 @@ function generateTemporaryPassword() {
     return crypto.randomBytes(18).toString("base64url");
 }
 
-function logSmsFailure(error, userId) {
+function logSmsFailure(error) {
     console.error(JSON.stringify({
         event: "admin.staff_onboarding.sms_failed",
-        userId,
         errorCode: String(error?.code || "SMS_SEND_FAILED").slice(0, 60),
         errorClass: error?.name || "Error",
     }));
@@ -37,6 +46,12 @@ async function createStaff(req, res) {
             status: "error",
             message: "Provide a full name, a valid Kenyan phone number, and an eligible staff role.",
         });
+    }
+    let smsProvider;
+    try {
+        smsProvider = getTransactionalSmsProvider();
+    } catch {
+        return res.status(503).json({ status: "error", message: "Staff SMS delivery is unavailable." });
     }
 
     const temporaryPassword = generateTemporaryPassword();
@@ -82,13 +97,15 @@ async function createStaff(req, res) {
     }
 
     let sms;
+    const trackingId = crypto.randomUUID();
     try {
         sms = await smsService.sendSms({
             to: phone,
             message: `Your MicoPesa staff sign-in is ready. Username: ${phone}. Temporary password: ${temporaryPassword}. Change it at first sign-in.`,
-        });
+            trackingId,
+        }, { provider: smsProvider });
     } catch (error) {
-        logSmsFailure(error, user.user_id);
+        logSmsFailure(error);
         return res.status(201).json({
             status: "success",
             message: "Staff account was created but remains inactive because SMS delivery was not accepted. Retry onboarding from the user list.",
@@ -111,7 +128,14 @@ async function createStaff(req, res) {
             actionType: "UPDATE",
             entityName: "STAFF_ONBOARDING",
             entityId: user.user_id,
-            details: { role, status: "ACTIVE", sms_accepted: true, provider_message_id: sms.messageId },
+            details: {
+                role,
+                status: "ACTIVE",
+                sms_accepted: true,
+                sms_provider: smsProvider,
+                sms_tracking_id: trackingId,
+                provider_message_id: sms.messageId,
+            },
         });
         await client.query("COMMIT");
         return res.status(201).json({
@@ -136,6 +160,12 @@ async function resendStaffOnboarding(req, res) {
     const { userId } = req.params;
     if (!/^[A-F0-9]{25}$/.test(userId)) {
         return res.status(400).json({ status: "error", message: "A valid user ID is required." });
+    }
+    let smsProvider;
+    try {
+        smsProvider = getTransactionalSmsProvider();
+    } catch {
+        return res.status(503).json({ status: "error", message: "Staff SMS delivery is unavailable." });
     }
 
     const temporaryPassword = generateTemporaryPassword();
@@ -176,13 +206,15 @@ async function resendStaffOnboarding(req, res) {
     }
 
     let sms;
+    const trackingId = crypto.randomUUID();
     try {
         sms = await smsService.sendSms({
             to: user.phone,
             message: `Your MicoPesa staff sign-in is ready. Username: ${user.phone}. Temporary password: ${temporaryPassword}. Change it at first sign-in.`,
-        });
+            trackingId,
+        }, { provider: smsProvider });
     } catch (error) {
-        logSmsFailure(error, user.user_id);
+        logSmsFailure(error);
         return res.status(502).json({
             status: "error",
             message: "SMS was not accepted. The account remains inactive; retry onboarding later.",
@@ -209,6 +241,8 @@ async function resendStaffOnboarding(req, res) {
                 role: user.role,
                 status: "ACTIVE",
                 sms_accepted: true,
+                sms_provider: smsProvider,
+                sms_tracking_id: trackingId,
                 provider_message_id: sms.messageId,
             },
         });
@@ -229,4 +263,10 @@ async function resendStaffOnboarding(req, res) {
     }
 }
 
-module.exports = { createStaff, resendStaffOnboarding, normalizeKenyanPhone, generateTemporaryPassword };
+module.exports = {
+    createStaff,
+    resendStaffOnboarding,
+    normalizeKenyanPhone,
+    generateTemporaryPassword,
+    getTransactionalSmsProvider,
+};

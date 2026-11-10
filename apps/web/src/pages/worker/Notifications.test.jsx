@@ -3,11 +3,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Notifications from "./Notifications";
 import i18n from "../../i18n";
 
-const mocks = vi.hoisted(() => ({ getMyNotifications: vi.fn() }));
+const mocks = vi.hoisted(() => ({ getMyNotifications: vi.fn(), useAuth: vi.fn() }));
 
 vi.mock("../../services/notificationService", () => ({
     getMyNotifications: mocks.getMyNotifications,
+    getPushPublicKey: vi.fn(),
+    registerPushSubscription: vi.fn(),
+    removePushSubscription: vi.fn(),
 }));
+vi.mock("../../context/AuthContext", () => ({ useAuth: mocks.useAuth }));
 
 function deferred() {
     let resolve;
@@ -27,6 +31,7 @@ describe("worker notifications loading and retry", () => {
 
     beforeEach(() => {
         vi.clearAllMocks();
+        mocks.useAuth.mockReturnValue({ user: { user_id: "worker-1" } });
     });
 
     it("shows an accessible retry after initial failure and loads notifications on success", async () => {
@@ -82,8 +87,67 @@ describe("worker notifications loading and retry", () => {
         render(<Notifications />);
 
         expect(await screen.findByRole("heading", { name: "Arifa" })).toBeInTheDocument();
-        expect(screen.getByText("Barua pepe")).toBeInTheDocument();
-        expect(screen.getByText("Imetumwa")).toBeInTheDocument();
+        expect(screen.getByText("Barua pepe", { selector: ".notification-channel" })).toBeInTheDocument();
+        expect(screen.getByText("Imekubaliwa na mtoa huduma", { selector: ".badge" })).toBeInTheDocument();
+        expect(screen.getByText("Imekubaliwa na mtoa huduma", { selector: ".badge" }).closest(".badge"))
+            .toHaveClass("badge-blue");
+        expect(screen.queryByText("Imefika", { selector: ".badge" })).not.toBeInTheDocument();
         expect(screen.getByText("Your account is ready")).toBeInTheDocument();
+    });
+
+    it("uses distinct badge colors for expanded notification delivery states", async () => {
+        mocks.getMyNotifications.mockResolvedValue([
+            "PENDING", "PROCESSING", "PROVIDER_ACCEPTED", "DELIVERED", "FAILED", "UNKNOWN",
+        ].map((delivery_status, index) => ({
+            notification_id: `notice-${index}`,
+            created_at: "2026-10-26T10:00:00Z",
+            notification_type: "SMS",
+            message: `Notification ${index}`,
+            delivery_status,
+        })));
+        render(<Notifications />);
+
+        const statusColors = [
+            ["Pending", "badge-yellow"],
+            ["In progress", "badge-blue"],
+            ["Accepted by provider", "badge-blue"],
+            ["Delivered", "badge-green"],
+            ["Failed", "badge-red"],
+            ["Unknown", "badge-yellow"],
+        ];
+        for (const [label, color] of statusColors) {
+            await waitFor(() => {
+                expect(screen.getAllByText(label).some((item) =>
+                    item.closest(".badge")?.classList.contains(color)
+                )).toBe(true);
+            });
+        }
+    });
+
+    it("filters the notification timeline by channel and status", async () => {
+        mocks.getMyNotifications.mockResolvedValue([
+            {
+                notification_id: "notice-sms",
+                created_at: "2026-10-26T10:00:00Z",
+                notification_type: "SMS",
+                message: "Your contribution was received",
+                delivery_status: "DELIVERED",
+            },
+            {
+                notification_id: "notice-email",
+                created_at: "2026-10-26T10:00:00Z",
+                notification_type: "EMAIL",
+                message: "Your account update",
+                delivery_status: "PENDING",
+            },
+        ]);
+        render(<Notifications />);
+
+        expect(await screen.findByText("Your contribution was received")).toBeInTheDocument();
+        fireEvent.change(screen.getByLabelText("Type"), { target: { value: "EMAIL" } });
+        fireEvent.change(screen.getByLabelText("Status"), { target: { value: "PENDING" } });
+
+        expect(screen.getByText("Your account update")).toBeInTheDocument();
+        expect(screen.queryByText("Your contribution was received")).not.toBeInTheDocument();
     });
 });

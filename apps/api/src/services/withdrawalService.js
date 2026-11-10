@@ -46,6 +46,23 @@ async function reviewWithdrawalClaim(client, { userId, claimId, decision }) {
     }
 
     const claim = claimResult.rows[0];
+    const managedFundResult = await client.query(
+        `SELECT f.fund_id
+         FROM fund_allocations fa
+         JOIN funds f ON f.fund_id = fa.fund_id
+         WHERE fa.account_id = $1
+           AND f.managed_by = $2
+           AND fa.effective_from <= CURRENT_DATE
+           AND (fa.effective_to IS NULL OR fa.effective_to >= CURRENT_DATE)
+         ORDER BY f.fund_id
+         LIMIT 1
+         FOR SHARE OF fa, f`,
+        [claim.account_id, userId]
+    );
+    if (!managedFundResult.rows[0]) {
+        throw Object.assign(new Error("Withdrawal claim not found"), { statusCode: 404 });
+    }
+
     const reviewableStatus = decision === "APPROVED"
         ? claim.claim_status === "PENDING"
         : ["PENDING", "APPROVED"].includes(claim.claim_status);

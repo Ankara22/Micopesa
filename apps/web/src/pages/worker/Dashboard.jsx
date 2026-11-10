@@ -15,6 +15,7 @@ import "./worker-dashboard.css";
 
 const WORKER_LINKS = [
     { key: "contributions", to: "/worker/contributions" },
+    { key: "analytics", to: "/worker/analytics" },
     { key: "balance", to: "/worker/balance" },
     { key: "funds", to: "/worker/funds" },
     { key: "plan", to: "/worker/retirement-plan" },

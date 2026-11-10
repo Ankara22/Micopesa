@@ -1,10 +1,34 @@
+const {
+    assertSafeTestModeConfiguration,
+    assertTestModeWasNotLoadedFromEnvironment,
+    initializeTestModeJwtSecret,
+} = require("./utils/testModeConfiguration");
+const { testModeDispatchGuard } = require("./middleware/testModeDispatchGuard");
+const testMode = process.env.MICOPESA_TEST_MODE === "true";
+assertSafeTestModeConfiguration();
 require("./config/loadEnvironment");
+assertTestModeWasNotLoadedFromEnvironment(process.env, testMode);
+initializeTestModeJwtSecret();
 const { assertSafeAuthConfiguration } = require("./utils/authConfiguration");
 assertSafeAuthConfiguration();
 
 const express = require("express");
 const cors = require("cors");
 const pool = require("./db/database");
+const { sendSms } = require("./services/smsService");
+const { sendAdminEmail } = require("./services/adminEmailNotificationService");
+const {
+    createSmsDeliveryDispatcher,
+    enabledChannels,
+} = require("./services/smsDeliveryDispatcher");
+const {
+    createSmsNotificationRepository,
+} = require("./services/smsNotificationRepository");
+const { createNotificationRepository } = require("./services/notificationRepository");
+const { createWebPushService } = require("./services/webPushService");
+const { startPendingRegistrationCleanup } = require("./services/pendingRegistrationCleanupService");
+const { createGeneralJsonParser } = require("./middleware/mpesaCallbackIngress");
+const mobileSasaDlrRoutes = require("./routes/mobileSasaDlrRoutes");
 const authRoutes = require("./routes/authRoutes");
 const accountRoutes = require("./routes/accountRoutes");
 const retirementRoutes = require("./routes/retirementRoutes");
@@ -22,14 +46,36 @@ const fundManagerRoutes = require("./routes/fundManagerRoutes");
 const regulatorRoutes = require("./routes/regulatorRoutes");
 const mpesaRoutes = require("./routes/mpesaRoutes");
 const profileRoutes = require("./routes/profileRoutes");
+const reportRoutes = require("./routes/reportRoutes");
+const regulatorFundAssignmentRoutes = require("./routes/regulatorFundAssignmentRoutes");
 const adminOperationalSettingsRoutes = require("./routes/adminOperationalSettingsRoutes");
+const adminKycRoutes = require("./routes/adminKycRoutes");
 const staffOnboardingRoutes = require("./routes/staffOnboardingRoutes");
 const app = express();
 const PORT = process.env.PORT || 5000;
 
 
-app.use(cors());
-app.use(express.json());
+app.use(cors({
+    exposedHeaders: [
+        "X-Report-Truncated",
+        "X-Report-Row-Count",
+        "X-Report-Total-Count",
+        "X-Report-Total-Count-Is-Lower-Bound",
+        "X-Statement-Row-Count",
+        "X-Statement-Total-Count",
+        "X-Statement-Truncated",
+    ],
+}));
+app.use(createGeneralJsonParser());
+
+if (testMode) {
+    const disabledTestModeDispatch = (_req, res) => res.status(503).json({
+        status: "error",
+        message: "External dispatch is disabled in test mode.",
+    });
+    app.use("/api/mpesa", disabledTestModeDispatch);
+    app.use("/api/admin/notifications", testModeDispatchGuard);
+}
 
 app.use("/api/auth", authRoutes);
 app.use("/api/accounts", accountRoutes);
@@ -42,14 +88,18 @@ app.use("/api/audit-logs", auditLogRoutes);
 app.use("/api/admin/users", adminUserRoutes);
 app.use("/api/admin/settings", systemSettingsRoutes);
 app.use("/api/v1/admin/settings", adminOperationalSettingsRoutes);
+app.use("/api/admin/kyc", adminKycRoutes);
 app.use("/api/v1/admin/staff", staffOnboardingRoutes);
 app.use("/api/admin/notifications", notificationRoutes);
+app.use("/api/integrations/mobilesasa", mobileSasaDlrRoutes);
 app.use("/api/notifications", workerNotificationRoutes);
 app.use("/api/admin/activity", activityRoutes);
 app.use("/api/fund-manager", fundManagerRoutes);
 app.use("/api/regulator", regulatorRoutes);
 app.use("/api/mpesa", mpesaRoutes);
 app.use("/api/profile", profileRoutes);
+app.use("/api/reports", reportRoutes);
+app.use("/api/admin/regulator-fund-assignments", regulatorFundAssignmentRoutes);
 
 app.get("/", (req, res) => {
     res.json({
@@ -77,8 +127,79 @@ app.get("/api/health/db", async (req, res) => {
 });
 
 if (require.main === module) {
-    app.listen(PORT, () => {
-        console.log(`MicoPesa API running on http://localhost:${PORT}`);
+    const server = app.listen(
+        PORT,
+        ...(testMode ? ["127.0.0.1"] : []),
+        () => {
+            console.log(`MicoPesa API running on http://localhost:${PORT}`);
+        }
+    );
+    const stopPendingRegistrationCleanup = startPendingRegistrationCleanup(pool);
+    let smsDispatcher = null;
+    const activeNotificationChannels = testMode ? [] : enabledChannels(process.env);
+    if (activeNotificationChannels.length > 0) {
+        const notificationRepository = createSmsNotificationRepository(pool);
+        const webPushService = createWebPushService({
+            repository: createNotificationRepository(pool),
+        });
+        smsDispatcher = createSmsDeliveryDispatcher({
+            repository: notificationRepository,
+            sendSms: (message) => sendSms(message, {
+                provider: process.env.NOTIFICATION_SMS_PROVIDER?.trim().toUpperCase() || "AFRICAS_TALKING",
+            }),
+            sendEmail: sendAdminEmail,
+            sendPush: (notification) => webPushService.sendToUser(notification),
+        });
+        smsDispatcher.start();
+    } else if (
+        process.env.SMS_DISPATCHER_ENABLED === "true" ||
+        process.env.NOTIFICATION_DISPATCHER_ENABLED === "true" ||
+        process.env.EMAIL_NOTIFICATIONS_ENABLED === "true"
+    ) {
+        console.error("Notification dispatcher was not started because production channel configuration is incomplete.");
+    }
+
+    let shuttingDown = false;
+    async function shutdown() {
+        if (shuttingDown) return;
+        shuttingDown = true;
+        const failures = [];
+        stopPendingRegistrationCleanup();
+        try {
+            await smsDispatcher?.stop();
+        } catch (error) {
+            failures.push(error);
+        }
+        try {
+            await new Promise((resolve, reject) => {
+                server.close((error) => error ? reject(error) : resolve());
+            });
+        } catch (error) {
+            failures.push(error);
+        }
+        try {
+            await pool.end();
+        } catch (error) {
+            failures.push(error);
+        }
+        if (failures.length) throw failures[0];
+    }
+
+    process.once("SIGINT", () => {
+        shutdown().catch((error) => {
+            console.error("API shutdown failed.", {
+                code: typeof error?.code === "string" ? error.code : "SHUTDOWN_ERROR",
+            });
+            process.exitCode = 1;
+        });
+    });
+    process.once("SIGTERM", () => {
+        shutdown().catch((error) => {
+            console.error("API shutdown failed.", {
+                code: typeof error?.code === "string" ? error.code : "SHUTDOWN_ERROR",
+            });
+            process.exitCode = 1;
+        });
     });
 }
 

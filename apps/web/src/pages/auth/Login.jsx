@@ -91,7 +91,7 @@ function Login() {
     }
 
     return (
-        <AuthLayout>
+        <AuthLayout variant="login">
             <div className="auth-card">
                 <p className="auth-eyebrow auth-card-eyebrow">{t("auth.login.welcome")}</p>
                 <h1>{t("auth.login.title")}</h1>

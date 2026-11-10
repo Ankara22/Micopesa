@@ -1,4 +1,4 @@
-name: Test
+﻿name: Test
 
 on:
   push:
@@ -9,23 +9,6 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    env:
-      TEST_DATABASE_URL: postgresql://test-user:test-password@127.0.0.1:5432/micopesa_test
-      TEST_DATABASE_ADMIN_URL: postgresql://test-user:test-password@127.0.0.1:5432/postgres
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: test-user
-          POSTGRES_PASSWORD: test-password
-          POSTGRES_DB: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U test-user -d postgres"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

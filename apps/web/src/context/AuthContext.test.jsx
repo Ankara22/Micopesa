@@ -59,7 +59,14 @@ function SessionProbe() {
             <span data-testid="login-outcome">{loginOutcome}</span>
             <button onClick={() => attemptLogin("account-a")}>Sign in as A</button>
             <button onClick={() => attemptLogin("account-b")}>Sign in as B</button>
-            <button onClick={() => register("New Worker", "new@example.com", "07000000001", "password", "OTHER_INFORMAL_WORKER")}>
+            <button onClick={() => register(
+                "New Worker",
+                "new@example.com",
+                "07000000001",
+                "OTHER_INFORMAL_WORKER",
+                "12345678",
+                "1990-04-15",
+            )}>
                 Register new worker
             </button>
             <button onClick={loadProfile}>Load profile</button>
@@ -142,8 +149,9 @@ describe("AuthContext session-bound profile synchronization", () => {
             full_name: "New Worker",
             email: "new@example.com",
             phone: "07000000001",
-            password: "password",
             occupation: "OTHER_INFORMAL_WORKER",
+            national_id: "12345678",
+            date_of_birth: "1990-04-15",
         }));
         expect(screen.getByTestId("user-id")).toHaveTextContent("signed-out");
         expect(localStorage.getItem("micopesa_token")).toBeNull();

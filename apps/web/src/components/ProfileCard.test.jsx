@@ -8,6 +8,8 @@ import Header from "../layouts/Header";
 const mocks = vi.hoisted(() => ({
     getMyProfile: vi.fn(),
     updateMyProfile: vi.fn(),
+    requestPhoneChange: vi.fn(),
+    verifyPhoneChange: vi.fn(),
     uploadMyProfilePhoto: vi.fn(),
     getMyProfilePhoto: vi.fn(),
     beginProfileRequest: vi.fn(),
@@ -20,6 +22,8 @@ vi.mock("../services/profileApi", () => ({
     getMyProfile: mocks.getMyProfile,
     getMyProfilePhoto: mocks.getMyProfilePhoto,
     updateMyProfile: mocks.updateMyProfile,
+    requestPhoneChange: mocks.requestPhoneChange,
+    verifyPhoneChange: mocks.verifyPhoneChange,
     uploadMyProfilePhoto: mocks.uploadMyProfilePhoto,
 }));
 vi.mock("../context/AuthContext", () => ({
@@ -41,6 +45,9 @@ const profile = {
     role: "WORKER",
     occupation: "MARKET_VENDOR",
     account_status: "ACTIVE",
+    date_of_birth: "1990-04-15",
+    masked_national_id: "****1234",
+    kyc_status: "PENDING",
     created_at: "2025-01-01T00:00:00.000Z",
     updated_at: "2026-10-26T00:00:00.000Z",
     profile_photo_available: false,
@@ -93,6 +100,14 @@ describe("shared ProfileCard", () => {
         });
         mocks.getMyProfile.mockResolvedValue(profile);
         mocks.updateMyProfile.mockImplementation(async (updates) => ({ ...profile, ...updates }));
+        mocks.requestPhoneChange.mockResolvedValue({
+            phone: "+254712345678",
+            expiresAt: "2026-11-05T12:10:00.000Z",
+        });
+        mocks.verifyPhoneChange.mockResolvedValue({
+            phone: "+254712345678",
+            phoneVerified: true,
+        });
         mocks.uploadMyProfilePhoto.mockResolvedValue({ ...profile, profile_photo_available: true });
         mocks.getMyProfilePhoto.mockRejectedValue({ status: 404 });
     });
@@ -118,6 +133,73 @@ describe("shared ProfileCard", () => {
         fireEvent.click(screen.getByRole("button", { name: "Hariri jina kamili" }));
         expect(screen.getByLabelText("Jina kamili")).toHaveValue("Amina Worker");
         expect(screen.getByRole("button", { name: "Hifadhi" })).toBeInTheDocument();
+    });
+
+    it("shows date of birth, masked National ID, and pending KYC status without a full ID", async () => {
+        const { container } = renderProfile();
+
+        await screen.findByRole("heading", { name: "Amina Worker" });
+        expect(screen.getByText("Date of birth")).toBeInTheDocument();
+        expect(screen.getByText(/1990/)).toBeInTheDocument();
+        expect(screen.getByText("National ID")).toBeInTheDocument();
+        expect(screen.getByText("****1234")).toBeInTheDocument();
+        expect(screen.getByText("KYC verification status")).toBeInTheDocument();
+        expect(screen.getByText("Pending verification")).toBeInTheDocument();
+        expect(container).not.toHaveTextContent("12345678");
+    });
+
+    it("shows a graceful fallback when no KYC record is available", async () => {
+        mocks.getMyProfile.mockResolvedValueOnce({
+            ...profile,
+            date_of_birth: null,
+            masked_national_id: null,
+            kyc_status: null,
+        });
+        renderProfile();
+
+        await screen.findByRole("heading", { name: "Amina Worker" });
+        expect(screen.getByText("Date of birth").parentElement).toHaveTextContent("Not provided");
+        expect(screen.getByText("National ID").parentElement).toHaveTextContent("Not provided");
+        expect(screen.getByText("KYC verification status").parentElement).toHaveTextContent("Not provided");
+    });
+
+    it("requires explicit confirmation, sends a code, and refreshes the profile after verification", async () => {
+        mocks.getMyProfile
+            .mockResolvedValueOnce(profile)
+            .mockResolvedValue({ ...profile, phone: "+254712345678" });
+        renderProfile();
+        await screen.findByRole("heading", { name: "Amina Worker" });
+        expect(screen.getByText("Current registered number:")).toBeInTheDocument();
+        expect(screen.getByText("254700000001")).toBeInTheDocument();
+
+        fireEvent.change(screen.getByLabelText("New Kenyan mobile number"), {
+            target: { value: "0712 345 678" },
+        });
+        fireEvent.change(screen.getByLabelText("Current password"), {
+            target: { value: "current-password" },
+        });
+        const sendButton = screen.getByRole("button", { name: "Send verification code" });
+        expect(sendButton).toBeDisabled();
+        fireEvent.click(screen.getByRole("checkbox"));
+        fireEvent.click(sendButton);
+
+        expect(await screen.findByLabelText("Verification code")).toBeInTheDocument();
+        expect(mocks.requestPhoneChange).toHaveBeenCalledWith({
+            newPhone: "0712 345 678",
+            currentPassword: "current-password",
+            confirmed: true,
+        });
+        fireEvent.change(screen.getByLabelText("Verification code"), {
+            target: { value: "123456" },
+        });
+        fireEvent.click(screen.getByRole("button", { name: "Verify and change number" }));
+
+        expect(await screen.findByRole("status")).toHaveTextContent(
+            "Your phone number is verified and updated"
+        );
+        expect(mocks.verifyPhoneChange).toHaveBeenCalledWith("123456");
+        expect(mocks.getMyProfile).toHaveBeenCalledTimes(2);
+        expect(screen.getByText("+254712345678")).toBeInTheDocument();
     });
 
     it("uploads a valid selected image immediately and updates the avatar", async () => {

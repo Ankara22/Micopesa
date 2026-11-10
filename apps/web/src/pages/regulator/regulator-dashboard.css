@@ -27,6 +27,52 @@
     margin-bottom: 16px;
 }
 
+.regulator-kyc-oversight {
+    display: grid;
+    grid-template-columns: minmax(220px, 0.65fr) minmax(0, 1fr);
+    gap: 20px;
+}
+
+.regulator-kyc-oversight > ul {
+    display: grid;
+    align-content: start;
+    gap: 8px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.regulator-kyc-oversight > ul li {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+.regulator-kyc-oversight > ul strong,
+.regulator-kyc-oversight h3 {
+    color: var(--text-h);
+}
+
+.regulator-kyc-oversight h3 {
+    margin: 0 0 8px;
+    font-size: 15px;
+}
+
+.regulator-kyc-oversight .regulator-audit-list li {
+    grid-template-columns: 1fr auto;
+}
+
+.regulator-kyc-oversight .regulator-audit-list li span {
+    grid-column: 1 / -1;
+}
+
+.regulator-kyc-oversight > .regulator-dashboard-note {
+    grid-column: 1 / -1;
+}
+
 .regulator-dashboard-card,
 .regulator-dashboard-section {
     min-width: 0;
@@ -241,6 +287,10 @@
 
 @media (max-width: 760px) {
     .regulator-dashboard-lower-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .regulator-kyc-oversight {
         grid-template-columns: minmax(0, 1fr);
     }
 }

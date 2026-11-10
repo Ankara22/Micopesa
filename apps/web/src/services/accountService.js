@@ -10,6 +10,13 @@ export async function getMyContributions() {
     return res.data.data;
 }
 
+export async function downloadMyStatement(format, filters = {}) {
+    return api.get("/api/accounts/my-statement", {
+        params: { format, ...filters },
+        responseType: "blob",
+    });
+}
+
 export async function initiateMyContribution({ amount, channel, fund_ids }) {
     const res = await api.post("/api/accounts/my-contributions", { amount, channel, fund_ids });
     return res.data;

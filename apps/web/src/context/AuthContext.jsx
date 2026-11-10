@@ -218,16 +218,22 @@ export function AuthProvider({ children }) {
             }
         }
     }, []);
-    const register = useCallback(async (full_name, email, phone, password, occupation) => {
+    const register = useCallback(async (full_name, email, phone, occupation, nationalId, dateOfBirth) => {
         setError(null);
         try {
-            const payload = { full_name, email, phone, password, occupation };
-            const response = await api.post("/api/auth/register", payload);
-            const { user: newUser, verificationEmailSent } = response.data.data;
-            return { success: true, user: newUser, verificationEmailSent };
+            const payload = {
+                full_name,
+                email,
+                phone,
+                occupation,
+                national_id: nationalId,
+                date_of_birth: dateOfBirth,
+            };
+            await api.post("/api/auth/register", payload);
+            return { success: true };
         } catch (err) {
             setError(err.message);
-            return { success: false, message: err.message };
+            return { success: false, message: err.message, code: err.response?.data?.code };
         }
     }, []);
 

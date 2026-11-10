@@ -10,8 +10,11 @@ export async function resetPassword(token, password) {
     return response.data;
 }
 
-export async function verifyEmail(token) {
-    const response = await api.post("/api/auth/email/verify", { token });
+export async function verifyEmail(token, password) {
+    const response = await api.post("/api/auth/email/verify", {
+        token,
+        ...(password === undefined ? {} : { password }),
+    });
     return response.data;
 }
 

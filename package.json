@@ -2,18 +2,24 @@
   "name": "micopesa",
   "private": true,
   "scripts": {
-    "test": "npm run db:test:setup && npm run test:api && npm run test:frontend",
-    "test:frontend": "npm --prefix apps/web run test",
-    "test:api": "node --env-file-if-exists=.env.test --test apps/api/tests/regression.test.js",
-    "test:withdrawal:integration": "node --env-file-if-exists=.env.test --test apps/api/tests/withdrawalPostgres.integration.test.js",
+    "test": "npm run test:unit && npm run test:web",
+    "test:unit": "node tests/scripts/runApiUnitTests.js",
+    "test:unit:coverage": "node tests/scripts/runApiUnitTests.js --coverage",
+    "test:web": "npm --prefix apps/web run test",
+    "test:frontend": "npm run test:web",
+    "test:api": "npm run test:unit",
+    "test:integration": "node tests/scripts/runIntegrationTests.js",
+    "test:db": "node tests/scripts/runDatabaseTests.js",
+    "test:withdrawal:integration": "node tests/scripts/runIntegrationTests.js apps/api/tests/withdrawalPostgres.integration.test.js",
     "test:finance-reconcile": "node --test apps/api/tests/financeReconcile.test.js",
-    "finance:reconcile:test": "node --env-file-if-exists=.env.test apps/api/scripts/financeReconcile.js",
-    "test:coverage": "npm run db:test:setup && npm run test:api:coverage && npm run test:frontend:coverage",
-    "test:api:coverage": "node --env-file-if-exists=.env.test --experimental-test-coverage --test apps/api/tests/regression.test.js",
+    "finance:reconcile:test": "npm run test:finance-reconcile",
+    "test:coverage": "npm run test:unit:coverage && npm run test:web:coverage",
+    "test:api:coverage": "npm run test:unit:coverage",
+    "test:web:coverage": "npm --prefix apps/web run test:coverage",
     "test:frontend:coverage": "npm --prefix apps/web run test:coverage",
     "lint": "npm --prefix apps/web run lint",
     "build": "npm --prefix apps/web run build",
-    "db:test:setup": "node --env-file-if-exists=.env.test tests/scripts/dbTestSetup.js",
-    "db:test:teardown": "node --env-file-if-exists=.env.test tests/scripts/dbTestTeardown.js"
+    "db:test:setup": "node tests/scripts/dbTestSetup.js",
+    "db:test:teardown": "node tests/scripts/dbTestTeardown.js"
   }
 }
