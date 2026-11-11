@@ -41,6 +41,10 @@ const forwardIntegrationMigration = fs.readFileSync(
     path.join(databaseDirectory, "migration_micopesa_integrations_forward.sql"),
     "utf8"
 );
+const postMigrationVerification = fs.readFileSync(
+    path.join(databaseDirectory, "micopesa_audit_post_migration_verification.sql"),
+    "utf8"
+);
 const mpesaRetryMigration = fs.readFileSync(
     path.join(databaseDirectory, "migration_mpesa_retry_recovery.sql"),
     "utf8"
@@ -507,6 +511,211 @@ test("Micopesa forward migration validates and safely reuses MobileSasa callback
     assert.match(objectCreation ?? "", /IF to_regclass\('idx_mobilesasa_callbacks_unmatched'\) IS NULL THEN/i);
     assert.match(objectCreation ?? "", /trg_mobilesasa_callbacks_preserve_notification_reference/i);
     assert.match(objectCreation ?? "", /trg_mobilesasa_callbacks_set_updated_at/i);
+});
+
+test("MobileSasa orphan-index guard is scoped and allows compatible inbox reuse", () => {
+    const orphanGuard = forwardIntegrationMigration.match(
+        /IF NOT EXISTS \(\s*SELECT 1\s+FROM pg_class callback_table([\s\S]*?)MobileSasa callback index names exist without their inbox table/i
+    )?.[0];
+    assert.ok(orphanGuard, "Expected a catalog-scoped orphan-index guard");
+    assert.match(
+        orphanGuard,
+        /^IF NOT EXISTS \([\s\S]*?\)\s+AND EXISTS \([\s\S]*?\) THEN/i,
+        "The guard must reject only when the callback table is absent and a named index exists"
+    );
+    assert.match(orphanGuard, /callback_schema\.nspname = current_schema\(\)/i);
+    assert.match(orphanGuard, /callback_table\.relname =\s*'mobilesasa_sms_delivery_callbacks'/i);
+    assert.match(orphanGuard, /callback_table\.relkind IN \('r', 'p'\)/i);
+    assert.match(orphanGuard, /callback_index\.relkind IN \('i', 'I'\)/i);
+    for (const indexName of [
+        "idx_mobilesasa_callbacks_unmatched",
+        "idx_mobilesasa_callbacks_notification",
+        "idx_mobilesasa_callbacks_original_notification",
+        "idx_mobilesasa_callbacks_tracking_id",
+        "idx_mobilesasa_callbacks_dispatch_reference",
+    ]) {
+        assert.match(orphanGuard, new RegExp(indexName));
+    }
+
+    assert.doesNotMatch(
+        forwardIntegrationMigration,
+        /IF to_regclass\('idx_mobilesasa_callbacks_unmatched'\) IS NOT NULL[\s\S]{0,600}?Mobile Sasa callback objects exist without their inbox table/i,
+        "A second unconditional guard must not reject indexes on a valid existing callback inbox"
+    );
+    assert.match(
+        forwardIntegrationMigration,
+        /IF to_regclass\('mobilesasa_sms_delivery_callbacks'\) IS NULL THEN\s+CREATE TABLE mobilesasa_sms_delivery_callbacks/i,
+        "The callback inbox remains conditionally created only when absent"
+    );
+});
+
+test("MobileSasa lifecycle compatibility comparison preserves boolean grouping", () => {
+    const mobilesasaPreflight = forwardIntegrationMigration.match(
+        /IF to_regclass\('mobilesasa_sms_delivery_callbacks'\) IS NOT NULL THEN([\s\S]*?)SELECT pg_get_constraintdef\(oid\)/i
+    )?.[1];
+    assert.ok(mobilesasaPreflight, "Expected MobileSasa callback compatibility preflight");
+
+    const lifecycleComparison = mobilesasaPreflight.match(
+        /IF expected_mobilesasa_constraint\.name =\s*'ck_mobilesasa_callback_lifecycle' THEN([\s\S]*?)ELSE\s+normalized_mobilesasa_constraint :=/i
+    )?.[1];
+    assert.ok(lifecycleComparison, "Expected a dedicated lifecycle definition comparison");
+    assert.match(lifecycleComparison, /CREATE TEMP TABLE %I ON COMMIT DROP AS/i);
+    assert.match(
+        lifecycleComparison,
+        /SELECT processing_status,\s*notification_id,\s*original_notification_id,\s*correlated_at,\s*processed_at,\s*rejection_code[\s\S]*?WITH NO DATA/i
+    );
+    assert.match(lifecycleComparison, /ADD CONSTRAINT expected_lifecycle CHECK/i);
+    assert.match(lifecycleComparison, /pg_get_constraintdef\(constraint_data\.oid\)/i);
+    assert.match(lifecycleComparison, /pg_get_constraintdef\(\s*actual_mobilesasa_constraint\.oid\s*\)/i);
+    assert.match(lifecycleComparison, /normalized_expected_mobilesasa_lifecycle/i);
+    assert.equal(
+        (lifecycleComparison.match(/'\[\[:space:\]\]'/g) ?? []).length,
+        2,
+        "Actual and PostgreSQL-generated expected definitions must use the same whitespace-only normalization"
+    );
+    assert.doesNotMatch(lifecycleComparison, /'\[\(\)\[:space:\]\]'/);
+    assert.match(lifecycleComparison, /unexpected definition/i);
+
+    const normalizeGeneratedDefinition = definition => definition
+        .toLowerCase()
+        .replace(/::(pg_catalog\.)?(character varying|text|integer)(\[\])?/g, "")
+        .replace(/\s/g, "");
+    const diagnosticActual =
+        "CHECK ((processing_status = 'CORRELATED') AND ((notification_id IS NOT NULL) OR (original_notification_id IS NOT NULL)) AND (correlated_at IS NOT NULL))";
+    const generatedExpected = diagnosticActual;
+    const legacyExpected =
+        "checkprocessing_status='correlated'and(notification_idisnotnullororiginal_notification_idisnotnull)andcorrelated_atisnotnull";
+    const differentlyGrouped =
+        "CHECK (((processing_status = 'CORRELATED') AND (notification_id IS NOT NULL)) OR ((original_notification_id IS NOT NULL) AND (correlated_at IS NOT NULL)))";
+
+    assert.notEqual(
+        normalizeGeneratedDefinition(diagnosticActual).replace(/[()]/g, ""),
+        legacyExpected,
+        "The former actual-vs-handwritten comparison must reproduce the catalog formatting mismatch"
+    );
+    assert.equal(
+        normalizeGeneratedDefinition(diagnosticActual),
+        normalizeGeneratedDefinition(generatedExpected),
+        "The actual diagnostic expression should match PostgreSQL's deparsed expected expression"
+    );
+    assert.notEqual(
+        normalizeGeneratedDefinition(diagnosticActual),
+        normalizeGeneratedDefinition(differentlyGrouped),
+        "A changed AND/OR grouping must not normalize to the expected lifecycle rule"
+    );
+});
+
+test("Post-migration audit uses pre-transaction temporary comparators and read-only verification", () => {
+    const identityCheck = postMigrationVerification.indexOf("DO $preflight$");
+    const firstComparator = postMigrationVerification.indexOf(
+        "CREATE TEMP TABLE micopesa_expected_mpesa_callback_lifecycle"
+    );
+    const secondComparator = postMigrationVerification.indexOf(
+        "CREATE TEMP TABLE micopesa_expected_mobilesasa_callback_lifecycle"
+    );
+    const readOnlyTransaction = postMigrationVerification.search(
+        /BEGIN;\s*SET TRANSACTION READ ONLY;/i
+    );
+    assert.ok(identityCheck >= 0);
+    assert.ok(firstComparator > identityCheck);
+    assert.ok(secondComparator > firstComparator);
+    assert.ok(readOnlyTransaction > secondComparator);
+    assert.match(postMigrationVerification, /BEGIN;\s*SET TRANSACTION READ ONLY;/i);
+    assert.match(postMigrationVerification, /current_database\(\) <> 'Micopesa_migration_audit'/i);
+    assert.match(postMigrationVerification, /server_address <<= inet '127\.0\.0\.0\/8'/i);
+    assert.match(postMigrationVerification, /server_address <<= inet '::1\/128'/i);
+    assert.match(postMigrationVerification, /inet_server_port\(\) <> 5433/i);
+    assert.match(postMigrationVerification.trimEnd(), /ROLLBACK;$/i);
+    assert.doesNotMatch(postMigrationVerification, /ON COMMIT DROP/i);
+    const auditDdlStatements = postMigrationVerification
+        .split(";")
+        .map(statement => statement.trim())
+        .filter(statement => /^(?:CREATE|ALTER|DROP|TRUNCATE|INSERT|UPDATE|DELETE)\b/i.test(statement));
+    assert.equal(auditDdlStatements.length, 4);
+    assert.equal(
+        auditDdlStatements.filter(statement =>
+            /^CREATE TEMP TABLE micopesa_expected_(?:mpesa|mobilesasa)_callback_lifecycle\s+AS[\s\S]*WITH NO DATA$/i.test(statement)
+        ).length,
+        2,
+        "Only session-scoped temporary expected-definition tables may be created"
+    );
+    assert.equal(
+        auditDdlStatements.filter(statement =>
+            /^ALTER TABLE pg_temp\.micopesa_expected_(?:mpesa|mobilesasa)_callback_lifecycle\s+ADD CONSTRAINT expected_(?:mpesa|mobilesasa)_callback_lifecycle CHECK\s*\([\s\S]*\)$/i.test(statement)
+        ).length,
+        2,
+        "Only lifecycle constraints on the temporary expected-definition tables may be added"
+    );
+});
+
+test("Post-migration audit lifecycle count subqueries close before their aliases", () => {
+    const darajaLifecycleQuery = postMigrationVerification.match(
+        /\(SELECT count\(\*\)\s+FROM public\.mpesa_callback_inbox[\s\S]*?AS invalid_daraja_lifecycle_rows/i
+    )?.[0];
+    const mobileSasaLifecycleQuery = postMigrationVerification.match(
+        /\(SELECT count\(\*\)\s+FROM public\.mobilesasa_sms_delivery_callbacks[\s\S]*?AS invalid_mobilesasa_lifecycle_rows/i
+    )?.[0];
+
+    assert.ok(darajaLifecycleQuery, "Expected Daraja lifecycle count expression");
+    assert.ok(mobileSasaLifecycleQuery, "Expected MobileSasa lifecycle count expression");
+    assert.match(
+        darajaLifecycleQuery,
+        /\)\s+IS TRUE\)\)\s+AS invalid_daraja_lifecycle_rows$/i,
+        "The scalar SELECT and NOT(...) expression both need closing parentheses before the alias"
+    );
+    assert.match(
+        mobileSasaLifecycleQuery,
+        /\)\s+IS TRUE\)\)\s+AS invalid_mobilesasa_lifecycle_rows$/i,
+        "The scalar SELECT and NOT(...) expression both need closing parentheses before the alias"
+    );
+});
+
+test("Post-migration audit covers migrated indexes, constraints, triggers, sequences, and data counts", () => {
+    for (const requiredObject of [
+        "notification_preferences_user_id_fkey",
+        "mpesa_callback_inbox_callback_fingerprint_check",
+        "ck_mpesa_callback_lifecycle",
+        "mobilesasa_sms_delivery_callba_provider_message_reference_check",
+        "ck_mobilesasa_callback_lifecycle",
+        "uq_notifications_user_channel_event_key",
+        "uq_notifications_admin_request_channel",
+        "uq_notifications_provider_message_id",
+        "uq_mpesa_payment_attempts_one_active_per_contribution",
+        "idx_mpesa_callback_inbox_status_received",
+        "idx_mpesa_callback_inbox_provider_ids",
+        "idx_mpesa_callback_inbox_attempt",
+        "idx_mobilesasa_callbacks_unmatched",
+        "idx_mobilesasa_callbacks_notification",
+        "idx_mobilesasa_callbacks_original_notification",
+        "idx_mobilesasa_callbacks_tracking_id",
+        "idx_mobilesasa_callbacks_dispatch_reference",
+        "trg_notification_preferences_set_updated_at",
+        "trg_mpesa_callback_inbox_set_updated_at",
+        "trg_mobilesasa_callbacks_preserve_notification_reference",
+        "trg_mobilesasa_callbacks_set_updated_at",
+        "pg_get_serial_sequence",
+        "pre_migration_rows",
+        "invalid_daraja_lifecycle_rows",
+        "invalid_mobilesasa_lifecycle_rows",
+        "duplicate_notification_event_key_groups",
+        "broken_mobilesasa_notification_references",
+    ]) {
+        assert.ok(
+            postMigrationVerification.includes(requiredObject),
+            `Expected post-migration audit coverage for ${requiredObject}`
+        );
+    }
+
+    assert.match(postMigrationVerification, /'notifications', 1::BIGINT/i);
+    assert.match(postMigrationVerification, /'mpesa_callback_inbox', 0::BIGINT/i);
+    assert.match(postMigrationVerification, /'mobilesasa_sms_delivery_callbacks', 0::BIGINT/i);
+    assert.match(postMigrationVerification, /constraint_data\.convalidated/i);
+    assert.match(postMigrationVerification, /index_data\.indisvalid/i);
+    assert.match(postMigrationVerification, /index_data\.indisready/i);
+    assert.match(postMigrationVerification, /index_data\.indislive/i);
+    assert.match(postMigrationVerification, /pg_get_constraintdef/i);
+    assert.match(postMigrationVerification, /pg_get_indexdef/i);
+    assert.match(postMigrationVerification, /pg_get_triggerdef/i);
 });
 
 test("partial index predicates preserve case-sensitive status literals", () => {

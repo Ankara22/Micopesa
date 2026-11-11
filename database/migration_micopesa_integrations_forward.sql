@@ -73,6 +73,9 @@ DECLARE
     expected_mobilesasa_constraint RECORD;
     actual_mobilesasa_constraint RECORD;
     normalized_mobilesasa_constraint TEXT;
+    expected_mobilesasa_lifecycle_table TEXT;
+    expected_mobilesasa_lifecycle_definition TEXT;
+    normalized_expected_mobilesasa_lifecycle TEXT;
     mobilesasa_constraint_literals TEXT[];
     expected_mobilesasa_index RECORD;
     actual_mobilesasa_index RECORD;
@@ -1286,7 +1289,7 @@ BEGIN
                     'checknotification_idisnullororiginal_notification_idisnotnullandoriginal_notification_id=notification_id',
                     NULL::TEXT[]),
                 ('ck_mobilesasa_callback_lifecycle', 'c',
-                    'checkprocessing_status=''unmatched''andnotification_idisnullandoriginal_notification_idisnullandcorrelated_atisnullandprocessed_atisnullandrejection_codeisnullorprocessing_status=''correlated''and(notification_idisnotnullororiginal_notification_idisnotnull)andcorrelated_atisnotnullandprocessed_atisnullandrejection_codeisnullorprocessing_status=anyarray[''applied'',''ignored'']and(notification_idisnotnullororiginal_notification_idisnotnull)andcorrelated_atisnotnullandprocessed_atisnotnullandrejection_codeisnullorprocessing_status=''rejected''andprocessed_atisnotnullandrejection_codeisnotnull',
+                    NULL::TEXT,
                     ARRAY['APPLIED', 'CORRELATED', 'IGNORED', 'REJECTED', 'UNMATCHED']::TEXT[])
             ) AS expected(name, constraint_type, normalized_definition, expected_literals)
         LOOP
@@ -1334,7 +1337,9 @@ BEGIN
                     expected_mobilesasa_constraint.name;
             END IF;
 
-            IF expected_mobilesasa_constraint.normalized_definition IS NOT NULL THEN
+            IF expected_mobilesasa_constraint.normalized_definition IS NOT NULL
+               OR expected_mobilesasa_constraint.name =
+                  'ck_mobilesasa_callback_lifecycle' THEN
                 -- Preserve literal case; lowercasing a CHECK definition can hide semantic changes.
                 SELECT array_agg(literal_value ORDER BY literal_value)
                 INTO mobilesasa_constraint_literals
@@ -1353,22 +1358,110 @@ BEGIN
                         expected_mobilesasa_constraint.name;
                 END IF;
 
-                normalized_mobilesasa_constraint := regexp_replace(
-                    regexp_replace(
-                        lower(pg_get_constraintdef(actual_mobilesasa_constraint.oid)),
-                        '::(pg_catalog\.)?(character varying|text|integer)(\[\])?',
+                IF expected_mobilesasa_constraint.name =
+                   'ck_mobilesasa_callback_lifecycle' THEN
+                    expected_mobilesasa_lifecycle_table := format(
+                        'micopesa_lifecycle_expected_%s_%s',
+                        pg_backend_pid(),
+                        pg_current_xact_id()
+                    );
+                    EXECUTE format(
+                        'CREATE TEMP TABLE %I ON COMMIT DROP AS
+                         SELECT processing_status, notification_id,
+                                original_notification_id, correlated_at,
+                                processed_at, rejection_code
+                         FROM mobilesasa_sms_delivery_callbacks
+                         WITH NO DATA',
+                        expected_mobilesasa_lifecycle_table
+                    );
+                    EXECUTE format(
+                        'ALTER TABLE pg_temp.%I
+                         ADD CONSTRAINT expected_lifecycle CHECK (
+                             (processing_status = ''UNMATCHED''
+                              AND notification_id IS NULL
+                              AND original_notification_id IS NULL
+                              AND correlated_at IS NULL
+                              AND processed_at IS NULL
+                              AND rejection_code IS NULL)
+                             OR (processing_status = ''CORRELATED''
+                                 AND (notification_id IS NOT NULL
+                                      OR original_notification_id IS NOT NULL)
+                                 AND correlated_at IS NOT NULL
+                                 AND processed_at IS NULL
+                                 AND rejection_code IS NULL)
+                             OR (processing_status IN (''APPLIED'', ''IGNORED'')
+                                 AND (notification_id IS NOT NULL
+                                      OR original_notification_id IS NOT NULL)
+                                 AND correlated_at IS NOT NULL
+                                 AND processed_at IS NOT NULL
+                                 AND rejection_code IS NULL)
+                             OR (processing_status = ''REJECTED''
+                                 AND processed_at IS NOT NULL
+                                 AND rejection_code IS NOT NULL)
+                         )',
+                        expected_mobilesasa_lifecycle_table
+                    );
+                    SELECT pg_get_constraintdef(constraint_data.oid)
+                    INTO expected_mobilesasa_lifecycle_definition
+                    FROM pg_constraint constraint_data
+                    WHERE constraint_data.conrelid = to_regclass(
+                              format(
+                                  'pg_temp.%I',
+                                  expected_mobilesasa_lifecycle_table
+                              )
+                          )
+                      AND constraint_data.conname = 'expected_lifecycle';
+
+                    normalized_mobilesasa_constraint := regexp_replace(
+                        regexp_replace(
+                            lower(pg_get_constraintdef(
+                                actual_mobilesasa_constraint.oid
+                            )),
+                            '::(pg_catalog\.)?(character varying|text|integer)(\[\])?',
+                            '',
+                            'g'
+                        ),
+                        '[[:space:]]',
                         '',
                         'g'
-                    ),
-                    '[()[:space:]]',
-                    '',
-                    'g'
-                );
-                IF normalized_mobilesasa_constraint IS DISTINCT FROM
-                   expected_mobilesasa_constraint.normalized_definition THEN
-                    RAISE EXCEPTION
-                        'Incompatible mobilesasa_sms_delivery_callbacks: constraint % has an unexpected definition',
-                        expected_mobilesasa_constraint.name;
+                    );
+                    normalized_expected_mobilesasa_lifecycle := regexp_replace(
+                        regexp_replace(
+                            lower(expected_mobilesasa_lifecycle_definition),
+                            '::(pg_catalog\.)?(character varying|text|integer)(\[\])?',
+                            '',
+                            'g'
+                        ),
+                        '[[:space:]]',
+                        '',
+                        'g'
+                    );
+                    IF normalized_mobilesasa_constraint IS DISTINCT FROM
+                       normalized_expected_mobilesasa_lifecycle THEN
+                        RAISE EXCEPTION
+                            'Incompatible mobilesasa_sms_delivery_callbacks: constraint % has an unexpected definition',
+                            expected_mobilesasa_constraint.name;
+                    END IF;
+                ELSE
+                    normalized_mobilesasa_constraint := regexp_replace(
+                        regexp_replace(
+                            lower(pg_get_constraintdef(
+                                actual_mobilesasa_constraint.oid
+                            )),
+                            '::(pg_catalog\.)?(character varying|text|integer)(\[\])?',
+                            '',
+                            'g'
+                        ),
+                        '[()[:space:]]',
+                        '',
+                        'g'
+                    );
+                    IF normalized_mobilesasa_constraint IS DISTINCT FROM
+                       expected_mobilesasa_constraint.normalized_definition THEN
+                        RAISE EXCEPTION
+                            'Incompatible mobilesasa_sms_delivery_callbacks: constraint % has an unexpected definition',
+                            expected_mobilesasa_constraint.name;
+                    END IF;
                 END IF;
             END IF;
 
@@ -1673,16 +1766,33 @@ BEGIN
             'Incompatible preserve_mobilesasa_callback_notification_reference(): signature or function body differs from the required implementation';
     END IF;
 
-    IF to_regclass('mobilesasa_sms_delivery_callbacks') IS NULL
-       AND (
-           to_regclass('idx_mobilesasa_callbacks_unmatched') IS NOT NULL
-           OR to_regclass('idx_mobilesasa_callbacks_notification') IS NOT NULL
-           OR to_regclass('idx_mobilesasa_callbacks_original_notification') IS NOT NULL
-           OR to_regclass('idx_mobilesasa_callbacks_tracking_id') IS NOT NULL
-           OR to_regclass('idx_mobilesasa_callbacks_dispatch_reference') IS NOT NULL
+    IF NOT EXISTS (
+           SELECT 1
+           FROM pg_class callback_table
+           JOIN pg_namespace callback_schema
+             ON callback_schema.oid = callback_table.relnamespace
+           WHERE callback_schema.nspname = current_schema()
+             AND callback_table.relname =
+                 'mobilesasa_sms_delivery_callbacks'
+             AND callback_table.relkind IN ('r', 'p')
+       )
+       AND EXISTS (
+           SELECT 1
+           FROM pg_class callback_index
+           JOIN pg_namespace callback_schema
+             ON callback_schema.oid = callback_index.relnamespace
+           WHERE callback_schema.nspname = current_schema()
+             AND callback_index.relkind IN ('i', 'I')
+             AND callback_index.relname IN (
+                 'idx_mobilesasa_callbacks_unmatched',
+                 'idx_mobilesasa_callbacks_notification',
+                 'idx_mobilesasa_callbacks_original_notification',
+                 'idx_mobilesasa_callbacks_tracking_id',
+                 'idx_mobilesasa_callbacks_dispatch_reference'
+             )
        ) THEN
         RAISE EXCEPTION
-            'MobileSasa callback index names exist without their inbox table; inspect this partial schema before migration';
+            'MobileSasa callback index names exist without their inbox table in the current schema; inspect this partial schema before migration';
     END IF;
 
     SELECT pg_get_constraintdef(oid)
@@ -2154,14 +2264,6 @@ BEGIN
             'Conflicting object uq_notifications_provider_message_id has an incompatible definition';
     END IF;
 
-    IF to_regclass('idx_mobilesasa_callbacks_unmatched') IS NOT NULL
-       OR to_regclass('idx_mobilesasa_callbacks_notification') IS NOT NULL
-       OR to_regclass('idx_mobilesasa_callbacks_original_notification') IS NOT NULL
-       OR to_regclass('idx_mobilesasa_callbacks_tracking_id') IS NOT NULL
-       OR to_regclass('idx_mobilesasa_callbacks_dispatch_reference') IS NOT NULL THEN
-        RAISE EXCEPTION
-            'Mobile Sasa callback objects exist without their inbox table; inspect this partial schema before migration';
-    END IF;
 END
 $preflight$;
 
