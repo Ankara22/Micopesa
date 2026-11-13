@@ -10,6 +10,7 @@ import {
     initiateStkPush,
 } from "../../services/mpesaApi";
 import { getMyBalance, getMyContributions } from "../../services/accountService";
+import { getMyProfile } from "../../services/profileApi";
 import i18n from "../../i18n";
 
 vi.mock("../../services/mpesaApi", () => ({
@@ -25,6 +26,10 @@ vi.mock("../../services/accountService", () => ({
     getMyContributions: vi.fn(),
 }));
 
+vi.mock("../../services/profileApi", () => ({
+    getMyProfile: vi.fn(),
+}));
+
 describe("DepositModal", () => {
     afterEach(async () => {
         cleanup();
@@ -37,14 +42,67 @@ describe("DepositModal", () => {
         vi.clearAllMocks();
         window.sessionStorage.removeItem("micopesa.mpesa.lastPaymentAttempt");
         window.sessionStorage.removeItem("micopesa.mpesa.paymentIdempotencyKey");
-        getPaymentProvider.mockResolvedValue({ provider: "DARAJA", simulator_enabled: false });
+        getPaymentProvider.mockResolvedValue({
+            provider: "DARAJA",
+            environment: "sandbox",
+            payment_enabled: false,
+            message_key: "MPESA_PAYMENTS_DISABLED",
+        });
         getStkPushStatus.mockResolvedValue({});
         getStkPushStatusByIdempotencyKey.mockResolvedValue({});
         getMyBalance.mockResolvedValue({ current_balance: 0 });
         getMyContributions.mockResolvedValue([]);
+        getMyProfile.mockResolvedValue({
+            phone: "07000000000",
+            phone_verified_at: "2026-01-01T00:00:00.000Z",
+        });
     });
 
-    it("keeps payment initiation disabled for real and simulated providers", async () => {
+    it.each([
+        ["DARAJA", "sandbox"],
+        ["SIMULATOR", "unavailable"],
+        ["UNAVAILABLE", "unavailable"],
+    ])("keeps real and simulated payment initiation disabled for %s", async (provider, environment) => {
+        getPaymentProvider.mockResolvedValue({
+            provider,
+            environment,
+            payment_enabled: false,
+            message_key: "MPESA_PAYMENTS_DISABLED",
+        });
+
+        render(
+            <ToastProvider>
+                <DepositModal open onClose={vi.fn()} />
+            </ToastProvider>,
+        );
+
+        const unavailableMessage = await screen.findByText(
+            "M-Pesa deposits are not enabled. No payment was started."
+        );
+        expect(unavailableMessage).toHaveAttribute("role", "status");
+
+        const amount = screen.getByLabelText("Amount (KES)");
+        const phone = screen.getByLabelText("M-Pesa phone number");
+        const submit = screen.getByRole("button", { name: "Deposits unavailable" });
+
+        expect(amount).toBeDisabled();
+        expect(phone).toHaveAttribute("readonly");
+        expect(submit).toBeDisabled();
+
+        fireEvent.submit(amount.closest("form"));
+        await waitFor(() => expect(initiateStkPush).not.toHaveBeenCalled());
+        expect(confirmSimulatedPayment).not.toHaveBeenCalled();
+    });
+
+    it("does not allow initiation when the profile phone is not verified", async () => {
+        getPaymentProvider.mockResolvedValue({
+            provider: "DARAJA",
+            environment: "sandbox",
+            payment_enabled: true,
+            message_key: "MPESA_PAYMENTS_AVAILABLE",
+        });
+        getMyProfile.mockResolvedValue({ phone: "07000000000", phone_verified_at: null });
+
         render(
             <ToastProvider>
                 <DepositModal open onClose={vi.fn()} />
@@ -52,22 +110,110 @@ describe("DepositModal", () => {
         );
 
         expect(await screen.findByText(
-            "Deposits are temporarily unavailable. No real or simulated payment will be started.",
+            "Verify a phone number in your profile before making a contribution.",
         )).toBeInTheDocument();
+        expect(screen.getByLabelText("M-Pesa phone number")).toBeDisabled();
+        expect(initiateStkPush).not.toHaveBeenCalled();
+    });
 
-        const amount = screen.getByLabelText("Amount (KES)");
-        const phone = screen.getByLabelText("M-Pesa phone number");
-        const submit = screen.getByRole("button", { name: "Deposits unavailable" });
+    it("offers a safe retry when the verified phone profile cannot be loaded", async () => {
+        getMyProfile
+            .mockRejectedValueOnce(new Error("sensitive profile details"))
+            .mockResolvedValueOnce({
+                phone: "07000000000",
+                phone_verified_at: "2026-01-01T00:00:00.000Z",
+            });
 
-        expect(amount).toBeDisabled();
-        expect(phone).toBeDisabled();
-        expect(submit).toBeDisabled();
+        render(
+            <ToastProvider>
+                <DepositModal open onClose={vi.fn()} />
+            </ToastProvider>,
+        );
 
-        fireEvent.submit(amount.closest("form"));
-        await waitFor(() => {
-            expect(initiateStkPush).not.toHaveBeenCalled();
-            expect(confirmSimulatedPayment).not.toHaveBeenCalled();
+        expect(await screen.findByText(
+            "Unable to load your verified phone number. Try again before making a payment.",
+        )).toBeInTheDocument();
+        expect(screen.queryByText("sensitive profile details")).not.toBeInTheDocument();
+        fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+        expect(await screen.findByLabelText("M-Pesa phone number")).toHaveValue("07000000000");
+        expect(getMyProfile).toHaveBeenCalledTimes(2);
+        expect(initiateStkPush).not.toHaveBeenCalled();
+    });
+
+    it("starts a Daraja request only after explicit payment and verified-phone confirmation", async () => {
+        getPaymentProvider.mockResolvedValue({
+            provider: "DARAJA",
+            environment: "sandbox",
+            payment_enabled: true,
+            message_key: "MPESA_PAYMENTS_AVAILABLE",
         });
+        const pendingAttempt = {
+            attempt_id: "attempt-pending-1",
+            transaction_id: "transaction-pending-1",
+            attempt_status: "PENDING",
+            transaction_status: "PENDING",
+            payment_status: "PENDING",
+        };
+        initiateStkPush.mockResolvedValue(pendingAttempt);
+
+        render(
+            <ToastProvider>
+                <DepositModal open onClose={vi.fn()} />
+            </ToastProvider>,
+        );
+
+        const amount = await screen.findByLabelText("Amount (KES)");
+        const phone = screen.getByLabelText("M-Pesa phone number");
+        expect(phone).toHaveValue("07000000000");
+        expect(phone).toHaveAttribute("readonly");
+
+        fireEvent.change(amount, { target: { value: "2500" } });
+        const submit = screen.getByRole("button", { name: "Send STK Push" });
+        expect(submit).toBeDisabled();
+        fireEvent.click(screen.getByLabelText("I confirm this is my verified M-Pesa phone number."));
+        expect(submit).toBeEnabled();
+        fireEvent.click(submit);
+
+        await waitFor(() => {
+            expect(initiateStkPush).toHaveBeenCalledWith({
+                amount: 2500,
+                phoneNumber: "07000000000",
+                idempotencyKey: expect.any(String),
+                provider: "DARAJA",
+            });
+        });
+        expect(await screen.findByText("Awaiting provider confirmation...")).toBeInTheDocument();
+        expect(screen.queryByText("Deposit successful.")).not.toBeInTheDocument();
+        expect(window.sessionStorage.getItem("micopesa.mpesa.lastPaymentAttempt"))
+            .toBe("attempt-pending-1");
+        expect(confirmSimulatedPayment).not.toHaveBeenCalled();
+    });
+
+    it("does not resubmit when initiation outcome is unknown", async () => {
+        getPaymentProvider.mockResolvedValue({
+            provider: "DARAJA",
+            environment: "sandbox",
+            payment_enabled: true,
+            message_key: "MPESA_PAYMENTS_AVAILABLE",
+        });
+        initiateStkPush.mockRejectedValue({ status: null });
+
+        render(
+            <ToastProvider>
+                <DepositModal open onClose={vi.fn()} />
+            </ToastProvider>,
+        );
+
+        fireEvent.change(await screen.findByLabelText("Amount (KES)"), {
+            target: { value: "2500" },
+        });
+        fireEvent.click(screen.getByLabelText("I confirm this is my verified M-Pesa phone number."));
+        fireEvent.click(screen.getByRole("button", { name: "Send STK Push" }));
+
+        expect(await screen.findByText("Payment confirmation unknown")).toBeInTheDocument();
+        expect(initiateStkPush).toHaveBeenCalledTimes(1);
+        expect(getStkPushStatusByIdempotencyKey).not.toHaveBeenCalled();
+        expect(confirmSimulatedPayment).not.toHaveBeenCalled();
     });
 
     it("restores a saved attempt and checks its status without initiating payment", async () => {
