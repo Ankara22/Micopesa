@@ -33,7 +33,7 @@ function createPhoneChangeDatabase() {
         async query(sql, values = []) {
             state.queries.push({ sql, values });
             if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql)) return { rows: [] };
-            if (sql.includes("SELECT user_id, phone, password_hash")) {
+            if (sql.includes("SELECT user_id, phone, phone_verified_at, password_hash")) {
                 return { rows: state.account.user_id === values[0] ? [state.account] : [] };
             }
             if (sql.includes("SELECT user_id") && sql.includes("FROM users") &&
@@ -128,7 +128,9 @@ function createPhoneChangeDatabase() {
                     normalizeKenyanPhone(account.phone) === values[1]
                 );
                 if (duplicate) return { rows: [] };
-                state.account.phone = values[1];
+                if (normalizeKenyanPhone(state.account.phone) !== values[1]) {
+                    state.account.phone = values[1];
+                }
                 state.account.phone_verified_at = values[2];
                 return { rows: [{
                     user_id: state.account.user_id,
@@ -167,11 +169,16 @@ function createSmsService() {
     };
 }
 
-async function requestCode(database, smsService, now = () => new Date("2026-11-05T12:00:00Z")) {
+async function requestCode(
+    database,
+    smsService,
+    now = () => new Date("2026-11-05T12:00:00Z"),
+    newPhone = "0712 345 678"
+) {
     const result = await startPhoneChange({
         userId: "same-account",
         currentPassword: "existing-password",
-        newPhone: "0712 345 678",
+        newPhone,
         confirmed: true,
     }, {
         database,
@@ -215,8 +222,43 @@ test("verified phone change preserves identity, role, account state, and passwor
     assert.equal(state.account.password_hash, "unchanged-password-hash");
     assert.equal(state.account.phone, "+254712345678");
     assert.ok(state.account.phone_verified_at);
-    assert.ok(state.queries.some(({ sql }) => /SET phone = \$2, phone_verified_at = \$3/.test(sql)));
+    assert.ok(state.queries.some(({ sql }) => /SET phone = CASE[\s\S]*phone_verified_at = \$3/.test(sql)));
     assert.ok(state.queries.every(({ sql }) => !/SET[^;]*password_hash\s*=/i.test(sql)));
+});
+
+test("an unverified current phone can be verified without changing its stored value", async () => {
+    const { state, database } = createPhoneChangeDatabase();
+    const smsService = createSmsService();
+    state.account.phone = "0700 000 001";
+    state.account.phone_verified_at = null;
+    bcrypt.compare = async (password, hash) =>
+        password === "existing-password" && hash === "unchanged-password-hash";
+    await requestCode(database, smsService, undefined, "0700 000 001");
+    const code = smsService.sent[0].message.match(/\b(\d{6})\b/)[1];
+
+    const result = await verifyPhoneChange({
+        userId: "same-account",
+        code,
+    }, { database, now: () => new Date("2026-11-05T12:01:00Z") });
+
+    assert.equal(result.phone, "0700 000 001");
+    assert.equal(result.phoneVerified, true);
+    assert.equal(state.account.phone, "0700 000 001");
+    assert.ok(state.account.phone_verified_at);
+});
+
+test("an already verified current phone cannot be needlessly re-verified", async () => {
+    const { state, database } = createPhoneChangeDatabase();
+    const smsService = createSmsService();
+    state.account.phone_verified_at = new Date("2026-01-01T00:00:00Z");
+    bcrypt.compare = async () => true;
+
+    await assert.rejects(
+        requestCode(database, smsService, undefined, state.account.phone),
+        { code: "PHONE_CHANGE_SAME_PHONE", statusCode: 409 }
+    );
+    assert.equal(smsService.sent.length, 0);
+    assert.equal(state.challenge, null);
 });
 
 test("a concurrent phone uniqueness conflict is returned as a safe conflict", async () => {
@@ -421,15 +463,29 @@ test("development phone verification uses only its explicit SMS test switch", as
     assert.equal(state.account.phone, "254700000001");
 });
 
-test("phone-code resend limits are enforced without another provider request", async () => {
+test("phone-code resend interval and three-per-hour limit are enforced", async () => {
     const { database } = createPhoneChangeDatabase();
     const smsService = createSmsService();
     bcrypt.compare = async () => true;
-    const now = () => new Date("2026-11-05T12:00:00Z");
-    await requestCode(database, smsService, now);
-    await assert.rejects(requestCode(database, smsService, now), {
+    const start = new Date("2026-11-05T12:00:00Z");
+    await requestCode(database, smsService, () => start);
+    await assert.rejects(requestCode(
+        database,
+        smsService,
+        () => new Date(start.getTime() + 59_000)
+    ), {
         code: "PHONE_CHANGE_RATE_LIMITED",
         statusCode: 429,
     });
-    assert.equal(smsService.sent.length, 1);
+    await requestCode(database, smsService, () => new Date(start.getTime() + 60_000));
+    await requestCode(database, smsService, () => new Date(start.getTime() + 120_000));
+    await assert.rejects(requestCode(
+        database,
+        smsService,
+        () => new Date(start.getTime() + 180_000)
+    ), {
+        code: "PHONE_CHANGE_RATE_LIMITED",
+        statusCode: 429,
+    });
+    assert.equal(smsService.sent.length, 3);
 });

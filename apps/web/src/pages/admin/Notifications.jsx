@@ -18,11 +18,16 @@ import StatusBadge from "../../components/ui/StatusBadge";
 import { useToast } from "../../components/ui/ToastContext";
 import { AdminCard, AdminPage } from "../../components/AdminPage";
 import PushSubscriptionControl from "../../components/Notifications/PushSubscriptionControl";
-import { normalizeNotificationStatus } from "../../components/ui/notificationStatus";
+import ChannelNotificationPreferences from "../../components/Notifications/ChannelNotificationPreferences";
+import {
+    getCombinedNotificationStatus,
+    normalizeNotificationStatus,
+} from "../../components/ui/notificationStatus";
 import "../notifications/notifications.css";
 
 const CHANNELS = ["SMS", "EMAIL", "PUSH"];
 const HISTORY_STATUSES = ["PENDING", "PROVIDER_ACCEPTED", "DELIVERED", "FAILED", "UNKNOWN"];
+const DISPATCH_PENDING_STATUSES = new Set(["PENDING", "PROCESSING"]);
 const ADMIN_TEST_SMS_MESSAGE =
     "MicoPesa test notification: Your SMS notification service is working. This is a test message. No payment has been made.";
 const EMPTY_FORM = {
@@ -145,9 +150,9 @@ function Notifications() {
 
     function isChannelAvailable(channel) {
         if (!selectedRecipients.length) return false;
-        if (channel === "SMS") return selectedRecipients.every((recipient) => Boolean(recipient.phone));
-        if (channel === "EMAIL") return selectedRecipients.every((recipient) => Boolean(recipient.email));
-        return selectedRecipients.every((recipient) => Number(recipient.push_subscription_count) > 0);
+        if (channel === "SMS") return selectedRecipients.some((recipient) => Boolean(recipient.phone));
+        if (channel === "EMAIL") return selectedRecipients.some((recipient) => Boolean(recipient.email));
+        return selectedRecipients.some((recipient) => Number(recipient.push_subscription_count) > 0);
     }
 
     function handlePreview(event) {
@@ -177,6 +182,47 @@ function Notifications() {
             const latest = rows.find((row) => row.notification_id === current.notification_id);
             return latest ? { ...current, ...latest } : current;
         });
+    }
+
+    async function watchQueuedDeliveryResults(results) {
+        const dispatchResults = results.filter((result) =>
+            ["SMS", "EMAIL"].includes(result.notification_type)
+        );
+        if (!dispatchResults.length) return;
+        const notificationIds = new Set(dispatchResults.map((result) => result.notification_id));
+
+        for (let attempt = 0; attempt < 6; attempt += 1) {
+            if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 1000));
+            const rows = await notificationsApi.refetch(true);
+            if (!Array.isArray(rows)) return;
+            const latestResults = dispatchResults.map((result) =>
+                rows.find((row) => notificationIds.has(row.notification_id) &&
+                    row.notification_id === result.notification_id) || result
+            );
+            setLastResults((current) => current.map((result) =>
+                latestResults.find((latest) => latest.notification_id === result.notification_id) || result
+            ));
+
+            if (latestResults.every((result) =>
+                !DISPATCH_PENDING_STATUSES.has(normalizeNotificationStatus(result.delivery_status))
+            )) {
+                const hasFailure = latestResults.some((result) =>
+                    ["FAILED", "UNKNOWN", "SKIPPED"].includes(normalizeNotificationStatus(result.delivery_status))
+                );
+                const hasAcceptance = latestResults.some((result) =>
+                    ["PROVIDER_ACCEPTED", "DELIVERED"].includes(normalizeNotificationStatus(result.delivery_status))
+                );
+                toast[hasFailure ? "error" : "info"](
+                    t(hasFailure
+                        ? "adminNotifications.dispatchNeedsAttention"
+                        : hasAcceptance
+                            ? "adminNotifications.dispatchAccepted"
+                            : "adminNotifications.dispatchFinished")
+                );
+                return;
+            }
+        }
+        toast.info(t("adminNotifications.dispatchStillPending"));
     }
 
     async function confirmTestSms() {
@@ -226,6 +272,16 @@ function Notifications() {
         return t(`adminNotifications.statusLabels.${normalized}`, {
             defaultValue: t(`worker.common.statuses.${normalized}`, { defaultValue: normalized }),
         });
+    }
+
+    function getResultGroup(rows, row) {
+        const requestKey = row.admin_request_key || row.request_id;
+        const recipientId = row.recipient_user_id || row.user_id || row.recipient_phone;
+        if (!requestKey || !recipientId) return [];
+        return rows.filter((item) =>
+            (item.admin_request_key || item.request_id) === requestKey &&
+            (item.recipient_user_id || item.user_id || item.recipient_phone) === recipientId
+        );
     }
 
     function testSmsStatusMessage(result) {
@@ -333,13 +389,15 @@ function Notifications() {
                 ...(form.channels.includes("PUSH") ? { title: form.title } : {}),
                 request_id: requestIdRef.current,
             });
-            setLastResults(Array.isArray(results) ? results : []);
+            const queuedResults = Array.isArray(results) ? results : [];
+            setLastResults(queuedResults);
             setPreviewOpen(false);
             requestIdRef.current = null;
             setForm(EMPTY_FORM);
             setMessageTooLong(false);
             await refreshStatuses();
-            toast.success(t("adminNotifications.queuedSuccess"));
+            toast.info(t("adminNotifications.queuedSuccess"));
+            void watchQueuedDeliveryResults(queuedResults);
         } catch {
             toast.error(t("adminNotifications.queueError"));
         } finally {
@@ -706,19 +764,43 @@ function Notifications() {
 
                 {lastResults.length > 0 && (
                     <AdminCard title={t("adminNotifications.result")}>
-                        <ul>
-                            {lastResults.map((result) => (
+                        <ul aria-live="polite">
+                            {lastResults.map((result) => {
+                                const resultStatus = normalizeNotificationStatus(result.delivery_status);
+                                const resultGroup = getResultGroup(lastResults, result);
+                                return (
                                 <li key={result.notification_id}>
                                     {t(`worker.common.notificationTypes.${result.notification_type}`, {
                                         defaultValue: result.notification_type,
                                     })} {result.recipient_name ? `— ${result.recipient_name}: ` : ": "}
-                                    {t(`worker.common.statuses.${normalizeNotificationStatus(result.delivery_status)}`, {
-                                        defaultValue: normalizeNotificationStatus(result.delivery_status),
-                                    })}
+                                    {statusLabel(resultStatus)}
+                                    {resultGroup.length > 1 && (
+                                        <> — {t("adminNotifications.overallStatus")}:{" "}
+                                            {statusLabel(getCombinedNotificationStatus(resultGroup))}
+                                        </>
+                                    )}
+                                    {normalizeNotificationStatus(result.delivery_status) === "SKIPPED" &&
+                                        ` — ${t(`adminNotifications.skipReasons.${result.last_error_code}`, {
+                                            defaultValue: t("adminNotifications.skipped"),
+                                        })}`}
+                                    {["FAILED", "UNKNOWN"].includes(normalizeNotificationStatus(result.delivery_status)) &&
+                                        result.last_error_code &&
+                                        ` — ${t(`adminNotifications.failureCodes.${result.last_error_code}`, {
+                                            defaultValue: `${t("adminNotifications.failureCode")}: ${result.last_error_code}`,
+                                        })}`}
                                     {normalizeNotificationStatus(result.delivery_status) === "PROVIDER_ACCEPTED" &&
                                         ` — ${t("adminNotifications.providerAccepted")}`}
+                                    {result.provider_accepted_at &&
+                                        ` — ${t("adminNotifications.providerAcceptedAt")}: ${new Date(result.provider_accepted_at).toLocaleString(
+                                            i18n.language === "sw" ? "sw-KE" : "en-KE"
+                                        )}`}
+                                    {result.provider_message_id &&
+                                        ` — ${t("adminNotifications.providerReference")}: ${result.provider_message_id}`}
+                                    {result.delivery_result?.provider &&
+                                        ` — ${t("adminNotifications.provider")}: ${result.delivery_result.provider}`}
                                 </li>
-                            ))}
+                                );
+                            })}
                         </ul>
                     </AdminCard>
                 )}
@@ -782,6 +864,7 @@ function Notifications() {
                         <ol className="notification-timeline notification-timeline--admin">
                             {filteredHistoryRows.map((row) => {
                                 const normalizedStatus = normalizeNotificationStatus(row.delivery_status);
+                                const rowGroup = getResultGroup(historyRows, row);
                                 return (
                                     <li className="notification-timeline-item" key={row.notification_id}>
                                         <span className="notification-timeline-marker" aria-hidden="true" />
@@ -798,7 +881,39 @@ function Notifications() {
                                                 </div>
                                                 <StatusBadge status={normalizedStatus} label={statusLabel(normalizedStatus)} />
                                             </div>
+                                            {rowGroup.length > 1 && (
+                                                <p><strong>{t("adminNotifications.overallStatus")}:</strong>{" "}
+                                                    {statusLabel(getCombinedNotificationStatus(rowGroup))}
+                                                </p>
+                                            )}
                                             <p className="notification-message-content">{row.message}</p>
+                                            {normalizedStatus === "PROVIDER_ACCEPTED" && (
+                                                <p>{t("adminNotifications.providerAccepted")}</p>
+                                            )}
+                                            {row.provider_accepted_at && (
+                                                <p><strong>{t("adminNotifications.providerAcceptedAt")}:</strong>{" "}
+                                                    {new Date(row.provider_accepted_at).toLocaleString(
+                                                        i18n.language === "sw" ? "sw-KE" : "en-KE"
+                                                    )}
+                                                </p>
+                                            )}
+                                            {row.provider_message_id && (
+                                                <p><strong>{t("adminNotifications.providerReference")}:</strong>{" "}
+                                                    {row.provider_message_id}
+                                                </p>
+                                            )}
+                                            {normalizedStatus === "DELIVERED" && row.delivered_at && (
+                                                <p><strong>{t("adminNotifications.deliveredAt")}:</strong>{" "}
+                                                    {new Date(row.delivered_at).toLocaleString(
+                                                        i18n.language === "sw" ? "sw-KE" : "en-KE"
+                                                    )}
+                                                </p>
+                                            )}
+                                            {["FAILED", "UNKNOWN"].includes(normalizedStatus) && row.last_error_code && (
+                                                <p>{t(`adminNotifications.failureCodes.${row.last_error_code}`, {
+                                                    defaultValue: `${t("adminNotifications.failureCode")}: ${row.last_error_code}`,
+                                                })}</p>
+                                            )}
                                             <div className="notification-message-footer">
                                                 <time dateTime={row.created_at}>
                                                     {new Date(row.created_at).toLocaleString(
@@ -895,6 +1010,7 @@ function Notifications() {
             >
                 {selectedRecipients.length > 0 && (
                     <div className="admin-stack">
+                        <p>{t("adminNotifications.previewOnly")}</p>
                         <div>
                             <strong>{t("adminNotifications.to")} ({selectedRecipients.length}):</strong>
                             <ul>
@@ -1000,9 +1116,7 @@ function Notifications() {
                             })}
                         </p>
                         <p><strong>{t("adminNotifications.delivery")}:</strong>{" "}
-                            {t(`worker.common.statuses.${normalizeNotificationStatus(viewingNotification.delivery_status)}`, {
-                                defaultValue: normalizeNotificationStatus(viewingNotification.delivery_status),
-                            })}
+                            {statusLabel(viewingNotification.delivery_status)}
                         </p>
                         {normalizeNotificationStatus(viewingNotification.delivery_status) === "PROVIDER_ACCEPTED" && (
                             <p>{t("adminNotifications.providerAccepted")}</p>
@@ -1051,6 +1165,7 @@ function Notifications() {
                     </div>
                 )}
             </Modal>
+            <ChannelNotificationPreferences />
             <PushSubscriptionControl />
         </AdminPage>
     );

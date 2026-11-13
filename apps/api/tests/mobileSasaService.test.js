@@ -21,7 +21,7 @@ function response(payload, { ok = true, status = 200 } = {}) {
     return { ok, status, async json() { return payload; } };
 }
 
-test("Mobile Sasa SMS uses v2, scoped authorization, and a stable notification tracking ID", async () => {
+test("Mobile Sasa SMS uses the documented v1 endpoint and retains an internal tracking ID", async () => {
     let request;
     const result = await mobileSasaService.sendSms({
         to: "+254712345678",
@@ -36,20 +36,17 @@ test("Mobile Sasa SMS uses v2, scoped authorization, and a stable notification t
                 responseCode: "0200",
                 message: "Accepted",
                 messageId: "message-123",
-                trackingId: "notification-123",
-                cost: 1,
             });
         },
     });
 
-    assert.equal(request.url, "https://api.mobilesasa.com/v2/send/message");
+    assert.equal(request.url, "https://api.mobilesasa.com/v1/send/message");
     assert.equal(request.options.method, "POST");
     assert.equal(request.options.headers.Authorization, "Bearer mbs_test-token");
     assert.deepEqual(request.body, {
         senderID: "MicoPesa",
         phone: "+254712345678",
         message: "Contribution update",
-        trackingId: "notification-123",
     });
     assert.deepEqual(result, {
         accepted: true,
@@ -59,9 +56,73 @@ test("Mobile Sasa SMS uses v2, scoped authorization, and a stable notification t
             provider: "MOBILE_SASA",
             responseCode: "0200",
             trackingId: "notification-123",
-            smsParts: 1,
         },
     });
+});
+
+test("Mobile Sasa SMS accepts canonical server-side config names", async () => {
+    let request;
+    const environment = {
+        NODE_ENV: "production",
+        MOBILESASA_SMS_ENABLED: "true",
+        MOBILESASA_TOKEN: "mbs_canonical-token",
+        MOBILESASA_SENDER_ID: "MicoPesa",
+    };
+    assert.equal(mobileSasaService.isSmsConfigured(environment), true);
+
+    await mobileSasaService.sendSms({
+        to: "+254712345678",
+        message: "Account update",
+        trackingId: "notification-canonical",
+    }, {
+        environment,
+        fetchImpl: async (url, options) => {
+            request = { url, body: JSON.parse(options.body) };
+            return response({
+                status: true,
+                responseCode: "0200",
+                message: "Accepted",
+                messageId: "message-canonical",
+            });
+        },
+    });
+
+    assert.equal(request.url, "https://api.mobilesasa.com/v1/send/message");
+    assert.deepEqual(request.body, {
+        senderID: "MicoPesa",
+        phone: "+254712345678",
+        message: "Account update",
+    });
+});
+
+test("matching canonical and legacy Mobile Sasa config aliases are accepted", () => {
+    assert.equal(mobileSasaService.isSmsConfigured({
+        ...smsEnvironment,
+        MOBILESASA_TOKEN: "mbs_test-token",
+        MOBILESASA_SENDER_ID: "MicoPesa",
+    }), true);
+});
+
+test("conflicting Mobile Sasa canonical and legacy aliases disable dispatch before provider access", async () => {
+    let requests = 0;
+    const environment = {
+        ...smsEnvironment,
+        MOBILESASA_TOKEN: "mbs_other-token",
+        MOBILESASA_SENDER_ID: "DifferentSender",
+    };
+    assert.equal(mobileSasaService.isSmsConfigured(environment), false);
+    await assert.rejects(() => mobileSasaService.sendSms({
+        to: "+254712345678",
+        message: "Account update",
+        trackingId: "notification-conflict",
+    }, {
+        environment,
+        fetchImpl: async () => {
+            requests += 1;
+            return response({});
+        },
+    }), { code: "SMS_CONFIGURATION_MISSING" });
+    assert.equal(requests, 0);
 });
 
 test("Mobile Sasa duplicate response is unknown and does not become an automatic retry", async () => {
@@ -72,7 +133,13 @@ test("Mobile Sasa duplicate response is unknown and does not become an automatic
     }, {
         environment: smsEnvironment,
         fetchImpl: async () => response({ status: false, responseCode: "0409" }),
-    }), { code: "SMS_UNKNOWN_OUTCOME" });
+    }), (error) => {
+        assert.equal(error.code, "SMS_UNKNOWN_OUTCOME");
+        assert.equal(error.diagnostics.failureCategory, "unknown_outcome");
+        assert.equal(error.diagnostics.responseCode, "0409");
+        assert.equal(error.diagnostics.deliveryOutcomeUnknown, true);
+        return true;
+    });
 });
 
 test("Mobile Sasa definitive rejection and explicit rate limiting are distinguished", async () => {
@@ -88,7 +155,163 @@ test("Mobile Sasa definitive rejection and explicit rate limiting are distinguis
     await assert.rejects(() => mobileSasaService.sendSms(request, {
         environment: smsEnvironment,
         fetchImpl: async () => response({}, { ok: false, status: 429 }),
-    }), { code: "SMS_RETRYABLE_REJECTION" });
+    }), (error) => {
+        assert.equal(error.code, "SMS_RETRYABLE_REJECTION");
+        assert.equal(error.diagnostics.failureCategory, "rate_limiting");
+        assert.equal(error.diagnostics.httpStatus, 429);
+        assert.equal(error.diagnostics.deliveryOutcomeUnknown, false);
+        return true;
+    });
+});
+
+test("Mobile Sasa emits sanitized request, response, and rejection diagnostics", async () => {
+    const records = [];
+    const logger = {
+        info(record) {
+            records.push(JSON.parse(record));
+        },
+    };
+    const error = await mobileSasaService.sendSms({
+        to: "+254712345678",
+        message: "private onboarding message",
+        trackingId: "private-tracking-id",
+    }, {
+        environment: smsEnvironment,
+        logger,
+        fetchImpl: async () => response({
+            status: false,
+            responseCode: "0402",
+            message: "private provider response",
+        }, { ok: false, status: 422 }),
+    }).then(() => null, (caught) => caught);
+
+    assert.equal(error.code, "SMS_PROVIDER_REJECTED");
+    assert.deepEqual(error.diagnostics, {
+        errorCode: "SMS_PROVIDER_REJECTED",
+        errorClass: "Error",
+        requestStarted: true,
+        httpResponseReceived: true,
+        httpStatus: 422,
+        responseCode: "0402",
+        failureCategory: "provider_rejection",
+        deliveryOutcomeUnknown: false,
+    });
+    assert.deepEqual(records.map(({ event }) => event), [
+        "mobilesasa.sms_request_started",
+        "mobilesasa.sms_http_response_received",
+        "mobilesasa.sms_response_parsed",
+    ]);
+    assert.equal(records[0].httpResponseReceived, false);
+    assert.equal(records[1].httpStatus, 422);
+    assert.equal(records[2].responseCode, "0402");
+    assert.doesNotMatch(JSON.stringify(records), /private onboarding message|private-tracking-id|private provider response|\+254/);
+});
+
+test("Mobile Sasa classifies authentication rejection and strips unsafe response codes", async () => {
+    const records = [];
+    const error = await mobileSasaService.sendSms({
+        to: "+254712345678",
+        message: "Notice",
+        trackingId: "tracking-127",
+    }, {
+        environment: smsEnvironment,
+        logger: { info: (record) => records.push(JSON.parse(record)) },
+        fetchImpl: async () => response({
+            status: false,
+            responseCode: "401 secret",
+            message: "provider detail must not be logged",
+        }, { ok: false, status: 401 }),
+    }).then(() => null, (caught) => caught);
+
+    assert.equal(error.code, "SMS_PROVIDER_AUTH_FAILED");
+    assert.equal(error.diagnostics.failureCategory, "authentication_failure");
+    assert.equal(error.diagnostics.httpStatus, 401);
+    assert.equal(error.diagnostics.responseCode, null);
+    assert.doesNotMatch(JSON.stringify(records), /secret|provider detail|\+254|Notice/);
+});
+
+test("Mobile Sasa classifies an authentication response even when its body is not JSON", async () => {
+    const error = await mobileSasaService.sendSms({
+        to: "+254712345678",
+        message: "Notice",
+        trackingId: "tracking-130",
+    }, {
+        environment: smsEnvironment,
+        logger: { info() {} },
+        fetchImpl: async () => ({
+            ok: false,
+            status: 403,
+            async json() { throw new SyntaxError("private response body"); },
+        }),
+    }).then(() => null, (caught) => caught);
+
+    assert.equal(error.code, "SMS_PROVIDER_AUTH_FAILED");
+    assert.equal(error.diagnostics.failureCategory, "authentication_failure");
+    assert.equal(error.diagnostics.httpResponseReceived, true);
+    assert.equal(error.diagnostics.httpStatus, 403);
+    assert.equal(error.diagnostics.responseCode, null);
+    assert.equal(error.diagnostics.deliveryOutcomeUnknown, false);
+});
+
+test("Mobile Sasa network and timeout diagnostics preserve uncertain outcomes", async (t) => {
+    await t.test("network failure", async () => {
+        const error = await mobileSasaService.sendSms({
+            to: "+254712345678",
+            message: "Notice",
+            trackingId: "tracking-128",
+        }, {
+            environment: smsEnvironment,
+            logger: { info() {} },
+            fetchImpl: async () => { throw new TypeError("private network detail"); },
+        }).then(() => null, (caught) => caught);
+
+        assert.equal(error.code, "SMS_NETWORK_ERROR");
+        assert.equal(error.diagnostics.errorClass, "TypeError");
+        assert.equal(error.diagnostics.failureCategory, "network_failure");
+        assert.equal(error.diagnostics.httpResponseReceived, false);
+        assert.equal(error.diagnostics.deliveryOutcomeUnknown, true);
+    });
+
+    await t.test("timeout", async () => {
+        const error = await mobileSasaService.sendSms({
+            to: "+254712345678",
+            message: "Notice",
+            trackingId: "tracking-129",
+        }, {
+            environment: smsEnvironment,
+            timeoutMs: 5,
+            logger: { info() {} },
+            fetchImpl: async () => new Promise(() => {}),
+        }).then(() => null, (caught) => caught);
+
+        assert.equal(error.code, "SMS_TIMEOUT");
+        assert.equal(error.diagnostics.failureCategory, "timeout");
+        assert.equal(error.diagnostics.httpResponseReceived, false);
+        assert.equal(error.diagnostics.deliveryOutcomeUnknown, true);
+    });
+
+    await t.test("response body timeout", async () => {
+        const error = await mobileSasaService.sendSms({
+            to: "+254712345678",
+            message: "Notice",
+            trackingId: "tracking-131",
+        }, {
+            environment: smsEnvironment,
+            timeoutMs: 5,
+            logger: { info() {} },
+            fetchImpl: async () => ({
+                ok: true,
+                status: 200,
+                json: () => new Promise(() => {}),
+            }),
+        }).then(() => null, (caught) => caught);
+
+        assert.equal(error.code, "SMS_TIMEOUT");
+        assert.equal(error.diagnostics.failureCategory, "timeout");
+        assert.equal(error.diagnostics.httpResponseReceived, true);
+        assert.equal(error.diagnostics.httpStatus, 200);
+        assert.equal(error.diagnostics.deliveryOutcomeUnknown, true);
+    });
 });
 
 test("Mobile Sasa SMS rejects invalid input and missing configuration before sending", async () => {
@@ -177,12 +400,11 @@ test("development self-test SMS uses the existing adapter without enabling norma
         },
     });
 
-    assert.equal(request.url, "https://api.mobilesasa.com/v2/send/message");
+    assert.equal(request.url, "https://api.mobilesasa.com/v1/send/message");
     assert.deepEqual(request.body, {
         senderID: "MicoPesa",
         phone: "+254712345678",
         message: "MicoPesa test notification: Your SMS notification service is working. This is a test message. No payment has been made.",
-        trackingId: "test-notification-1",
     });
     assert.equal(result.status, "PROVIDER_ACCEPTED");
     assert.equal(mobileSasaService.isSmsConfigured(developmentEnvironment), false);
@@ -190,7 +412,9 @@ test("development self-test SMS uses the existing adapter without enabling norma
         to: "+254712345678",
         message: "Normal notification",
         trackingId: "normal-notification-1",
-    }, { environment: developmentEnvironment }), { code: "SMS_PRODUCTION_ONLY" });
+    }, { environment: developmentEnvironment }), {
+        code: "SMS_DEVELOPMENT_DELIVERY_DISABLED",
+    });
 });
 
 test("development phone verification uses the isolated adapter without enabling dispatch", async () => {

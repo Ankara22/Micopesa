@@ -1,12 +1,47 @@
-const SMS_ENDPOINT = "https://api.mobilesasa.com/v2/send/message";
+const SMS_ENDPOINT = "https://api.mobilesasa.com/v1/send/message";
 const EMAIL_ENDPOINT = "https://api.mobilesasa.com/api/v1/email/send";
 const REQUEST_TIMEOUT_MS = 10000;
 const DOMAIN_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const {
+    assertDevelopmentRecipientAllowed,
+    isDevelopmentDeliveryRuntime,
+} = require("./communicationDeliveryPolicy");
 
 function providerError(message, code) {
     const error = new Error(message);
     error.code = code;
     return error;
+}
+
+function sanitizeResponseCode(value) {
+    return typeof value === "string" && /^\d{4,6}$/.test(value) ? value : null;
+}
+
+function logSmsDiagnostic(logger, event, details) {
+    if (typeof logger?.info !== "function") return;
+    logger.info(JSON.stringify({
+        event,
+        provider: "MOBILE_SASA",
+        ...details,
+    }));
+}
+
+function smsFailure(message, code, details) {
+    const error = providerError(message, code);
+    error.diagnostics = {
+        errorCode: code,
+        errorClass: error.name,
+        ...details,
+    };
+    return error;
+}
+
+function safeErrorClass(error) {
+    const name = error?.name;
+    return typeof name === "string" &&
+        /^(Error|TypeError|AbortError|FetchError|AggregateError|RangeError|SyntaxError)$/.test(name)
+        ? name
+        : "Error";
 }
 
 function hasConfiguration(environment, tokenName, senderName) {
@@ -19,6 +54,29 @@ function hasConfiguration(environment, tokenName, senderName) {
     return Boolean(token?.startsWith("mbs_") && sender);
 }
 
+function getSmsConfiguration(environment) {
+    const canonicalToken = typeof environment.MOBILESASA_TOKEN === "string"
+        ? environment.MOBILESASA_TOKEN.trim()
+        : "";
+    const legacyToken = typeof environment.MOBILE_SASA_SMS_API_TOKEN === "string"
+        ? environment.MOBILE_SASA_SMS_API_TOKEN.trim()
+        : "";
+    const canonicalSender = typeof environment.MOBILESASA_SENDER_ID === "string"
+        ? environment.MOBILESASA_SENDER_ID.trim()
+        : "";
+    const legacySender = typeof environment.MOBILE_SASA_SMS_SENDER_ID === "string"
+        ? environment.MOBILE_SASA_SMS_SENDER_ID.trim()
+        : "";
+
+    const tokenConflict = canonicalToken && legacyToken && canonicalToken !== legacyToken;
+    const senderConflict = canonicalSender && legacySender && canonicalSender !== legacySender;
+    return {
+        token: canonicalToken || legacyToken,
+        senderId: canonicalSender || legacySender,
+        conflict: Boolean(tokenConflict || senderConflict),
+    };
+}
+
 function normalizeKenyanSmsRecipient(phone) {
     if (typeof phone !== "string") return null;
     const trimmed = phone.trim();
@@ -29,15 +87,19 @@ function normalizeKenyanSmsRecipient(phone) {
 }
 
 function isSmsConfigured(environment = process.env) {
+    const configuration = getSmsConfiguration(environment);
     return environment.MOBILESASA_SMS_ENABLED === "true" &&
-        hasConfiguration(environment, "MOBILE_SASA_SMS_API_TOKEN", "MOBILE_SASA_SMS_SENDER_ID");
+        !configuration.conflict &&
+        Boolean(configuration.token.startsWith("mbs_") && configuration.senderId);
 }
 
 function isTestSmsConfigured(environment = process.env) {
+    const configuration = getSmsConfiguration(environment);
     return environment.NODE_ENV === "development" &&
         environment.MOBILESASA_TEST_SMS_ENABLED === "true" &&
         environment.MOBILESASA_SMS_ENABLED !== "true" &&
-        hasConfiguration(environment, "MOBILE_SASA_SMS_API_TOKEN", "MOBILE_SASA_SMS_SENDER_ID");
+        !configuration.conflict &&
+        Boolean(configuration.token.startsWith("mbs_") && configuration.senderId);
 }
 
 function isPhoneVerificationSmsConfigured(environment = process.env) {
@@ -58,6 +120,7 @@ async function requestJson(url, body, {
     fetchImpl,
     timeoutMs,
     errorPrefix,
+    diagnosticLogger,
 }) {
     if (typeof fetchImpl !== "function") {
         throw providerError("Mobile Sasa delivery is unavailable.", `${errorPrefix}_CONFIGURATION_MISSING`);
@@ -68,6 +131,15 @@ async function requestJson(url, body, {
 
     const controller = new AbortController();
     let timeoutId;
+    const requestStarted = errorPrefix === "SMS";
+    let httpResponseReceived = false;
+    let httpStatus = null;
+    let responseCode = null;
+    if (requestStarted) {
+        logSmsDiagnostic(diagnosticLogger, "mobilesasa.sms_request_started", {
+            httpResponseReceived: false,
+        });
+    }
     try {
         const request = fetchImpl(url, {
             method: "POST",
@@ -79,35 +151,105 @@ async function requestJson(url, body, {
             body: JSON.stringify(body),
             signal: controller.signal,
         });
-        const response = await Promise.race([
-            request,
-            new Promise((_, reject) => {
-                timeoutId = setTimeout(() => {
-                    controller.abort();
-                    reject(providerError(
-                        "The Mobile Sasa request timed out.",
-                        `${errorPrefix}_TIMEOUT`
-                    ));
-                }, timeoutMs);
-            }),
-        ]);
+        const timeoutPromise = new Promise((_, reject) => {
+            timeoutId = setTimeout(() => {
+                controller.abort();
+                reject(smsFailure(
+                    "The Mobile Sasa request timed out.",
+                    `${errorPrefix}_TIMEOUT`,
+                    {
+                        requestStarted,
+                        httpResponseReceived,
+                        httpStatus,
+                        responseCode,
+                        failureCategory: "timeout",
+                        deliveryOutcomeUnknown: true,
+                    }
+                ));
+            }, timeoutMs);
+        });
+        const response = await Promise.race([request, timeoutPromise]);
+        httpStatus = Number.isInteger(response?.status) &&
+            response.status >= 100 && response.status <= 599
+            ? response.status
+            : null;
+        httpResponseReceived = true;
+        if (requestStarted) {
+            logSmsDiagnostic(diagnosticLogger, "mobilesasa.sms_http_response_received", {
+                httpResponseReceived: true,
+                httpStatus,
+            });
+        }
         let payload;
         try {
-            payload = await response.json();
-        } catch {
-            throw providerError(
-                "The Mobile Sasa provider returned an invalid response.",
-                `${errorPrefix}_INVALID_RESPONSE`
+            payload = await Promise.race([response.json(), timeoutPromise]);
+        } catch (error) {
+            if (error?.diagnostics) throw error;
+            const failure = httpStatus === 401 || httpStatus === 403
+                ? {
+                    message: "The Mobile Sasa provider rejected SMS authentication.",
+                    code: `${errorPrefix}_PROVIDER_AUTH_FAILED`,
+                    failureCategory: "authentication_failure",
+                    deliveryOutcomeUnknown: false,
+                }
+                : httpStatus === 429
+                    ? {
+                        message: "The Mobile Sasa provider explicitly rate-limited the request.",
+                        code: `${errorPrefix}_RETRYABLE_REJECTION`,
+                        failureCategory: "rate_limiting",
+                        deliveryOutcomeUnknown: false,
+                    }
+                    : Number.isInteger(httpStatus) && httpStatus >= 400 && httpStatus < 500
+                        ? {
+                            message: "The Mobile Sasa provider did not accept the message.",
+                            code: `${errorPrefix}_PROVIDER_REJECTED`,
+                            failureCategory: "provider_rejection",
+                            deliveryOutcomeUnknown: false,
+                        }
+                        : {
+                            message: "The Mobile Sasa provider returned an invalid response.",
+                            code: `${errorPrefix}_INVALID_RESPONSE`,
+                            failureCategory: "unknown_outcome",
+                            deliveryOutcomeUnknown: true,
+                        };
+            throw smsFailure(
+                failure.message,
+                failure.code,
+                {
+                    requestStarted,
+                    httpResponseReceived: true,
+                    httpStatus,
+                    responseCode: null,
+                    failureCategory: failure.failureCategory,
+                    deliveryOutcomeUnknown: failure.deliveryOutcomeUnknown,
+                }
             );
         }
-        return { response, payload };
+        responseCode = sanitizeResponseCode(payload?.responseCode);
+        if (requestStarted) {
+            logSmsDiagnostic(diagnosticLogger, "mobilesasa.sms_response_parsed", {
+                httpResponseReceived: true,
+                httpStatus,
+                responseCode,
+            });
+        }
+        return { response, payload, httpStatus, responseCode };
     } catch (error) {
-        if (typeof error?.code === "string" && error.code.startsWith(`${errorPrefix}_`)) {
+        if (error?.diagnostics) {
             throw error;
         }
-        throw providerError(
-            "The Mobile Sasa request outcome could not be established.",
-            `${errorPrefix}_UNKNOWN_OUTCOME`
+        throw smsFailure(
+            "The Mobile Sasa request failed before a response was received.",
+            `${errorPrefix}_NETWORK_ERROR`,
+            {
+                requestStarted,
+                httpResponseReceived: false,
+                httpStatus: null,
+                responseCode: null,
+                failureCategory: "network_failure",
+                deliveryOutcomeUnknown: true,
+                errorClass: safeErrorClass(error),
+            }
         );
     } finally {
         clearTimeout(timeoutId);
@@ -117,82 +259,159 @@ async function requestJson(url, body, {
 async function sendSmsRequest(
     { to, message, trackingId },
     { environment, fetchImpl, timeoutMs },
-    { testOnly = false } = {}
+    { testOnly = false, diagnosticLogger } = {}
 ) {
     const testModeAllowed = environment.NODE_ENV === "development" &&
         environment.MOBILESASA_TEST_SMS_ENABLED === "true" &&
         environment.MOBILESASA_SMS_ENABLED !== "true";
-    if (testOnly ? !testModeAllowed : environment.NODE_ENV !== "production") {
-        throw providerError(
+    if (testOnly && !testModeAllowed) {
+        throw smsFailure(
             "SMS sending is disabled for this runtime.",
-            testOnly ? "SMS_TEST_DISABLED" : "SMS_PRODUCTION_ONLY"
+            "SMS_TEST_DISABLED",
+            {
+                requestStarted: false,
+                httpResponseReceived: false,
+                httpStatus: null,
+                responseCode: null,
+                failureCategory: "configuration_failure",
+                deliveryOutcomeUnknown: false,
+            }
         );
     }
-    if (testOnly ? !hasConfiguration(
-        environment,
-        "MOBILE_SASA_SMS_API_TOKEN",
-        "MOBILE_SASA_SMS_SENDER_ID"
-    ) : !isSmsConfigured(environment)) {
-        throw providerError("Mobile Sasa SMS configuration is missing.", "SMS_CONFIGURATION_MISSING");
+    if (!testOnly && isDevelopmentDeliveryRuntime(environment)) {
+        assertDevelopmentRecipientAllowed("SMS", to, environment);
+    } else if (!testOnly && environment.NODE_ENV !== "production") {
+        throw smsFailure(
+            "SMS sending is disabled for this runtime.",
+            "SMS_PRODUCTION_ONLY",
+            {
+                requestStarted: false,
+                httpResponseReceived: false,
+                httpStatus: null,
+                responseCode: null,
+                failureCategory: "configuration_failure",
+                deliveryOutcomeUnknown: false,
+            }
+        );
+    }
+    const smsConfiguration = getSmsConfiguration(environment);
+    if (smsConfiguration.conflict || (testOnly
+        ? !(smsConfiguration.token.startsWith("mbs_") && smsConfiguration.senderId)
+        : !isSmsConfigured(environment))) {
+        throw smsFailure(
+            "Mobile Sasa SMS configuration is missing or conflicting.",
+            "SMS_CONFIGURATION_MISSING",
+            {
+                requestStarted: false,
+                httpResponseReceived: false,
+                httpStatus: null,
+                responseCode: null,
+                failureCategory: "configuration_failure",
+                deliveryOutcomeUnknown: false,
+            }
+        );
     }
     const recipient = testOnly ? normalizeKenyanSmsRecipient(to) : to;
     if (typeof recipient !== "string" || !/^\+254[17]\d{8}$/.test(recipient) ||
         typeof message !== "string" || !message.trim() ||
         typeof trackingId !== "string" || !trackingId.trim() ||
         trackingId.length > 128 || /[\u0000-\u001f\u007f]/.test(trackingId)) {
-        throw providerError("Mobile Sasa SMS data is invalid.", "SMS_INVALID_INPUT");
+        throw smsFailure("Mobile Sasa SMS data is invalid.", "SMS_INVALID_INPUT", {
+            requestStarted: false,
+            httpResponseReceived: false,
+            httpStatus: null,
+            responseCode: null,
+            failureCategory: "input_validation",
+            deliveryOutcomeUnknown: false,
+        });
     }
 
-    const { response, payload } = await requestJson(SMS_ENDPOINT, {
-        senderID: environment.MOBILE_SASA_SMS_SENDER_ID.trim(),
+    const { response, payload, httpStatus, responseCode } = await requestJson(SMS_ENDPOINT, {
+        senderID: smsConfiguration.senderId,
         phone: recipient,
         message,
-        trackingId,
     }, {
-        token: environment.MOBILE_SASA_SMS_API_TOKEN.trim(),
+        token: smsConfiguration.token,
         fetchImpl,
         timeoutMs,
         errorPrefix: "SMS",
+        diagnosticLogger,
     });
 
-    if (response.status === 429) {
-        throw providerError(
+    const responseDetails = {
+        requestStarted: true,
+        httpResponseReceived: true,
+        httpStatus,
+        responseCode,
+        deliveryOutcomeUnknown: false,
+    };
+    if (httpStatus === 401 || httpStatus === 403) {
+        throw smsFailure(
+            "The Mobile Sasa provider rejected SMS authentication.",
+            "SMS_PROVIDER_AUTH_FAILED",
+            { ...responseDetails, failureCategory: "authentication_failure" }
+        );
+    }
+    if (httpStatus === 429) {
+        throw smsFailure(
             "The Mobile Sasa provider explicitly rate-limited the request.",
-            "SMS_RETRYABLE_REJECTION"
+            "SMS_RETRYABLE_REJECTION",
+            { ...responseDetails, failureCategory: "rate_limiting" }
         );
     }
     if (!response.ok) {
-        throw providerError(
-            response.status >= 400 && response.status < 500
+        const rejected = httpStatus !== null && httpStatus >= 400 && httpStatus < 500;
+        throw smsFailure(
+            rejected
                 ? "The Mobile Sasa provider did not accept the message."
                 : "The Mobile Sasa request outcome could not be established.",
-            response.status >= 400 && response.status < 500
+            rejected
                 ? "SMS_PROVIDER_REJECTED"
-                : "SMS_UNKNOWN_OUTCOME"
+                : "SMS_UNKNOWN_OUTCOME",
+            {
+                ...responseDetails,
+                failureCategory: rejected ? "provider_rejection" : "unknown_outcome",
+                deliveryOutcomeUnknown: !rejected,
+            }
         );
     }
     if (payload?.responseCode === "0409") {
-        throw providerError(
+        throw smsFailure(
             "The Mobile Sasa provider reported a possible duplicate message.",
-            "SMS_UNKNOWN_OUTCOME"
+            "SMS_UNKNOWN_OUTCOME",
+            {
+                ...responseDetails,
+                failureCategory: "unknown_outcome",
+                deliveryOutcomeUnknown: true,
+            }
         );
     }
     if (payload?.status !== true || payload?.responseCode !== "0200") {
-        throw providerError(
-            payload?.status === false
+        const explicitRejection = payload?.status === false;
+        throw smsFailure(
+            explicitRejection
                 ? "The Mobile Sasa provider did not accept the message."
                 : "The Mobile Sasa provider returned an invalid response.",
-            payload?.status === false ? "SMS_PROVIDER_REJECTED" : "SMS_INVALID_RESPONSE"
+            explicitRejection ? "SMS_PROVIDER_REJECTED" : "SMS_INVALID_RESPONSE",
+            {
+                ...responseDetails,
+                failureCategory: explicitRejection ? "provider_rejection" : "unknown_outcome",
+                deliveryOutcomeUnknown: !explicitRejection,
+            }
         );
     }
     if (
         typeof payload.messageId !== "string" ||
         !payload.messageId.trim() ||
         payload.messageId.length > 128 ||
-        !Number.isSafeInteger(payload.cost) ||
-        payload.cost < 0
+        (payload.cost !== undefined &&
+            (!Number.isSafeInteger(payload.cost) || payload.cost < 0))
     ) {
-        throw providerError("The Mobile Sasa provider returned an invalid response.", "SMS_INVALID_RESPONSE");
+        throw smsFailure("The Mobile Sasa provider returned an invalid response.", "SMS_INVALID_RESPONSE", {
+            ...responseDetails,
+            failureCategory: "unknown_outcome",
+            deliveryOutcomeUnknown: true,
+        });
     }
 
     return {
@@ -203,7 +422,7 @@ async function sendSmsRequest(
             provider: "MOBILE_SASA",
             responseCode: payload.responseCode,
             trackingId,
-            smsParts: payload.cost,
+            ...(payload.cost === undefined ? {} : { smsParts: payload.cost }),
         },
     };
 }
@@ -214,9 +433,14 @@ async function sendSms(
         environment = process.env,
         fetchImpl = global.fetch,
         timeoutMs = REQUEST_TIMEOUT_MS,
+        logger = console,
     } = {}
 ) {
-    return sendSmsRequest(input, { environment, fetchImpl, timeoutMs });
+    return sendSmsRequest(
+        input,
+        { environment, fetchImpl, timeoutMs },
+        { diagnosticLogger: logger }
+    );
 }
 
 async function sendPhoneVerificationSms(

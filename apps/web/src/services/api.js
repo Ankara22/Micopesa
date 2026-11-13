@@ -26,6 +26,20 @@ api.interceptors.response.use(
     (response) => response,
     (error) => {
         if (error.response) {
+            const authorization = error.config?.headers?.get?.("Authorization")
+                || error.config?.headers?.Authorization
+                || error.config?.headers?.authorization;
+            const requestToken = typeof authorization === "string" && authorization.startsWith("Bearer ")
+                ? authorization.slice("Bearer ".length)
+                : null;
+            if (
+                error.response.status === 401 &&
+                requestToken &&
+                localStorage.getItem("micopesa_token") === requestToken
+            ) {
+                localStorage.removeItem("micopesa_token");
+                window.dispatchEvent(new Event("micopesa:auth-invalid"));
+            }
             // The server responded with a non-2xx status code.
             return Promise.reject({
                 status: error.response.status,

@@ -1,12 +1,14 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const Module = require("node:module");
+const nodemailer = require("nodemailer");
 const {
     createNotificationRepository,
 } = require("../src/services/notificationRepository");
 const {
     createNotificationController,
 } = require("../src/controllers/notificationController");
+const authEmailService = require("../src/services/authEmailService");
 const {
     createWebPushService,
 } = require("../src/services/webPushService");
@@ -16,9 +18,12 @@ const {
 } = require("../src/services/adminEmailNotificationService");
 const {
     createSmsDeliveryDispatcher,
+    isEmailDispatcherEnabled,
+    getNotificationSmsProvider,
     isSmsDispatcherEnabled,
 } = require("../src/services/smsDeliveryDispatcher");
 const mobileSasaService = require("../src/services/mobileSasaService");
+const smsService = require("../src/services/smsService");
 
 function createResponse() {
     return {
@@ -219,6 +224,89 @@ test("admin multi-channel notifications queue independently and exact retries do
     assert.equal(state.auditEvents, 1);
     assert.equal(state.records[1].recipient_email, "worker@example.test");
     assert.equal(state.records[1].email_html_body, "<p>Formatted update</p>");
+});
+
+test("admin multi-recipient queue reports invalid and unverified contacts as skipped", async () => {
+    const auditRows = [];
+    const recipients = [
+        {
+            user_id: "worker-1",
+            full_name: "Worker One",
+            phone: "invalid",
+            phone_verified_at: null,
+            email: "worker1@example.test",
+            email_verified: false,
+            has_push_subscription: false,
+        },
+        {
+            user_id: "worker-2",
+            full_name: "Worker Two",
+            phone: "+254712345678",
+            phone_verified_at: null,
+            email: null,
+            email_verified: false,
+            has_push_subscription: false,
+        },
+    ];
+    const pool = {
+        async query(sql, params = []) {
+            if (sql.includes("SELECT u.user_id, u.full_name, u.phone")) {
+                return { rows: recipients };
+            }
+            if (sql.includes("SELECT DISTINCT recipient_user_id")) {
+                return { rows: auditRows.map(({ recipient_user_id }) => ({ recipient_user_id })) };
+            }
+            if (sql.includes("INSERT INTO notification_audit_events")) {
+                const [requestId, senderId, senderRole, recipientId, category, channels] = params;
+                const channelList = JSON.parse(channels);
+                const duplicate = auditRows.some((row) =>
+                    row.request_id === requestId &&
+                    row.sender_user_id === senderId &&
+                    row.recipient_user_id === recipientId &&
+                    JSON.stringify(row.channels) === JSON.stringify(channelList));
+                if (!duplicate) {
+                    auditRows.push({
+                        request_id: requestId,
+                        sender_user_id: senderId,
+                        sender_role: senderRole,
+                        recipient_user_id: recipientId,
+                        notification_category: category,
+                        channels: channelList,
+                    });
+                }
+                return { rows: [], rowCount: duplicate ? 0 : 1 };
+            }
+            assert.fail(`Unexpected query: ${sql}`);
+        },
+        async connect() {
+            assert.fail("Recipients without eligible contacts should not queue notifications.");
+        },
+    };
+    const repository = createNotificationRepository(pool);
+    const request = {
+        senderId: "admin-1",
+        senderRole: "ADMIN",
+        userIds: ["worker-1", "worker-2"],
+        channels: ["SMS", "EMAIL"],
+        message: "Account update",
+        subject: "MicoPesa update",
+        requestId: "4c3b9f30-7cb7-4b2f-83d1-1f24c9b2b1d5",
+        category: "GENERAL",
+    };
+
+    const first = await repository.queueRoleNotifications(request);
+    const replay = await repository.queueRoleNotifications(request);
+
+    assert.deepEqual(first.map(({ delivery_status, notification_type, last_error_code }) =>
+        [delivery_status, notification_type, last_error_code]), [
+        ["SKIPPED", "SMS", "NOTIFICATION_PHONE_INVALID"],
+        ["SKIPPED", "EMAIL", "NOTIFICATION_EMAIL_UNAVAILABLE"],
+        ["SKIPPED", "SMS", "NOTIFICATION_PHONE_UNVERIFIED"],
+        ["SKIPPED", "EMAIL", "NOTIFICATION_EMAIL_UNAVAILABLE"],
+    ]);
+    assert.deepEqual(replay.map(({ notification_id }) => notification_id),
+        first.map(({ notification_id }) => notification_id));
+    assert.equal(auditRows.length, 2);
 });
 
 test("admin test SMS is fixed to the authenticated admin, rate-limited, and idempotent", async () => {
@@ -472,6 +560,39 @@ test("development self-test rejects missing or unsafe Mobile Sasa configuration 
     assert.equal(res.body.code, "NOTIFICATION_SMS_UNAVAILABLE");
     assert.equal(queued, 0);
     assert.equal(sends, 0);
+});
+
+test("development admin notification queue stays closed when its allowlist is empty", async () => {
+    let queued = 0;
+    const controller = createNotificationController({
+        repository: {
+            async queueRoleNotifications() {
+                queued += 1;
+                return [];
+            },
+        },
+        webPushService: { getPublicKey: () => "public-key" },
+        environment: {
+            NODE_ENV: "development",
+            COMMUNICATIONS_DEV_DELIVERY_ENABLED: "true",
+            COMMUNICATIONS_DEV_SMS_ENABLED: "true",
+            COMMUNICATIONS_DEV_ALLOWED_PHONES: "",
+            TRANSACTIONAL_SMS_PROVIDER: "MOBILE_SASA",
+            MOBILESASA_SMS_ENABLED: "true",
+            MOBILE_SASA_SMS_API_TOKEN: "mbs_test-token",
+            MOBILE_SASA_SMS_SENDER_ID: "MicoPesa",
+        },
+    });
+    const response = createResponse();
+
+    await controller.createNotification({
+        user: { userId: "admin-1", role: "ADMIN" },
+        body: { channels: ["SMS"] },
+    }, response);
+
+    assert.equal(response.statusCode, 503);
+    assert.equal(response.body.code, "NOTIFICATION_SMS_UNAVAILABLE");
+    assert.equal(queued, 0);
 });
 
 test("self-test acceptance persistence failures are not reclassified as provider outcomes", async () => {
@@ -772,6 +893,337 @@ test("email service reports only SMTP acceptance and rejects malformed addresses
         },
     });
 
+    test("development admin email requires the email opt-in and allowlists exact normalized recipients", async () => {
+        const sent = [];
+        const environment = {
+            NODE_ENV: "development",
+            COMMUNICATIONS_DEV_DELIVERY_ENABLED: "true",
+            COMMUNICATIONS_DEV_EMAIL_ENABLED: "true",
+            COMMUNICATIONS_DEV_ALLOWED_EMAILS: "Admin.Test@Example.Test",
+            EMAIL_PROVIDER: "GMAIL",
+        };
+        const emailService = {
+            async sendEmail(message) {
+                sent.push(message);
+                return { messageId: "smtp-accepted-1" };
+            },
+        };
+        const result = await sendAdminEmail({
+            to: " admin.test@example.test ",
+            subject: " Subject ",
+            text: " Notification content ",
+        }, { environment, emailService });
+
+        assert.equal(result.status, "PROVIDER_ACCEPTED");
+        assert.equal(sent[0].to, "admin.test@example.test");
+        assert.equal(sent[0].subject, "Subject");
+        assert.equal(sent[0].text, "Notification content");
+        await assert.rejects(() => sendAdminEmail({
+            to: "other@example.test",
+            subject: "Subject",
+            text: "Content",
+        }, { environment, emailService }), {
+            code: "EMAIL_DEVELOPMENT_RECIPIENT_NOT_ALLOWED",
+        });
+        await assert.rejects(() => sendAdminEmail({
+            to: "admin.test@example.test",
+            subject: "Subject",
+            text: "Content",
+        }, {
+            environment: { ...environment, COMMUNICATIONS_DEV_EMAIL_ENABLED: "false" },
+            emailService,
+        }), { code: "EMAIL_DEVELOPMENT_DELIVERY_DISABLED" });
+        await assert.rejects(() => sendAdminEmail({
+            to: "admin.test@example.test",
+            subject: "Subject",
+            text: "Content",
+        }, {
+            environment: { ...environment, COMMUNICATIONS_DEV_ALLOWED_EMAILS: "" },
+            emailService,
+        }), { code: "EMAIL_DEVELOPMENT_ALLOWLIST_EMPTY" });
+        assert.equal(sent.length, 1);
+    });
+
+    test("admin notification email reaches the configured SMTP transport", async () => {
+        const environment = {
+            NODE_ENV: "development",
+            COMMUNICATIONS_DEV_DELIVERY_ENABLED: "true",
+            COMMUNICATIONS_DEV_EMAIL_ENABLED: "true",
+            COMMUNICATIONS_DEV_ALLOWED_EMAILS: "worker@example.test",
+            EMAIL_PROVIDER: "GMAIL",
+            GMAIL_USER: "smtp.sender@example.test",
+            GMAIL_APP_PASSWORD: "abcdefghijklmnop",
+        };
+        const envNames = [
+            "GMAIL_USER",
+            "GMAIL_APP_PASSWORD",
+            "FRONTEND_BASE_URL",
+            "EMAIL_PROVIDER",
+            "MICOPESA_TEST_MODE",
+            "MICOPESA_EMAIL_CAPTURE",
+            "MICOPESA_EMAIL_CAPTURE_DIR",
+        ];
+        const originalEnvironment = Object.fromEntries(
+            envNames.map((name) => [name, process.env[name]])
+        );
+        const originalCreateTransport = nodemailer.createTransport;
+        let transportOptions;
+        let outgoingMessage;
+        process.env.GMAIL_USER = "smtp.sender@example.test";
+        process.env.GMAIL_APP_PASSWORD = "abcdefghijklmnop";
+        process.env.EMAIL_PROVIDER = "GMAIL";
+        delete process.env.MICOPESA_TEST_MODE;
+        delete process.env.MICOPESA_EMAIL_CAPTURE;
+        delete process.env.MICOPESA_EMAIL_CAPTURE_DIR;
+        nodemailer.createTransport = (options) => {
+            transportOptions = options;
+            return {
+                async sendMail(message) {
+                    outgoingMessage = message;
+                    return {
+                        accepted: [message.to],
+                        rejected: [],
+                        messageId: "mock-smtp-message-1",
+                    };
+                },
+            };
+        };
+
+        try {
+            const result = await sendAdminEmail({
+                to: "worker@example.test",
+                subject: "MicoPesa update",
+                text: "Your notification content.",
+            }, { environment });
+            assert.equal(result.status, "PROVIDER_ACCEPTED");
+            assert.equal(result.messageId, "mock-smtp-message-1");
+            assert.equal(transportOptions.host, "smtp.gmail.com");
+            assert.equal(transportOptions.port, 465);
+            assert.equal(transportOptions.secure, true);
+            assert.equal(transportOptions.auth.user, "smtp.sender@example.test");
+            assert.deepEqual({
+                to: outgoingMessage.to,
+                subject: outgoingMessage.subject,
+                text: outgoingMessage.text,
+            }, {
+                to: "worker@example.test",
+                subject: "MicoPesa update",
+                text: "Your notification content.",
+            });
+        } finally {
+            nodemailer.createTransport = originalCreateTransport;
+            for (const name of envNames) {
+                if (originalEnvironment[name] === undefined) delete process.env[name];
+                else process.env[name] = originalEnvironment[name];
+            }
+        }
+    });
+
+    test("registration verification and admin notification use one shared Gmail SMTP transport", async () => {
+        const envNames = [
+            "GMAIL_USER",
+            "GMAIL_APP_PASSWORD",
+            "FRONTEND_BASE_URL",
+            "EMAIL_PROVIDER",
+            "MICOPESA_TEST_MODE",
+            "MICOPESA_EMAIL_CAPTURE",
+            "MICOPESA_EMAIL_CAPTURE_DIR",
+        ];
+        const originalEnvironment = Object.fromEntries(
+            envNames.map((name) => [name, process.env[name]])
+        );
+        const originalCreateTransport = nodemailer.createTransport;
+        const originalConsoleInfo = console.info;
+        const transportOptions = [];
+        const outgoingMessages = [];
+        const loggedPurposes = [];
+        const username = "Shared.Sender@Example.Test";
+        const password = "abcdefghijklmnop";
+        const environment = {
+            NODE_ENV: "development",
+            COMMUNICATIONS_DEV_DELIVERY_ENABLED: "true",
+            COMMUNICATIONS_DEV_EMAIL_ENABLED: "true",
+            COMMUNICATIONS_DEV_ALLOWED_EMAILS: "worker@example.test",
+            EMAIL_PROVIDER: "GMAIL",
+            GMAIL_USER: username,
+            GMAIL_APP_PASSWORD: password,
+        };
+        Object.assign(process.env, {
+            GMAIL_USER: username,
+            GMAIL_APP_PASSWORD: password,
+            FRONTEND_BASE_URL: "https://micopesa.example.test",
+            EMAIL_PROVIDER: "GMAIL",
+        });
+        for (const name of ["MICOPESA_TEST_MODE", "MICOPESA_EMAIL_CAPTURE", "MICOPESA_EMAIL_CAPTURE_DIR"]) {
+            delete process.env[name];
+        }
+        console.info = (line) => {
+            loggedPurposes.push(JSON.parse(line).purpose);
+        };
+        nodemailer.createTransport = (options) => {
+            transportOptions.push(options);
+            return {
+                async sendMail(message) {
+                    outgoingMessages.push(message);
+                    return {
+                        accepted: [message.to],
+                        rejected: [],
+                        messageId: `mock-message-${outgoingMessages.length}`,
+                    };
+                },
+            };
+        };
+
+        try {
+            await authEmailService.sendPendingRegistrationEmail({
+                email: "worker@example.test",
+                token: "synthetic-registration-token",
+            });
+            await sendAdminEmail({
+                to: "worker@example.test",
+                subject: "Account update",
+                text: "Your account has an update.",
+            }, { environment });
+
+            assert.equal(transportOptions.length, 2);
+            assert.deepEqual(transportOptions[0], transportOptions[1]);
+            assert.deepEqual(transportOptions[0], {
+                host: "smtp.gmail.com",
+                port: 465,
+                secure: true,
+                auth: { user: username.toLowerCase(), pass: password },
+                connectionTimeout: 10000,
+                greetingTimeout: 10000,
+                socketTimeout: 20000,
+            });
+            assert.deepEqual(outgoingMessages.map(({ from, to, subject }) =>
+                ({ from, to, subject })), [
+                {
+                    from: username.toLowerCase(),
+                    to: "worker@example.test",
+                    subject: "Complete your MicoPesa registration",
+                },
+                {
+                    from: username.toLowerCase(),
+                    to: "worker@example.test",
+                    subject: "Account update",
+                },
+            ]);
+            assert.match(outgoingMessages[0].text, /synthetic-registration-token/);
+            assert.equal(outgoingMessages[1].text, "Your account has an update.");
+            assert.deepEqual(loggedPurposes, ["REGISTRATION_VERIFICATION", "ADMIN_NOTIFICATION"]);
+        } finally {
+            nodemailer.createTransport = originalCreateTransport;
+            console.info = originalConsoleInfo;
+            for (const name of envNames) {
+                if (originalEnvironment[name] === undefined) delete process.env[name];
+                else process.env[name] = originalEnvironment[name];
+            }
+        }
+    });
+
+    test("development admin SMS and email dispatch through mocked Mobile Sasa and SMTP", async () => {
+        const environment = {
+            NODE_ENV: "development",
+            COMMUNICATIONS_DEV_DELIVERY_ENABLED: "true",
+            COMMUNICATIONS_DEV_SMS_ENABLED: "true",
+            COMMUNICATIONS_DEV_EMAIL_ENABLED: "true",
+            COMMUNICATIONS_DEV_ALLOWED_PHONES: "+254712345678",
+            COMMUNICATIONS_DEV_ALLOWED_EMAILS: "worker@example.test",
+            TRANSACTIONAL_SMS_PROVIDER: "MOBILE_SASA",
+            MOBILESASA_SMS_ENABLED: "true",
+            MOBILE_SASA_SMS_API_TOKEN: "mbs_test-token",
+            MOBILE_SASA_SMS_SENDER_ID: "MicoPesa",
+            EMAIL_NOTIFICATIONS_ENABLED: "true",
+            EMAIL_PROVIDER: "GMAIL",
+            GMAIL_USER: "sender@example.test",
+            GMAIL_APP_PASSWORD: "mock-smtp-password",
+        };
+        const rows = [
+            {
+                notification_id: "admin-sms-1",
+                notification_type: "SMS",
+                recipient_phone: "+254712345678",
+                message: "SMS body",
+                created_by: "admin-1",
+            },
+            {
+                notification_id: "admin-email-1",
+                notification_type: "EMAIL",
+                recipient_email: "worker@example.test",
+                email_subject: "Email subject",
+                message: "Email body",
+                created_by: "admin-1",
+            },
+        ];
+        const sentSms = [];
+        const sentEmail = [];
+        const updates = [];
+        const repository = {
+            async claimBatch(_batchSize, channels) {
+                assert.deepEqual(channels, ["SMS", "EMAIL"]);
+                return rows;
+            },
+            async isClaimEligible() { return true; },
+            async markProviderAccepted(row, result) {
+                updates.push([row.notification_id, result.deliveryResult.provider]);
+            },
+            async markFailed(row, code) { updates.push([row.notification_id, code]); },
+            async markUnknown(row, code) { updates.push([row.notification_id, code]); },
+            async retryRejected(row, options) { updates.push([row.notification_id, options.errorCode]); },
+        };
+        const dispatcher = createSmsDeliveryDispatcher({
+            repository,
+            environment,
+            sendSms: (input) => smsService.sendSms(input, {
+                environment,
+                provider: getNotificationSmsProvider(environment),
+                fetchImpl: async (url, options) => {
+                    sentSms.push({ url, body: JSON.parse(options.body) });
+                    return {
+                        ok: true,
+                        status: 200,
+                        async json() {
+                            return { status: true, responseCode: "0200", messageId: "sms-accepted-1" };
+                        },
+                    };
+                },
+            }),
+            sendEmail: (message) => sendAdminEmail(message, {
+                environment,
+                emailService: {
+                    async sendEmail(input) {
+                        sentEmail.push(input);
+                        return { messageId: "smtp-accepted-1" };
+                    },
+                },
+            }),
+            sendPush: async () => ({ accepted: true, status: "PROVIDER_ACCEPTED" }),
+            logger: { error() {} },
+        });
+
+        assert.equal(getNotificationSmsProvider(environment), "MOBILE_SASA");
+        assert.equal(isSmsDispatcherEnabled(environment), true);
+        assert.equal(isEmailDispatcherEnabled(environment), true);
+        assert.equal(dispatcher.enabled, true);
+        assert.equal(await dispatcher.runOnce(), 2);
+        assert.equal(sentSms[0].url, "https://api.mobilesasa.com/v1/send/message");
+        assert.deepEqual(sentSms[0].body, {
+            senderID: "MicoPesa",
+            phone: "+254712345678",
+            message: "SMS body",
+        });
+        assert.deepEqual(sentEmail.map(({ to, subject, text }) => ({ to, subject, text })), [{
+            to: "worker@example.test",
+            subject: "Email subject",
+            text: "Email body",
+        }]);
+        assert.deepEqual(updates.sort((left, right) => left[0].localeCompare(right[0])), [
+            ["admin-email-1", "GMAIL"],
+            ["admin-sms-1", "MOBILE_SASA"],
+        ]);
+    });
+
     assert.equal(result.status, "PROVIDER_ACCEPTED");
     assert.equal(result.accepted, true);
     assert.equal(sent[0].text, "Your account has an update.");
@@ -906,6 +1358,7 @@ test("email and push failures do not prevent another channel from succeeding", a
     ];
     const updates = [];
     const repository = {
+        async isClaimEligible() { return true; },
         async claimBatch() { return rows; },
         async markProviderAccepted(row) { updates.push([row.notification_id, "PROVIDER_ACCEPTED"]); },
         async markFailed(row, code) { updates.push([row.notification_id, "FAILED", code]); },
@@ -948,10 +1401,12 @@ test("email and push failures do not prevent another channel from succeeding", a
     ]);
 });
 
-test("ambiguous SMTP outcomes remain UNKNOWN while push delivery continues", async () => {
+test("SMTP timeouts remain UNKNOWN with sanitized diagnostics while other channels continue", async () => {
     const updates = [];
+    const logged = [];
     const dispatcher = createSmsDeliveryDispatcher({
         repository: {
+            async isClaimEligible() { return true; },
             async claimBatch() {
                 return [
                     {
@@ -1000,15 +1455,145 @@ test("ambiguous SMTP outcomes remain UNKNOWN while push delivery continues", asy
         sendEmail: async () => {
             const error = new Error("SMTP connection timed out");
             error.code = "EMAIL_SMTP_DELIVERY_FAILED";
+            error.smtpCode = "ETIMEDOUT";
             throw error;
         },
         sendPush: async () => ({ accepted: true, status: "PROVIDER_ACCEPTED" }),
-        logger: { error() {} },
+        logger: { error(...args) { logged.push(args); } },
     });
 
     assert.equal(await dispatcher.runOnce(), 2);
     assert.deepEqual(updates.sort((left, right) => left[0].localeCompare(right[0])), [
-        ["email-unknown", "UNKNOWN", "EMAIL_SMTP_DELIVERY_FAILED"],
+        ["email-unknown", "UNKNOWN", "EMAIL_SMTP_TIMEOUT"],
         ["push-accepted", "PROVIDER_ACCEPTED"],
     ]);
+    assert.deepEqual(logged, [[
+        "Admin notification email delivery attempt failed.",
+        {
+            errorCode: "EMAIL_SMTP_TIMEOUT",
+            errorClass: "Error",
+            failureCategory: "timeout",
+            deliveryOutcomeUnknown: true,
+            smtpCode: "ETIMEDOUT",
+        },
+    ]]);
+});
+
+test("SMTP authentication and explicit rejection failures are definitive and sanitized", async () => {
+    const updates = [];
+    const logs = [];
+    const errors = [
+        Object.assign(new Error("Authentication rejected"), {
+            code: "EMAIL_SMTP_DELIVERY_FAILED",
+            smtpCode: "EAUTH",
+            responseCode: 535,
+        }),
+        Object.assign(new Error("SMTP recipient rejected"), {
+            code: "EMAIL_SMTP_DELIVERY_FAILED",
+            smtpCode: "EENVELOPE",
+            responseCode: 550,
+        }),
+    ];
+    const dispatcher = createSmsDeliveryDispatcher({
+        repository: {
+            async isClaimEligible() { return true; },
+            async claimBatch() {
+                return errors.map((_, index) => ({
+                    notification_id: `email-${index}`,
+                    notification_type: "EMAIL",
+                    recipient_email: "private@example.test",
+                    email_subject: "Private subject",
+                    message: "Private body",
+                    attempt_count: 1,
+                }));
+            },
+            async markProviderAccepted() {},
+            async markFailed(row, code) { updates.push([row.notification_id, "FAILED", code]); },
+            async markUnknown(row, code) { updates.push([row.notification_id, "UNKNOWN", code]); },
+            async retryRejected() { assert.fail("SMTP failures must not be automatically retried."); },
+        },
+        environment: {
+            NODE_ENV: "production",
+            NOTIFICATION_DISPATCHER_ENABLED: "true",
+            EMAIL_NOTIFICATIONS_ENABLED: "true",
+            GMAIL_USER: "sender@example.test",
+            GMAIL_APP_PASSWORD: "mock",
+        },
+        sendSms: async () => ({ accepted: true, status: "PROVIDER_ACCEPTED" }),
+        async sendEmail() { throw errors.shift(); },
+        sendPush: async () => ({ accepted: true, status: "PROVIDER_ACCEPTED" }),
+        logger: { error(...args) { logs.push(args); } },
+    });
+
+    assert.equal(await dispatcher.runOnce(), 2);
+    assert.deepEqual(updates.sort((left, right) => left[0].localeCompare(right[0])), [
+        ["email-0", "FAILED", "EMAIL_SMTP_AUTH_FAILED"],
+        ["email-1", "FAILED", "EMAIL_SMTP_PROVIDER_REJECTED"],
+    ]);
+    const serializedLogs = JSON.stringify(logs);
+    assert.match(serializedLogs, /authentication_failure/);
+    assert.match(serializedLogs, /smtp_rejection/);
+    assert.doesNotMatch(serializedLogs, /private@example\.test|Private subject|Private body/);
+});
+
+test("email-only and SMS-only queue batches dispatch independently", async () => {
+    for (const [channel, notificationType] of [["EMAIL", "EMAIL"], ["SMS", "SMS"]]) {
+        const updates = [];
+        let sentEmail = 0;
+        let sentSms = 0;
+        const environment = channel === "EMAIL"
+            ? {
+                NODE_ENV: "production",
+                NOTIFICATION_DISPATCHER_ENABLED: "true",
+                EMAIL_NOTIFICATIONS_ENABLED: "true",
+                GMAIL_USER: "sender@example.test",
+                GMAIL_APP_PASSWORD: "mock",
+            }
+            : {
+                NODE_ENV: "production",
+                SMS_DISPATCHER_ENABLED: "true",
+                NOTIFICATION_SMS_PROVIDER: "MOBILE_SASA",
+                MOBILESASA_SMS_ENABLED: "true",
+                MOBILE_SASA_SMS_API_TOKEN: "mbs_test-token",
+                MOBILE_SASA_SMS_SENDER_ID: "MicoPesa",
+            };
+        const dispatcher = createSmsDeliveryDispatcher({
+            repository: {
+                async isClaimEligible() { return true; },
+                async claimBatch(_size, channels) {
+                    assert.deepEqual(channels, [channel]);
+                    return [{
+                        notification_id: `${channel.toLowerCase()}-only`,
+                        notification_type: notificationType,
+                        recipient_email: "worker@example.test",
+                        email_subject: "Subject",
+                        recipient_phone: "+254712345678",
+                        message: "Body",
+                        attempt_count: 1,
+                    }];
+                },
+                async markProviderAccepted(row) {
+                    updates.push([row.notification_id, "PROVIDER_ACCEPTED"]);
+                },
+                async markFailed(row, code) { updates.push([row.notification_id, "FAILED", code]); },
+                async markUnknown(row, code) { updates.push([row.notification_id, "UNKNOWN", code]); },
+                async retryRejected(row, options) { updates.push([row.notification_id, "RETRY", options.errorCode]); },
+            },
+            environment,
+            async sendSms() {
+                sentSms += 1;
+                return { accepted: true, status: "PROVIDER_ACCEPTED" };
+            },
+            async sendEmail() {
+                sentEmail += 1;
+                return { accepted: true, status: "PROVIDER_ACCEPTED" };
+            },
+            logger: { error() {} },
+        });
+
+        assert.equal(await dispatcher.runOnce(), 1);
+        assert.equal(sentEmail, channel === "EMAIL" ? 1 : 0);
+        assert.equal(sentSms, channel === "SMS" ? 1 : 0);
+        assert.deepEqual(updates, [[`${channel.toLowerCase()}-only`, "PROVIDER_ACCEPTED"]]);
+    }
 });

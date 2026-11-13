@@ -1,6 +1,7 @@
 const SMS_ENDPOINT = "https://api.africastalking.com/version1/messaging";
 const REQUEST_TIMEOUT_MS = 10000;
 const mobileSasaService = require("./mobileSasaService");
+const { assertDevelopmentRecipientAllowed } = require("./communicationDeliveryPolicy");
 
 function createSmsError(message, code) {
     const error = new Error(message);
@@ -30,6 +31,7 @@ async function sendSms(
         fetchImpl = global.fetch,
         timeoutMs = REQUEST_TIMEOUT_MS,
         provider = "AFRICAS_TALKING",
+        logger = null,
     } = {}
 ) {
     const recipient = normalizeRecipient(to);
@@ -37,19 +39,14 @@ async function sendSms(
         throw createSmsError("An SMS message is required.", "SMS_INVALID_MESSAGE");
     }
 
-    if (environment.NODE_ENV !== "production") {
-        throw createSmsError(
-            "SMS sending is disabled outside the production runtime.",
-            "SMS_PRODUCTION_ONLY"
-        );
-    }
     const selectedProvider = typeof provider === "string"
         ? provider.trim().toUpperCase()
         : "";
+    assertDevelopmentRecipientAllowed("SMS", recipient, environment);
     if (selectedProvider === "MOBILE_SASA") {
         return mobileSasaService.sendSms(
             { to: recipient, message, trackingId },
-            { environment, fetchImpl, timeoutMs }
+            { environment, fetchImpl, timeoutMs, logger }
         );
     }
     if (selectedProvider !== "AFRICAS_TALKING") {

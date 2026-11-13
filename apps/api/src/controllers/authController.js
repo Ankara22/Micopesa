@@ -2,12 +2,21 @@
 const crypto = require("node:crypto");
 const pool = require("../db/database");
 const { generateToken } = require("../utils/token");
+const { writeAuditLog } = require("../utils/auditLog");
 const { hashOpaque } = require("../services/authEmailService");
 const authEmailService = require("../services/authEmailService");
 const { loadAdminSettings } = require("../services/adminSettingsService");
-const { normalizeKenyanPhone, NORMALIZED_PHONE_SQL } = require("../utils/kenyanPhone");
+const {
+    normalizeKenyanPhone,
+    normalizedPhoneSql,
+    NORMALIZED_PHONE_SQL,
+} = require("../utils/kenyanPhone");
 
 const SALT_ROUNDS = 10;
+const DUMMY_PASSWORD_HASH = bcrypt.hashSync(
+    crypto.randomBytes(32).toString("base64url"),
+    SALT_ROUNDS
+);
 const MIN_PASSWORD_LENGTH = 8;
 const INVALID_EMAIL_VERIFICATION_MESSAGE =
     "This verification link is invalid or expired, or its registration details are incomplete.";
@@ -148,6 +157,28 @@ async function register(req, res) {
             await client.query("BEGIN");
             transactionStarted = true;
             await client.query("DELETE FROM pending_registrations WHERE expires_at <= now()");
+            const existingIdentity = await client.query(
+                `SELECT 1
+                 FROM users
+                 WHERE lower(email) = lower($1)
+                    OR lower(pending_email) = lower($1)
+                    OR ${NORMALIZED_PHONE_SQL} = ${normalizedPhoneSql("$2")}
+                 UNION ALL
+                 SELECT 1
+                 FROM pending_registrations
+                 WHERE expires_at > now()
+                   AND (
+                       lower(email) = lower($1)
+                       OR ${NORMALIZED_PHONE_SQL} = ${normalizedPhoneSql("$2")}
+                   )
+                 LIMIT 1`,
+                [email, phone.trim()]
+            );
+            if (existingIdentity.rows.length > 0) {
+                await client.query("COMMIT");
+                transactionStarted = false;
+                return respondAccepted();
+            }
             await client.query(
                 `INSERT INTO pending_registrations
                     (full_name, email, phone, occupation, national_id, date_of_birth,
@@ -185,8 +216,8 @@ async function register(req, res) {
 /**
  * POST /api/auth/login
  * Body: { identifier, password } or legacy { phone, password }.
- * PHONE-policy accounts authenticate by phone; all verified accounts may
- * also authenticate by email. EMAIL-policy accounts never fall back to phone.
+ * Verified registered phones and verified email addresses can identify an
+ * account, independent of the method used when it was registered.
  * Verifies the password against `password_hash` and returns a signed JWT
  * containing { userId, role }.
  */
@@ -207,9 +238,10 @@ async function login(req, res) {
 
     try {
         const result = await pool.query(
-            `SELECT user_id, full_name, phone, email, password_hash, role, occupation,
-                    account_status, email_verified, auth_version, failed_login_attempts,
-                    locked_until, is_temp_password, force_password_change, created_at, updated_at,
+            `SELECT user_id, full_name, phone, email, pending_email, phone_verified_at,
+                    password_hash, role, occupation, account_status, email_verified,
+                    auth_version, failed_login_attempts, locked_until, is_temp_password,
+                    force_password_change, created_at, updated_at,
                     (profile_photo_ref IS NOT NULL) AS profile_photo_available
              FROM users
              WHERE (login_method = 'PHONE' AND (
@@ -227,33 +259,26 @@ async function login(req, res) {
             [identifier, email, normalizedPhone]
         );
 
-        if (result.rows.length === 0) {
-            return res.status(401).json({
-                status: "error",
-                message: "Invalid phone number or password",
-            });
-        }
-
         const user = result.rows[0];
+        const passwordMatches = await bcrypt.compare(
+            password,
+            user?.password_hash || DUMMY_PASSWORD_HASH
+        );
+        if (!user || !passwordMatches) {
+            if (!user) {
+                return res.status(401).json({
+                    status: "error",
+                    message: "Invalid phone number or password",
+                });
+            }
 
-        if (user.account_status !== "ACTIVE") {
-            return res.status(403).json({
-                status: "error",
-                message: "This account is not active",
-            });
-        }
-
-        const settings = await loadAdminSettings();
-        if (user.locked_until && new Date(user.locked_until).getTime() > Date.now()) {
-            return res.status(401).json({
-                status: "error",
-                message: "Invalid phone number or password",
-            });
-        }
-
-        const passwordMatches = await bcrypt.compare(password, user.password_hash);
-
-        if (!passwordMatches) {
+            const settings = await loadAdminSettings();
+            if (user.locked_until && new Date(user.locked_until).getTime() > Date.now()) {
+                return res.status(401).json({
+                    status: "error",
+                    message: "Invalid phone number or password",
+                });
+            }
             await pool.query(
                 `UPDATE users
                  SET failed_login_attempts = failed_login_attempts + 1,
@@ -266,6 +291,21 @@ async function login(req, res) {
                  WHERE user_id = $1`,
                 [user.user_id, settings.max_failed_login_attempts, settings.account_lockout_duration_minutes]
             );
+            return res.status(401).json({
+                status: "error",
+                message: "Invalid phone number or password",
+            });
+        }
+
+        if (user.account_status !== "ACTIVE") {
+            return res.status(403).json({
+                status: "error",
+                message: "This account is not active",
+            });
+        }
+
+        const settings = await loadAdminSettings();
+        if (user.locked_until && new Date(user.locked_until).getTime() > Date.now()) {
             return res.status(401).json({
                 status: "error",
                 message: "Invalid phone number or password",
@@ -290,6 +330,14 @@ async function login(req, res) {
             forcePasswordChange: user.force_password_change,
         });
 
+        await writeAuditLog(pool, {
+            userId: user.user_id,
+            actionType: "LOGIN",
+            entityName: "AUTHENTICATION",
+            entityId: user.user_id,
+            details: { role: user.role },
+        });
+
         return res.status(200).json({
             status: "success",
             message: "Login successful",
@@ -299,9 +347,10 @@ async function login(req, res) {
                     user_id: user.user_id,
                     full_name: user.full_name,
                     phone: user.phone,
+                    phone_verified: Boolean(user.phone_verified_at),
                     email: user.email,
                     email_verified: user.email_verified,
-                    pending_email: user.pending_email,
+                    pending_email: user.pending_email ?? null,
                     role: user.role,
                     occupation: user.occupation,
                     account_status: user.account_status,
@@ -332,18 +381,30 @@ async function login(req, res) {
  * POST /api/auth/logout
  * Requires authentication.
  *
- * NOTE: JWTs issued by this API are stateless and there is no session or
- * token-blacklist table in the database schema. This endpoint therefore
- * cannot revoke the presented token server-side; it simply confirms the
- * request was authenticated and instructs the client to discard its token.
- * True server-side revocation would require a new table (e.g. a token
- * denylist) which is out of scope here per the "do not modify schema.sql"
- * constraint - flagged in the final report as a known limitation.
+ * JWTs are stateless, so this records an explicit logout but does not revoke
+ * the presented token server-side. The client discards its token after this
+ * authenticated request completes.
  */
 async function logout(req, res) {
+    try {
+        await writeAuditLog(pool, {
+            userId: req.user.userId,
+            actionType: "LOGOUT",
+            entityName: "AUTHENTICATION",
+            entityId: req.user.userId,
+            details: { role: req.user.role },
+        });
+    } catch (error) {
+        console.error("Logout audit write failed:", error?.code || "AUTH_LOGOUT_AUDIT_FAILED");
+        return res.status(500).json({
+            status: "error",
+            message: "Logout could not be recorded. Please try again.",
+        });
+    }
+
     return res.status(200).json({
         status: "success",
-        message: "Logged out successfully. Please discard your access token on the client.",
+        message: "Logout recorded successfully. Please discard your access token on the client.",
     });
 }
 
@@ -357,7 +418,9 @@ async function getMe(req, res) {
 
     try {
         const result = await pool.query(
-            `SELECT user_id, full_name, phone, email, email_verified, pending_email,
+            `SELECT user_id, full_name, phone,
+                    (phone_verified_at IS NOT NULL) AS phone_verified,
+                    email, email_verified, pending_email,
                     role, occupation, account_status, is_temp_password, force_password_change,
                     created_at, updated_at,
                     (profile_photo_ref IS NOT NULL) AS profile_photo_available
@@ -695,13 +758,12 @@ async function verifyEmail(req, res) {
         await client.query("ROLLBACK").catch(() => {});
         if (error.code === "23505") {
             if (registrationCompletion) {
-                try {
-                    await pool.query("DELETE FROM pending_registrations WHERE token_hash = $1", [tokenHash]);
-                } catch (cleanupError) {
-                    console.error("Pending registration cleanup failed.", {
-                        code: cleanupError.code || "PENDING_REGISTRATION_CLEANUP_FAILED",
-                    });
-                }
+                console.error("Registration completion uniqueness conflict.", {
+                    code: error.code,
+                    constraint: error.constraint,
+                    table: error.table,
+                    schema: error.schema,
+                });
                 return res.status(409).json({
                     status: "error",
                     code: "REGISTRATION_COMPLETION_UNAVAILABLE",

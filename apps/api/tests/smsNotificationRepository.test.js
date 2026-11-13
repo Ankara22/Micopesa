@@ -8,17 +8,20 @@ function copy(value) {
     return JSON.parse(JSON.stringify(value));
 }
 
-function createPool(rows) {
+function createPool(rows, { currentEligibility = true } = {}) {
     const state = {
         rows: copy(rows),
         locks: new Set(),
         statements: [],
+        queries: [],
         commits: 0,
+        currentEligibility,
     };
 
     function runQuery(sql, params, heldLocks) {
         const statement = sql.trim();
         state.statements.push(statement);
+        state.queries.push({ statement, params: copy(params) });
         if (statement === "BEGIN") return { rows: [] };
         if (statement === "COMMIT") {
             state.commits += 1;
@@ -39,6 +42,17 @@ function createPool(rows) {
                 }
             }
             return { rows: [] };
+        }
+        if (statement.startsWith("UPDATE notifications n") &&
+            statement.includes("NOTIFICATION_RECIPIENT_STALE")) {
+            return { rows: [], rowCount: 0 };
+        }
+        if (statement.startsWith("SELECT n.notification_id") &&
+            statement.includes("JOIN notification_preferences")) {
+            return {
+                rows: state.currentEligibility ? [{ notification_id: params[0] }] : [],
+                rowCount: state.currentEligibility ? 1 : 0,
+            };
         }
         if (statement.startsWith("SELECT notification_id") &&
             statement.includes("FOR UPDATE SKIP LOCKED")) {
@@ -87,6 +101,7 @@ function createPool(rows) {
         if (!row) return { rows: [], rowCount: 0 };
         if (statement.includes("SET delivery_status = 'PROVIDER_ACCEPTED'")) {
             [row.provider_message_id] = params;
+            row.delivery_result = params[1] === null ? null : JSON.parse(params[1]);
             row.delivery_status = "PROVIDER_ACCEPTED";
             row.provider_accepted_at = Date.now();
         } else if (statement.includes("SET delivery_status = 'FAILED'")) {
@@ -148,11 +163,60 @@ test("claims eligible SMS inside a committed SKIP LOCKED transaction", async () 
     assert.equal(pool.state.rows[0].delivery_status, "PROCESSING");
     const select = pool.state.statements.find((sql) => sql.startsWith("SELECT notification_id"));
     assert.match(select, /FOR UPDATE SKIP LOCKED/);
+    assert.match(select, /u\.phone_verified_at IS NOT NULL/);
+    assert.match(select, /notifications\.recipient_phone/);
+    assert.match(select, /admin_request_key IS NOT NULL OR EXISTS/);
+    assert.ok(pool.state.statements.some((sql) =>
+        sql.startsWith("UPDATE notifications n") &&
+        sql.includes("NOTIFICATION_RECIPIENT_STALE")
+    ));
     assert.ok(
         pool.state.statements.indexOf("COMMIT") >
         pool.state.statements.findIndex((sql) => sql.startsWith("UPDATE notifications") &&
             sql.includes("SET delivery_status = 'PROCESSING'"))
     );
+});
+
+test("revalidates the current verified recipient and preference immediately before dispatch", async () => {
+    const repository = createSmsNotificationRepository(createPool([]));
+    const notification = {
+        notification_id: "email_001",
+        notification_type: "EMAIL",
+        user_id: "worker_001",
+        claim_token: "claim_001",
+    };
+
+    for (const condition of [
+        "u.account_status = 'ACTIVE'",
+        "u.email_verified IS TRUE",
+        "lower(u.email) = lower(n.recipient_email)",
+        "np.email_enabled IS TRUE",
+        "n.admin_request_key IS NOT NULL OR np.email_enabled IS TRUE",
+        "n.claim_token = $2",
+        "n.delivery_status = 'PROCESSING'",
+    ]) {
+        const pool = createPool([]);
+        const candidateRepository = createSmsNotificationRepository(pool);
+        assert.equal(await candidateRepository.isClaimEligible(notification), true);
+        assert.match(pool.state.statements[0], new RegExp(condition.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    }
+
+    for (const staleCase of [
+        "changed email address",
+        "revoked email verification",
+        "disabled email preference",
+        "missing or inactive user",
+        "already completed or lost claim",
+    ]) {
+        const pool = createPool([], { currentEligibility: false });
+        const candidateRepository = createSmsNotificationRepository(pool);
+        assert.equal(await candidateRepository.isClaimEligible(notification), false, staleCase);
+    }
+
+    assert.equal(await repository.isClaimEligible({
+        ...notification,
+        notification_type: "PUSH",
+    }), false);
 });
 
 test("concurrent repository instances cannot claim the same notification", async () => {
@@ -173,13 +237,32 @@ test("provider acceptance and message ID persist without marking delivery", asyn
     const repository = createSmsNotificationRepository(pool);
     const [claimed] = await repository.claimBatch(1);
 
-    await repository.markProviderAccepted(claimed, { messageId: "provider-msg-1" });
+    await repository.markProviderAccepted(claimed, {
+        messageId: "provider-msg-1",
+        deliveryResult: { provider: "MOBILE_SASA" },
+    });
 
     assert.equal(pool.state.rows[0].delivery_status, "PROVIDER_ACCEPTED");
     assert.equal(pool.state.rows[0].provider_message_id, "provider-msg-1");
+    assert.deepEqual(pool.state.rows[0].delivery_result, { provider: "MOBILE_SASA" });
     assert.ok(pool.state.rows[0].provider_accepted_at);
     assert.equal(pool.state.rows[0].delivered_at, undefined);
     assert.equal(pool.state.rows[0].claim_token, null);
+    const acceptanceQuery = pool.state.queries.find(({ statement }) =>
+        statement.includes("SET delivery_status = 'PROVIDER_ACCEPTED'")
+    );
+    assert.match(acceptanceQuery.statement, /WHERE notification_id = \$3\s+AND claim_token = \$4/);
+    assert.deepEqual(acceptanceQuery.params, [
+        "provider-msg-1",
+        JSON.stringify({ provider: "MOBILE_SASA" }),
+        "notification_001",
+        claimed.claim_token,
+    ]);
+    await assert.rejects(
+        repository.markUnknown(claimed, "SMS_UNKNOWN_OUTCOME"),
+        { code: "SMS_CLAIM_LOST" }
+    );
+    assert.equal(pool.state.rows[0].delivery_status, "PROVIDER_ACCEPTED");
 });
 
 test("expired processing claims become UNKNOWN and are never reclaimed", async () => {

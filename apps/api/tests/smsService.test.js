@@ -117,7 +117,72 @@ test("notification service selects Mobile Sasa only when explicitly injected by 
         },
     });
 
-    assert.equal(requestUrl, "https://api.mobilesasa.com/v2/send/message");
+    assert.equal(requestUrl, "https://api.mobilesasa.com/v1/send/message");
+});
+
+test("development SMS uses Mobile Sasa only for explicitly allowlisted recipients", async () => {
+    let requestBody;
+    const environment = {
+        NODE_ENV: "development",
+        COMMUNICATIONS_DEV_DELIVERY_ENABLED: "true",
+        COMMUNICATIONS_DEV_SMS_ENABLED: "true",
+        COMMUNICATIONS_DEV_ALLOWED_PHONES: "0712 345 678",
+        TRANSACTIONAL_SMS_PROVIDER: "MOBILE_SASA",
+        MOBILESASA_SMS_ENABLED: "true",
+        MOBILE_SASA_SMS_API_TOKEN: "mbs_test-token",
+        MOBILE_SASA_SMS_SENDER_ID: "MicoPesa",
+    };
+    const result = await smsService.sendSms({
+        to: "+254712345678",
+        message: "Local development test",
+        trackingId: "development-sms-1",
+    }, {
+        environment,
+        provider: "MOBILE_SASA",
+        fetchImpl: async (_url, options) => {
+            requestBody = JSON.parse(options.body);
+            return {
+                ok: true,
+                status: 200,
+                async json() {
+                    return { status: true, responseCode: "0200", messageId: "accepted-1" };
+                },
+            };
+        },
+    });
+
+    assert.equal(result.status, "PROVIDER_ACCEPTED");
+    assert.equal(requestBody.phone, "+254712345678");
+});
+
+test("development SMS is blocked for disabled policy, empty allowlist, and unapproved recipient", async () => {
+    let requests = 0;
+    const environment = {
+        NODE_ENV: "development",
+        COMMUNICATIONS_DEV_DELIVERY_ENABLED: "true",
+        COMMUNICATIONS_DEV_SMS_ENABLED: "true",
+        COMMUNICATIONS_DEV_ALLOWED_PHONES: "0712 345 678",
+        MOBILESASA_SMS_ENABLED: "true",
+        MOBILE_SASA_SMS_API_TOKEN: "mbs_test-token",
+        MOBILE_SASA_SMS_SENDER_ID: "MicoPesa",
+    };
+    for (const [overrides, code] of [
+        [{ COMMUNICATIONS_DEV_DELIVERY_ENABLED: "false" }, "SMS_DEVELOPMENT_DELIVERY_DISABLED"],
+        [{ COMMUNICATIONS_DEV_ALLOWED_PHONES: "" }, "SMS_DEVELOPMENT_ALLOWLIST_EMPTY"],
+        [{}, "SMS_DEVELOPMENT_RECIPIENT_NOT_ALLOWED"],
+    ]) {
+        const to = code === "SMS_DEVELOPMENT_RECIPIENT_NOT_ALLOWED" ? "0711111111" : "0712345678";
+        await assert.rejects(() => smsService.sendSms({
+            to,
+            message: "Local development test",
+            trackingId: "blocked-sms-1",
+        }, {
+            environment: { ...environment, ...overrides },
+            provider: "MOBILE_SASA",
+            fetchImpl: async () => { requests += 1; },
+        }), { code });
+    }
+    assert.equal(requests, 0);
 });
 
 test("rejects invalid Kenyan phone numbers without making a provider request", async () => {
@@ -170,7 +235,11 @@ test("does not send from development or test runtimes", async () => {
                     },
                 }
             ),
-            { code: "SMS_PRODUCTION_ONLY" }
+            {
+                code: nodeEnvironment === "development"
+                    ? "SMS_DEVELOPMENT_DELIVERY_DISABLED"
+                    : "SMS_PRODUCTION_ONLY",
+            }
         );
     }
     assert.equal(requests, 0);

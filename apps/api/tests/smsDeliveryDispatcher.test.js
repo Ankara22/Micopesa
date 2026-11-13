@@ -21,6 +21,8 @@ const productionEnvironment = {
 
 function createHarness({
     sendSms = async () => ({ accepted: true, status: "PROVIDER_ACCEPTED", messageId: "provider-1" }),
+    sendEmail = async () => ({ accepted: true, status: "PROVIDER_ACCEPTED", messageId: "email-1" }),
+    claimEligible = true,
     environment = productionEnvironment,
     notifications = [{
         notification_id: "notification_001",
@@ -52,6 +54,7 @@ function createHarness({
             state.commits += 1;
             return copy(claimed);
         },
+        async isClaimEligible() { return claimEligible; },
         async markProviderAccepted(notification, { messageId }) {
             state.persistCalls.push(["accepted", notification.notification_id, messageId]);
             const item = state.notifications.find((row) => row.notification_id === notification.notification_id);
@@ -79,6 +82,7 @@ function createHarness({
     const dispatcher = createSmsDeliveryDispatcher({
         repository,
         sendSms,
+        sendEmail,
         environment,
         logger: { error() {} },
     });
@@ -94,40 +98,60 @@ test("claims before sending and persists provider acceptance and message ID", as
         },
     });
 
-    test("development self-test settings do not enable or claim the general SMS queue", async () => {
-        const environment = {
-            NODE_ENV: "development",
-            SMS_DISPATCHER_ENABLED: "true",
-            MOBILESASA_TEST_SMS_ENABLED: "true",
-            MOBILESASA_SMS_ENABLED: "false",
-            MOBILE_SASA_SMS_API_TOKEN: "mbs_test-token",
-            MOBILE_SASA_SMS_SENDER_ID: "MicoPesa",
-        };
-        let claims = 0;
-        const dispatcher = createSmsDeliveryDispatcher({
-            repository: {
-                async claimBatch() {
-                    claims += 1;
-                    return [{ notification_id: "already-queued", delivery_status: "PENDING" }];
-                },
-            },
-            sendSms: async () => {
-                throw new Error("The general dispatcher must not send in development.");
-            },
-            environment,
-            logger: { error() {} },
-        });
-
-        assert.equal(isSmsDispatcherEnabled(environment), false);
-        assert.equal(await dispatcher.runOnce(), 0);
-        assert.equal(claims, 0);
-    });
-
     assert.equal(await dispatcher.runOnce(), 1);
     assert.equal(accepted, true);
     assert.equal(state.notifications[0].delivery_status, "PROVIDER_ACCEPTED");
     assert.equal(state.notifications[0].provider_message_id, "provider-1");
     assert.equal(state.notifications[0].delivered_at, undefined);
+});
+
+test("stale or unverified recipient claims are failed without provider dispatch", async () => {
+    let sends = 0;
+    const { dispatcher, state } = createHarness({
+        claimEligible: false,
+        sendSms: async () => {
+            sends += 1;
+            return { accepted: true, status: "PROVIDER_ACCEPTED" };
+        },
+    });
+
+    await dispatcher.runOnce();
+
+    assert.equal(sends, 0);
+    assert.equal(state.notifications[0].delivery_status, "FAILED");
+    assert.deepEqual(state.persistCalls, [
+        ["failed", "notification_001", "NOTIFICATION_RECIPIENT_STALE"],
+    ]);
+});
+
+test("development self-test settings do not enable or claim the general SMS queue", async () => {
+    const environment = {
+        NODE_ENV: "development",
+        SMS_DISPATCHER_ENABLED: "true",
+        MOBILESASA_TEST_SMS_ENABLED: "true",
+        MOBILESASA_SMS_ENABLED: "false",
+        MOBILE_SASA_SMS_API_TOKEN: "mbs_test-token",
+        MOBILE_SASA_SMS_SENDER_ID: "MicoPesa",
+    };
+    let claims = 0;
+    const dispatcher = createSmsDeliveryDispatcher({
+        repository: {
+            async isClaimEligible() { return true; },
+            async claimBatch() {
+                claims += 1;
+                return [{ notification_id: "already-queued", delivery_status: "PENDING" }];
+            },
+        },
+        sendSms: async () => {
+            throw new Error("The general dispatcher must not send in development.");
+        },
+        environment,
+        logger: { error() {} },
+    });
+
+    assert.equal(isSmsDispatcherEnabled(environment), false);
+    assert.equal(await dispatcher.runOnce(), 0);
+    assert.equal(claims, 0);
 });
 
 test("passes the stable notification ID to the SMS provider for Mobile Sasa reconciliation", async () => {
@@ -147,6 +171,7 @@ test("passes the stable notification ID to the SMS provider for Mobile Sasa reco
 test("concurrent dispatcher instances cannot issue duplicate sends", async () => {
     const state = { claimed: false, sends: 0 };
     const repository = {
+        async isClaimEligible() { return true; },
         async claimBatch() {
             if (state.claimed) return [];
             state.claimed = true;
@@ -188,6 +213,23 @@ test("definitive rejection fails permanently without retry", async () => {
 
     assert.equal(state.notifications[0].delivery_status, "FAILED");
     assert.equal(state.persistCalls[0][0], "failed");
+});
+
+test("provider authentication failure is recorded as permanent and is not retried", async () => {
+    const error = new Error("Authentication rejected");
+    error.code = "SMS_PROVIDER_AUTH_FAILED";
+    const { dispatcher, state } = createHarness({
+        sendSms: async () => { throw error; },
+    });
+
+    await dispatcher.runOnce();
+
+    assert.equal(state.notifications[0].delivery_status, "FAILED");
+    assert.deepEqual(state.persistCalls[0], [
+        "failed",
+        "notification_001",
+        "SMS_PROVIDER_AUTH_FAILED",
+    ]);
 });
 
 test("explicit transient rejection uses exponential bounded retries", async () => {

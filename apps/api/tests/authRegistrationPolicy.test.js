@@ -7,6 +7,7 @@ const pool = require("../src/db/database");
 const authEmailService = require("../src/services/authEmailService");
 const authRoutes = require("../src/routes/authRoutes");
 const { hashOpaque } = require("../src/services/authEmailService");
+const { normalizeKenyanPhone } = require("../src/utils/kenyanPhone");
 
 process.env.JWT_SECRET ||= "micopesa-registration-policy-test-secret";
 
@@ -42,11 +43,13 @@ function createState() {
         rateLimitAttempts: [],
         failNextDelivery: false,
         failPendingRegistrationInsert: false,
+        failNextCompletionUserInsert: false,
         registrationRollbackCount: 0,
         failKycInsert: false,
         failLoginLookup: false,
         loginQueryFailure: null,
         passwordCompareCount: 0,
+        failedLoginCount: 0,
         passwordHashAttempts: 0,
         nextId: 1,
     };
@@ -69,8 +72,22 @@ function configureDb() {
             ] };
         }
         if (query.includes("SET failed_login_attempts = 0, locked_until = NULL")) {
+            const user = state.users.find((candidate) => candidate.user_id === values[0]);
+            if (user) {
+                user.failed_login_attempts = 0;
+                user.locked_until = null;
+            }
             return { rows: [] };
         }
+        if (query.includes("SET failed_login_attempts = failed_login_attempts + 1")) {
+            const user = state.users.find((candidate) => candidate.user_id === values[0]);
+            if (user) {
+                user.failed_login_attempts = Number(user.failed_login_attempts || 0) + 1;
+                state.failedLoginCount += 1;
+            }
+            return { rows: [] };
+        }
+        if (query.includes("INSERT INTO audit_logs")) return { rows: [], rowCount: 1 };
         if (query.includes("SELECT user_id FROM users") && query.includes("lower(pending_email)")) {
             const duplicate = state.users.find((user) =>
                 user.phone === values[0] ||
@@ -79,15 +96,22 @@ function configureDb() {
             );
             return { rows: duplicate ? [{ user_id: duplicate.user_id }] : [] };
         }
-        if (query.includes("SELECT user_id, full_name, phone, email, password_hash")) {
+        if (query.includes("SELECT user_id, full_name, phone, email, pending_email")) {
             if (state.failLoginLookup) {
                 state.loginQueryFailure = { code: "42703", missingColumn: "failed_login_attempts" };
                 throw Object.assign(new Error('column "failed_login_attempts" does not exist'), { code: "42703" });
             }
             const identifier = values[0];
             const email = values[1];
+            const normalizedPhone = values[2];
             const user = state.users.find((candidate) =>
-                (candidate.login_method === "PHONE" && candidate.phone === identifier) ||
+                (candidate.login_method === "PHONE" && (
+                    candidate.phone === identifier ||
+                    (normalizedPhone &&
+                        normalizeKenyanPhone(candidate.phone) === normalizedPhone)
+                )) ||
+                (normalizedPhone && candidate.phone_verified_at &&
+                    normalizeKenyanPhone(candidate.phone) === normalizedPhone) ||
                 (email && candidate.email_verified && candidate.email?.toLowerCase() === email)
             );
             return { rows: user ? [{
@@ -132,6 +156,24 @@ function configureDb() {
                 if (query.includes("DELETE FROM pending_registrations WHERE expires_at")) {
                     return { rows: [] };
                 }
+                if (query.includes("FROM users") &&
+                    query.includes("FROM pending_registrations") &&
+                    query.includes("UNION ALL")) {
+                    const [email, phone] = values;
+                    const normalizedPhone = normalizeKenyanPhone(phone) ||
+                        phone.trim().replace(/[\s()-]/g, "");
+                    const matchesIdentity = (candidate) =>
+                        candidate.email?.toLowerCase() === email.toLowerCase() ||
+                        candidate.pending_email?.toLowerCase() === email.toLowerCase() ||
+                        (normalizeKenyanPhone(candidate.phone) ||
+                            candidate.phone?.trim().replace(/[\s()-]/g, "")) === normalizedPhone;
+                    const existingUser = state.users.some(matchesIdentity);
+                    const existingPending = state.pendingRegistrations.some((candidate) =>
+                        new Date(candidate.expires_at).getTime() > Date.now() &&
+                        matchesIdentity(candidate)
+                    );
+                    return { rows: existingUser || existingPending ? [{ "?column?": 1 }] : [] };
+                }
                 if (query.includes("INSERT INTO pending_registrations")) {
                     if (state.failPendingRegistrationInsert) {
                         throw Object.assign(new Error("synthetic pending insert failure"), { code: "23514" });
@@ -164,6 +206,15 @@ function configureDb() {
                     return { rows: [] };
                 }
                 if (query.includes("INSERT INTO users")) {
+                    if (state.failNextCompletionUserInsert) {
+                        state.failNextCompletionUserInsert = false;
+                        throw Object.assign(new Error("synthetic unique constraint failure"), {
+                            code: "23505",
+                            constraint: "uq_users_email_lower",
+                            table: "users",
+                            schema: "public",
+                        });
+                    }
                     const emailVerified = query.includes("email_verified)");
                     const user = {
                         user_id: `new-user-${state.nextId++}`,
@@ -365,6 +416,8 @@ test("valid registration attempts return the same acknowledgement for existing i
             phone: "07000000001",
             national_id: "12345679",
         });
+        assert.equal(state.emailAttempts.length, 1);
+        assert.equal(state.pendingRegistrations.length, 0);
         const duplicateNationalId = await api.request("/register", {
             ...base,
             email: "third@example.com",
@@ -375,7 +428,7 @@ test("valid registration attempts return the same acknowledgement for existing i
             assert.deepEqual(await response.json(), firstBody);
         }
         const duplicateIdVerification = await api.request("/email/verify", {
-            token: state.emailAttempts[3].token,
+            token: state.emailAttempts[1].token,
             password: "another-secure-password",
         });
         assert.equal(duplicateIdVerification.status, finalized.status);
@@ -385,11 +438,68 @@ test("valid registration attempts return the same acknowledgement for existing i
         assert.equal(state.kycRecords.length, 2);
         assert.equal(state.kycRecords.every((record) => record.kyc_status === "PENDING"), true);
         assert.equal(state.kycRecords.every((record) => record.duplicate_submission === true), true);
-        assert.equal(state.pendingRegistrations.length, 2);
-        assert.equal(state.emailAttempts.length, 4);
+        assert.equal(state.pendingRegistrations.length, 0);
+        assert.equal(state.emailAttempts.length, 2);
         assert.equal(state.rateLimitAttempts.length, 4);
         assert.ok(state.emailAttempts.every(({ purpose }) => purpose === "REGISTRATION_VERIFICATION"));
     } finally {
+        await api.close();
+    }
+});
+
+test("a completion uniqueness conflict preserves the pending registration for retry", async () => {
+    const api = await createApi();
+    const originalConsoleError = console.error;
+    const diagnostics = [];
+    console.error = (...args) => diagnostics.push(args);
+    try {
+        const registration = await api.request("/register", {
+            full_name: "Synthetic Worker",
+            email: "retry@example.test",
+            phone: "07000000021",
+            occupation: "OTHER_INFORMAL_WORKER",
+            national_id: "87654321",
+            date_of_birth: "1990-04-15",
+        });
+        assert.equal(registration.status, 202);
+        const token = state.emailAttempts[0].token;
+        const pendingId = state.pendingRegistrations[0].pending_registration_id;
+
+        state.failNextCompletionUserInsert = true;
+        const failed = await api.request("/email/verify", {
+            token,
+            password: "synthetic-password",
+        });
+        assert.equal(failed.status, 409);
+        assert.equal((await failed.json()).code, "REGISTRATION_COMPLETION_UNAVAILABLE");
+        assert.equal(state.registrationRollbackCount, 1);
+        assert.equal(state.pendingRegistrations.length, 1);
+        assert.equal(state.pendingRegistrations[0].pending_registration_id, pendingId);
+        assert.equal(state.users.length, 0);
+        assert.equal(state.accounts.length, 0);
+        assert.equal(state.kycRecords.length, 0);
+        assert.deepEqual(diagnostics, [[
+            "Registration completion uniqueness conflict.",
+            {
+                code: "23505",
+                constraint: "uq_users_email_lower",
+                table: "users",
+                schema: "public",
+            },
+        ]]);
+        assert.doesNotMatch(JSON.stringify(diagnostics), /retry@example\.test|87654321|synthetic-password/);
+
+        const retried = await api.request("/email/verify", {
+            token,
+            password: "synthetic-password",
+        });
+        assert.equal(retried.status, 200);
+        assert.equal(state.users.length, 1);
+        assert.equal(state.accounts.length, 1);
+        assert.equal(state.kycRecords.length, 1);
+        assert.equal(state.pendingRegistrations.length, 0);
+    } finally {
+        console.error = originalConsoleError;
         await api.close();
     }
 });
@@ -709,13 +819,13 @@ test("client role and login-method overrides cannot change the EMAIL/WORKER regi
     }
 });
 
-test("EMAIL-policy accounts cannot use phone or unverified email; verified email succeeds", async () => {
+test("EMAIL-policy accounts require verified identifiers; verified phone and email both work", async () => {
     const api = await createApi();
     try {
         const registration = await api.request("/register", {
             full_name: "New Worker",
             email: "new@example.com",
-            phone: "07000000001",
+            phone: "0712345678",
             password: "secure-password",
             occupation: "OTHER_INFORMAL_WORKER",
             national_id: "12345678",
@@ -729,7 +839,7 @@ test("EMAIL-policy accounts cannot use phone or unverified email; verified email
         assert.equal(preVerificationLogin.status, 401);
 
         const phoneLogin = await api.request("/login", {
-            identifier: "07000000001",
+            identifier: "0712345678",
             password: "secure-password",
         });
         const unverifiedEmailLogin = await api.request("/login", {
@@ -746,6 +856,8 @@ test("EMAIL-policy accounts cannot use phone or unverified email; verified email
         });
         assert.equal(verified.status, 200);
         assert.equal(state.users[0].email_verified, true);
+        state.users[0].phone_verified_at = new Date("2026-11-05T12:00:00Z");
+        state.users[0].pending_email = "pending@example.com";
 
         const emailLogin = await api.request("/login", {
             identifier: " NEW@example.com ",
@@ -755,10 +867,56 @@ test("EMAIL-policy accounts cannot use phone or unverified email; verified email
         assert.equal((await emailLogin.json()).data.user.role, "WORKER");
         assert.equal(state.pendingRegistrations.length, 0);
         const verifiedPhoneLogin = await api.request("/login", {
-            identifier: "07000000001",
+            identifier: "0712345678",
             password: "secure-password",
         });
-        assert.equal(verifiedPhoneLogin.status, 401);
+        assert.equal(verifiedPhoneLogin.status, 200);
+        const verifiedPhoneBody = await verifiedPhoneLogin.json();
+        assert.equal(verifiedPhoneBody.data.user.phone_verified, true);
+        assert.equal(verifiedPhoneBody.data.user.pending_email, "pending@example.com");
+        assert.equal(Object.hasOwn(verifiedPhoneBody.data.user, "password_hash"), false);
+        assert.equal(state.passwordCompareCount, 5);
+    } finally {
+        await api.close();
+    }
+});
+
+test("unknown identifiers use dummy bcrypt and account status is disclosed only after a correct password", async () => {
+    const api = await createApi();
+    try {
+        const unknown = await api.request("/login", {
+            identifier: "07000000008",
+            password: "incorrect-password",
+        });
+        assert.equal(unknown.status, 401);
+        assert.equal(state.passwordCompareCount, 1);
+        assert.equal(state.failedLoginCount, 0);
+
+        state.users.push({
+            user_id: "suspended-user",
+            phone: "07000000009",
+            password_hash: "hashed:correct-password",
+            role: "WORKER",
+            login_method: "PHONE",
+            account_status: "SUSPENDED",
+            failed_login_attempts: 0,
+            auth_version: 0,
+        });
+        const wrongPassword = await api.request("/login", {
+            identifier: "07000000009",
+            password: "wrong-password",
+        });
+        assert.equal(wrongPassword.status, 401);
+        assert.equal((await wrongPassword.json()).message, "Invalid phone number or password");
+        assert.equal(state.users[0].failed_login_attempts, 1);
+
+        const correctPassword = await api.request("/login", {
+            identifier: "07000000009",
+            password: "correct-password",
+        });
+        assert.equal(correctPassword.status, 403);
+        assert.equal((await correctPassword.json()).message, "This account is not active");
+        assert.equal(state.passwordCompareCount, 3);
     } finally {
         await api.close();
     }
@@ -843,7 +1001,7 @@ test("legacy PHONE-policy accounts keep phone login and public resend remains ge
         assert.equal(retryRegistration.status, 202);
         assert.deepEqual(await retryRegistration.json(), acceptedBody);
         assert.equal(state.users.length, 1);
-        assert.equal(state.pendingRegistrations.length, 2);
+        assert.equal(state.pendingRegistrations.length, 1);
 
         state.failNextDelivery = true;
         const resendExisting = await api.request("/email/verification-request/public", { email: "new@example.com" });

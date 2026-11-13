@@ -29,11 +29,66 @@ function generateTemporaryPassword() {
     return crypto.randomBytes(18).toString("base64url");
 }
 
-function logSmsFailure(error) {
+const SMS_FAILURE_CATEGORIES = new Set([
+    "configuration_failure",
+    "authentication_failure",
+    "provider_rejection",
+    "rate_limiting",
+    "network_failure",
+    "timeout",
+    "unknown_outcome",
+    "input_validation",
+]);
+
+function logSmsAttemptStarted(provider) {
+    console.info(JSON.stringify({
+        event: "admin.staff_onboarding.sms_attempt_started",
+        provider: provider === "MOBILE_SASA" ? "MOBILE_SASA" : "AFRICAS_TALKING",
+    }));
+}
+
+function logSmsFailure(error, provider) {
+    const diagnostics = error?.diagnostics || {};
+    const errorCode = typeof error?.code === "string" && /^SMS_[A-Z0-9_]{1,60}$/.test(error.code)
+        ? error.code
+        : "SMS_SEND_FAILED";
+    const failureCategory = SMS_FAILURE_CATEGORIES.has(diagnostics.failureCategory)
+        ? diagnostics.failureCategory
+        : errorCode === "SMS_CONFIGURATION_MISSING" || errorCode === "SMS_PRODUCTION_ONLY"
+            ? "configuration_failure"
+            : errorCode === "SMS_PROVIDER_AUTH_FAILED"
+                ? "authentication_failure"
+                : errorCode === "SMS_PROVIDER_REJECTED"
+                    ? "provider_rejection"
+                    : errorCode === "SMS_RETRYABLE_REJECTION"
+                        ? "rate_limiting"
+                        : errorCode === "SMS_TIMEOUT"
+                            ? "timeout"
+                            : errorCode === "SMS_NETWORK_ERROR"
+                                ? "network_failure"
+                                : "unknown_outcome";
+    const responseCode = typeof diagnostics.responseCode === "string" &&
+        /^\d{4,6}$/.test(diagnostics.responseCode)
+        ? diagnostics.responseCode
+        : null;
+    const errorClass = typeof diagnostics.errorClass === "string" &&
+        /^(Error|TypeError|AbortError|FetchError|AggregateError|RangeError|SyntaxError)$/.test(diagnostics.errorClass)
+        ? diagnostics.errorClass
+        : "Error";
     console.error(JSON.stringify({
         event: "admin.staff_onboarding.sms_failed",
-        errorCode: String(error?.code || "SMS_SEND_FAILED").slice(0, 60),
-        errorClass: error?.name || "Error",
+        provider: provider === "MOBILE_SASA" ? "MOBILE_SASA" : "AFRICAS_TALKING",
+        requestStarted: diagnostics.requestStarted === true,
+        httpResponseReceived: diagnostics.httpResponseReceived === true,
+        httpStatus: Number.isInteger(diagnostics.httpStatus) &&
+            diagnostics.httpStatus >= 100 && diagnostics.httpStatus <= 599
+            ? diagnostics.httpStatus
+            : null,
+        responseCode,
+        errorCode,
+        errorClass,
+        failureCategory,
+        deliveryOutcomeUnknown: diagnostics.deliveryOutcomeUnknown === true,
     }));
 }
 
@@ -99,13 +154,14 @@ async function createStaff(req, res) {
     let sms;
     const trackingId = crypto.randomUUID();
     try {
+        logSmsAttemptStarted(smsProvider);
         sms = await smsService.sendSms({
             to: phone,
             message: `Your MicoPesa staff sign-in is ready. Username: ${phone}. Temporary password: ${temporaryPassword}. Change it at first sign-in.`,
             trackingId,
-        }, { provider: smsProvider });
+        }, { provider: smsProvider, logger: console });
     } catch (error) {
-        logSmsFailure(error);
+        logSmsFailure(error, smsProvider);
         return res.status(201).json({
             status: "success",
             message: "Staff account was created but remains inactive because SMS delivery was not accepted. Retry onboarding from the user list.",
@@ -208,13 +264,14 @@ async function resendStaffOnboarding(req, res) {
     let sms;
     const trackingId = crypto.randomUUID();
     try {
+        logSmsAttemptStarted(smsProvider);
         sms = await smsService.sendSms({
             to: user.phone,
             message: `Your MicoPesa staff sign-in is ready. Username: ${user.phone}. Temporary password: ${temporaryPassword}. Change it at first sign-in.`,
             trackingId,
-        }, { provider: smsProvider });
+        }, { provider: smsProvider, logger: console });
     } catch (error) {
-        logSmsFailure(error);
+        logSmsFailure(error, smsProvider);
         return res.status(502).json({
             status: "error",
             message: "SMS was not accepted. The account remains inactive; retry onboarding later.",

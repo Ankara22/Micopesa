@@ -16,6 +16,7 @@ import StatusBadge from "./ui/StatusBadge";
 import Button from "./ui/Button";
 import UserAvatar from "./UserAvatar";
 import PhoneNumberChange from "./PhoneNumberChange";
+import KycStatusBanner from "./KycStatusBanner";
 import { formatDate as formatLocaleDate } from "../i18n/formatters";
 import "./ProfileCard.css";
 
@@ -314,6 +315,8 @@ function ProfileCard() {
                 </div>
             </header>
 
+            {isWorker && <KycStatusBanner status={profile.kyc_status} />}
+
             <div className="profile-grid">
                 <Card title={profileText("personalInfo", "Personal information")} className="profile-card">
                     <div className="profile-edit-fields">
@@ -492,6 +495,7 @@ function ProfileCard() {
                     </dl>
                     <PhoneNumberChange
                         currentPhone={profile.phone}
+                        currentPhoneVerified={Boolean(profile.phone_verified_at)}
                         onVerified={() => loadProfile({ silent: true })}
                     />
                     <p className="profile-readonly-note">

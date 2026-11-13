@@ -38,4 +38,15 @@ describe("worker retirement plan localization", () => {
         expect(screen.getByLabelText("Lengo la akiba ya kustaafu (KSh)")).toHaveValue(500000);
         expect(screen.getByRole("button", { name: "Kokotoa Makadirio" })).toBeInTheDocument();
     });
+
+    it("prompts the worker to create a plan when none exists", async () => {
+        mocks.getMyPlan.mockResolvedValue({ plan: null, projection: null });
+        render(<ToastProvider><RetirementPlan /></ToastProvider>);
+
+        expect(await screen.findByRole("heading", { name: "Kokotoa makadirio ya kustaafu" }))
+            .toBeInTheDocument();
+        expect(screen.getByText(/Anza kupanga maisha yako ya baadaye/)).toBeInTheDocument();
+        expect(screen.getByLabelText("Umri wako wa sasa")).toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "Jaribu tena" })).not.toBeInTheDocument();
+    });
 });

@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "../i18n";
 import ProfileCard from "./ProfileCard";
 import Header from "../layouts/Header";
+import { ToastProvider } from "./ui/ToastContext";
 
 const mocks = vi.hoisted(() => ({
     getMyProfile: vi.fn(),
@@ -41,7 +42,8 @@ const profile = {
     user_id: "user-1",
     full_name: "Amina Worker",
     email: "amina@example.com",
-    phone: "254700000001",
+    phone: "254712345098",
+    phone_verified_at: "2026-01-01T00:00:00.000Z",
     role: "WORKER",
     occupation: "MARKET_VENDOR",
     account_status: "ACTIVE",
@@ -55,10 +57,12 @@ const profile = {
 
 function renderProfile({ includeHeader = false } = {}) {
     return render(
-        <MemoryRouter>
-            {includeHeader && <Header />}
-            <ProfileCard />
-        </MemoryRouter>
+        <ToastProvider>
+            <MemoryRouter>
+                {includeHeader && <Header />}
+                <ProfileCard />
+            </MemoryRouter>
+        </ToastProvider>
     );
 }
 
@@ -145,7 +149,19 @@ describe("shared ProfileCard", () => {
         expect(screen.getByText("****1234")).toBeInTheDocument();
         expect(screen.getByText("KYC verification status")).toBeInTheDocument();
         expect(screen.getByText("Pending verification")).toBeInTheDocument();
+        expect(screen.getByRole("note")).toHaveTextContent(
+            "Your KYC review is pending. Balances, contributions, funds and withdrawals are unavailable until verification is complete.",
+        );
         expect(container).not.toHaveTextContent("12345678");
+    });
+
+    it("shows a rejected KYC access notice only when the profile is rejected", async () => {
+        mocks.getMyProfile.mockResolvedValueOnce({ ...profile, kyc_status: "REJECTED" });
+        renderProfile();
+
+        expect(await screen.findByRole("alert")).toHaveTextContent(
+            "Your KYC was rejected. Balances, contributions, funds and withdrawals remain unavailable until your account is verified.",
+        );
     });
 
     it("shows a graceful fallback when no KYC record is available", async () => {
@@ -170,11 +186,12 @@ describe("shared ProfileCard", () => {
         renderProfile();
         await screen.findByRole("heading", { name: "Amina Worker" });
         expect(screen.getByText("Current registered number:")).toBeInTheDocument();
-        expect(screen.getByText("254700000001")).toBeInTheDocument();
+        expect(screen.getByText("254712345098")).toBeInTheDocument();
 
         fireEvent.change(screen.getByLabelText("New Kenyan mobile number"), {
             target: { value: "0712 345 678" },
         });
+
         fireEvent.change(screen.getByLabelText("Current password"), {
             target: { value: "current-password" },
         });
@@ -200,6 +217,19 @@ describe("shared ProfileCard", () => {
         expect(mocks.verifyPhoneChange).toHaveBeenCalledWith("123456");
         expect(mocks.getMyProfile).toHaveBeenCalledTimes(2);
         expect(screen.getByText("+254712345678")).toBeInTheDocument();
+    });
+
+    it("prefills an unverified registered phone for same-number SMS verification", async () => {
+        mocks.getMyProfile.mockResolvedValueOnce({ ...profile, phone_verified_at: null });
+        renderProfile();
+        await screen.findByRole("heading", { name: "Amina Worker" });
+
+        await waitFor(() => expect(
+            screen.getByLabelText("Phone number to verify or change"),
+        ).toHaveValue("254712345098"));
+        expect(screen.getByText(
+            "Verify your current registered number or enter another Kenyan number.",
+        )).toBeInTheDocument();
     });
 
     it("uploads a valid selected image immediately and updates the avatar", async () => {
@@ -251,10 +281,12 @@ describe("shared ProfileCard", () => {
                 { photoUpdated: true }
             ));
             rerender(
-                <MemoryRouter>
-                    <Header />
-                    <ProfileCard />
-                </MemoryRouter>
+                <ToastProvider>
+                    <MemoryRouter>
+                        <Header />
+                        <ProfileCard />
+                    </MemoryRouter>
+                </ToastProvider>
             );
             await waitFor(() => expect(screen.getByRole("link", { name: "Open your profile" }).querySelector("img"))
                 .toHaveAttribute("src", "blob:refreshed-photo"));
@@ -334,10 +366,12 @@ describe("shared ProfileCard", () => {
         }));
         expect(await screen.findByRole("status")).toHaveTextContent("Full name updated");
         rerender(
-            <MemoryRouter>
-                <Header />
-                <ProfileCard />
-            </MemoryRouter>
+            <ToastProvider>
+                <MemoryRouter>
+                    <Header />
+                    <ProfileCard />
+                </MemoryRouter>
+            </ToastProvider>
         );
         expect(screen.getByText("Bradley Omondi Juma", { selector: ".app-header-user-name" })).toBeInTheDocument();
         expect(mocks.syncProfile).toHaveBeenCalledWith(

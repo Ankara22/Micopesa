@@ -51,6 +51,10 @@ describe("WorkerDashboard", () => {
         renderDashboard();
 
         expect(await screen.findByRole("heading", { name: /Good .*Amina/ })).toBeInTheDocument();
+        expect(screen.getByText("Verify your registered phone to enable M-Pesa payments."))
+            .toBeInTheDocument();
+        expect(screen.getByRole("link", { name: "Verify phone" }))
+            .toHaveAttribute("href", "/worker/profile");
         expect(screen.getByText("KSh 14,850.00")).toBeInTheDocument();
         expect(screen.getByText("Completed contribution records").parentElement)
             .toHaveTextContent("1");
@@ -66,14 +70,49 @@ describe("WorkerDashboard", () => {
         expect(mocks.getMyContributions).toHaveBeenCalledTimes(1);
     });
 
+    it("hides the verification prompt when the registered phone is verified", async () => {
+        mocks.useAuth.mockReturnValue({
+            user: { full_name: "Amina Worker", user_id: "worker-1", phone_verified: true },
+            loginSessionId: "login-1",
+        });
+        renderDashboard();
+
+        expect(await screen.findByRole("heading", { name: /Good .*Amina/ })).toBeInTheDocument();
+        expect(screen.queryByText("Verify your registered phone to enable M-Pesa payments."))
+            .not.toBeInTheDocument();
+        expect(screen.queryByRole("link", { name: "Verify phone" })).not.toBeInTheDocument();
+    });
+
     it("shows useful no-record summaries without inventing account data", async () => {
-        mocks.getRetirementPlan.mockRejectedValue({ status: 404, message: "No plan" });
+        mocks.getRetirementPlan.mockRejectedValue({
+            status: 404,
+            message: "No active retirement plan found",
+            data: {
+                code: "RETIREMENT_PLAN_NOT_FOUND",
+                data: { plan: null, projection: null },
+            },
+        });
         mocks.getMyContributions.mockResolvedValue([]);
         renderDashboard();
 
         expect(await screen.findByText("Not set")).toBeInTheDocument();
         expect(screen.getByText("Recorded total KSh 0.00")).toBeInTheDocument();
+        expect(screen.getByRole("link", { name: "Create a retirement plan" }))
+            .toHaveAttribute("href", "/worker/retirement-plan");
         expect(screen.queryByText(/insights for your next step/i)).not.toBeInTheDocument();
+    });
+
+    it("surfaces unrelated retirement-plan 404 responses", async () => {
+        mocks.getRetirementPlan.mockRejectedValue({
+            status: 404,
+            message: "No pension account found",
+            data: { code: "PENSION_ACCOUNT_NOT_FOUND" },
+        });
+        renderDashboard();
+
+        expect(await screen.findByText("Unable to load this information right now. Please try again."))
+            .toBeInTheDocument();
+        expect(screen.queryByRole("link", { name: "Create a retirement plan" })).not.toBeInTheDocument();
     });
 
     it("surfaces API errors with recovery actions", async () => {
@@ -82,6 +121,41 @@ describe("WorkerDashboard", () => {
 
         expect(await screen.findByText("Unable to load this information right now. Please try again.")).toBeInTheDocument();
         expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+    });
+
+    it("keeps other summaries visible while an individual widget is still loading", async () => {
+        mocks.getMyBalance.mockImplementation(() => new Promise(() => {}));
+        renderDashboard();
+
+        expect(await screen.findByText("Recorded total KSh 2,500.00")).toBeInTheDocument();
+        expect(screen.getByText("Goal KSh 500,000.00")).toBeInTheDocument();
+        expect(screen.getByText("Loading")).toBeInTheDocument();
+    });
+
+    it.each([
+        ["balance", 403],
+        ["contributions", 500],
+        ["retirement plan", 500],
+    ])("keeps successful summaries visible when the %s widget returns HTTP %i", async (widget, status) => {
+        const error = { status, message: "Request failed" };
+        if (widget === "balance") mocks.getMyBalance.mockRejectedValue(error);
+        if (widget === "contributions") mocks.getMyContributions.mockRejectedValue(error);
+        if (widget === "retirement plan") mocks.getRetirementPlan.mockRejectedValue(error);
+        renderDashboard();
+
+        expect(await screen.findByRole("alert")).toHaveTextContent(
+            "Unable to load this information right now. Please try again."
+        );
+        expect(screen.getAllByRole("alert")).toHaveLength(1);
+        if (widget !== "balance") {
+            expect(screen.getByText("KSh 14,850.00")).toBeInTheDocument();
+        }
+        if (widget !== "contributions") {
+            expect(screen.getByText("Recorded total KSh 2,500.00")).toBeInTheDocument();
+        }
+        if (widget !== "retirement plan") {
+            expect(screen.getByText("Goal KSh 500,000.00")).toBeInTheDocument();
+        }
     });
 
     it("renders worker dashboard labels in Kiswahili", async () => {

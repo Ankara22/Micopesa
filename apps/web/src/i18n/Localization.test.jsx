@@ -5,6 +5,7 @@ import { MemoryRouter } from "react-router-dom";
 import Header from "../layouts/Header";
 import AuthLayout from "../pages/auth/AuthLayout";
 import Login from "../pages/auth/Login";
+import { ToastProvider } from "../components/ui/ToastContext";
 import i18n, { getLocalizationOptions, getStoredLanguage, LANGUAGE_STORAGE_KEY } from "./index";
 
 const authMock = vi.hoisted(() => ({
@@ -100,9 +101,11 @@ describe("shared localization", () => {
         guest.unmount();
 
         render(
-            <MemoryRouter>
-                <Header />
-            </MemoryRouter>,
+            <ToastProvider>
+                <MemoryRouter>
+                    <Header />
+                </MemoryRouter>
+            </ToastProvider>,
         );
         expect(screen.getByRole("combobox", { name: "Language" })).toBeInTheDocument();
     });
@@ -113,13 +116,13 @@ describe("shared localization", () => {
                 <Login />
             </MemoryRouter>,
         );
-        const email = screen.getByLabelText("Email address");
+        const phone = screen.getByLabelText("Verified phone number");
         const password = screen.getByLabelText("Password");
-        fireEvent.change(email, { target: { value: "worker@example.com" } });
+        fireEvent.change(phone, { target: { value: "0712345098" } });
         fireEvent.change(password, { target: { value: "working-password" } });
         fireEvent.change(screen.getByRole("combobox", { name: "Language" }), { target: { value: "sw" } });
 
-        expect(screen.getByLabelText("Anwani ya barua pepe")).toHaveValue("worker@example.com");
+        expect(screen.getByLabelText("Nambari ya simu iliyothibitishwa")).toHaveValue("0712345098");
         expect(screen.getByLabelText("Nenosiri")).toHaveValue("working-password");
     });
 });

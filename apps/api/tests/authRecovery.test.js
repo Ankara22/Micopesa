@@ -70,7 +70,9 @@ test("legacy phone/password login remains available when the stored email is unv
     pool.query = async (query, values) => {
         if (query.includes("SELECT setting_key, setting_value")) return { rows: adminSettingsRows };
         if (query.includes("SET failed_login_attempts = 0")) return { rows: [] };
-        queryValues = values;
+        if (query.includes("FROM users") && query.includes("login_method = 'PHONE'")) {
+            queryValues = values;
+        }
         return { rows: [{
             user_id: "legacy-user",
             full_name: "Legacy User",
@@ -99,7 +101,9 @@ test("only verified email identifiers are used and the database role is signed a
     pool.query = async (query, values) => {
         if (query.includes("SELECT setting_key, setting_value")) return { rows: adminSettingsRows };
         if (query.includes("SET failed_login_attempts = 0")) return { rows: [] };
-        requestedIdentifier = values[1];
+        if (query.includes("FROM users") && query.includes("login_method = 'PHONE'")) {
+            requestedIdentifier = values[1];
+        }
         return { rows: [{
             user_id: "changed-role-user",
             full_name: "Changed Role",
@@ -143,8 +147,10 @@ test("a verified changed phone logs in to the same account with the existing pas
     pool.query = async (query, values) => {
         if (query.includes("SELECT setting_key, setting_value")) return { rows: adminSettingsRows };
         if (query.includes("SET failed_login_attempts = 0")) return { rows: [] };
-        loginQuery = query;
-        loginValues = values;
+        if (query.includes("FROM users") && query.includes("login_method = 'PHONE'")) {
+            loginQuery = query;
+            loginValues = values;
+        }
         return { rows: [{
             user_id: "same-admin-id",
             full_name: "Existing Admin",
@@ -171,10 +177,44 @@ test("a verified changed phone logs in to the same account with the existing pas
     assert.match(loginQuery, /phone_verified_at IS NOT NULL/);
     assert.equal(res.body.data.user.user_id, "same-admin-id");
     assert.equal(res.body.data.user.phone, "+254712345678");
+    assert.equal(res.body.data.user.phone_verified, true);
+    assert.equal(res.body.data.user.pending_email, null);
+    assert.equal(Object.hasOwn(res.body.data.user, "password_hash"), false);
     assert.equal(res.body.data.user.role, "ADMIN");
     assert.equal(verifyTokenString(res.body.data.token).userId, "same-admin-id");
     assert.equal(verifyTokenString(res.body.data.token).role, "ADMIN");
     assert.equal(verifyTokenString(res.body.data.token).authVersion, 7);
+});
+
+test("GET /me restores phone verification and pending email without sensitive fields", async () => {
+    let query;
+    let values;
+    pool.query = async (sql, params) => {
+        query = sql;
+        values = params;
+        return { rows: [{
+            user_id: "worker-1",
+            full_name: "Worker One",
+            phone: "+254712345678",
+            phone_verified: true,
+            email: "worker@example.com",
+            email_verified: true,
+            pending_email: "next@example.com",
+            role: "WORKER",
+            account_status: "ACTIVE",
+            profile_photo_available: false,
+        }] };
+    };
+
+    const res = response();
+    await authController.getMe({ user: { userId: "worker-1" } }, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(values, ["worker-1"]);
+    assert.match(query, /phone_verified_at IS NOT NULL/);
+    assert.equal(res.body.data.user.phone_verified, true);
+    assert.equal(res.body.data.user.pending_email, "next@example.com");
+    assert.equal(Object.hasOwn(res.body.data.user, "password_hash"), false);
 });
 
 test("password-reset requests return the same public response for missing, unverified, and verified accounts", async () => {

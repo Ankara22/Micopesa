@@ -37,23 +37,40 @@ describe("DepositModal", () => {
         vi.clearAllMocks();
         window.sessionStorage.removeItem("micopesa.mpesa.lastPaymentAttempt");
         window.sessionStorage.removeItem("micopesa.mpesa.paymentIdempotencyKey");
-        getPaymentProvider.mockResolvedValue({ provider: "DARAJA", simulator_enabled: false });
+        getPaymentProvider.mockResolvedValue({
+            provider: "DARAJA",
+            environment: "sandbox",
+            payment_enabled: false,
+            message_key: "MPESA_PAYMENTS_DISABLED",
+        });
         getStkPushStatus.mockResolvedValue({});
         getStkPushStatusByIdempotencyKey.mockResolvedValue({});
         getMyBalance.mockResolvedValue({ current_balance: 0 });
         getMyContributions.mockResolvedValue([]);
     });
 
-    it("keeps payment initiation disabled for real and simulated providers", async () => {
+    it.each([
+        ["DARAJA", "sandbox"],
+        ["SIMULATOR", "unavailable"],
+        ["UNAVAILABLE", "unavailable"],
+    ])("keeps real and simulated payment initiation disabled for %s", async (provider, environment) => {
+        getPaymentProvider.mockResolvedValue({
+            provider,
+            environment,
+            payment_enabled: false,
+            message_key: "MPESA_PAYMENTS_DISABLED",
+        });
+
         render(
             <ToastProvider>
                 <DepositModal open onClose={vi.fn()} />
             </ToastProvider>,
         );
 
-        expect(await screen.findByText(
-            "Deposits are temporarily unavailable. No real or simulated payment will be started.",
-        )).toBeInTheDocument();
+        const unavailableMessage = await screen.findByText(
+            "M-Pesa deposits are not enabled. No payment was started."
+        );
+        expect(unavailableMessage).toHaveAttribute("role", "status");
 
         const amount = screen.getByLabelText("Amount (KES)");
         const phone = screen.getByLabelText("M-Pesa phone number");
@@ -64,10 +81,32 @@ describe("DepositModal", () => {
         expect(submit).toBeDisabled();
 
         fireEvent.submit(amount.closest("form"));
-        await waitFor(() => {
-            expect(initiateStkPush).not.toHaveBeenCalled();
-            expect(confirmSimulatedPayment).not.toHaveBeenCalled();
+        await waitFor(() => expect(initiateStkPush).not.toHaveBeenCalled());
+        expect(confirmSimulatedPayment).not.toHaveBeenCalled();
+    });
+
+    it("keeps initiation disabled even when provider reports payments as enabled", async () => {
+        getPaymentProvider.mockResolvedValue({
+            provider: "DARAJA",
+            environment: "sandbox",
+            payment_enabled: true,
+            message_key: "MPESA_PAYMENTS_AVAILABLE",
         });
+
+        render(
+            <ToastProvider>
+                <DepositModal open onClose={vi.fn()} />
+            </ToastProvider>,
+        );
+
+        expect(await screen.findByText(
+            "M-Pesa deposits are not enabled. No payment was started.",
+        )).toBeInTheDocument();
+        expect(screen.getByLabelText("Amount (KES)")).toBeDisabled();
+        expect(screen.getByLabelText("M-Pesa phone number")).toBeDisabled();
+        expect(screen.getByRole("button", { name: "Deposits unavailable" })).toBeDisabled();
+        expect(initiateStkPush).not.toHaveBeenCalled();
+        expect(confirmSimulatedPayment).not.toHaveBeenCalled();
     });
 
     it("restores a saved attempt and checks its status without initiating payment", async () => {

@@ -114,7 +114,9 @@ function createRolePool({
                     return {
                             rows: recipientIds.map((recipientId) => ({
                                 user_id: recipientId,
+                                full_name: "Recipient One",
                                 phone: "0712345678",
+                                phone_verified_at: new Date("2026-01-01T00:00:00.000Z"),
                                 email: "worker@example.test",
                                 email_verified: true,
                                 has_push_subscription: false,
@@ -191,6 +193,7 @@ test("admin announcements queue for multiple recipients with recipient-scoped id
 
     assert.equal(first.length, 2);
     assert.deepEqual(first.map((item) => item.recipient_user_id), ["recipient-1", "recipient-2"]);
+    assert.ok(first.every((item) => item.admin_request_key));
     assert.deepEqual(retry.map((item) => item.notification_id), first.map((item) => item.notification_id));
     assert.equal(state.notifications.length, 2);
     assert.equal(state.audit.length, 2);
@@ -411,7 +414,7 @@ test("compliance exports hide drafts only for regulators and preserve legacy vis
     assert.doesNotMatch(adminQuery, /cr\.is_legacy = TRUE OR cr\.rba_status <> 'DRAFT'/);
 });
 
-test("report generation rejects a fund outside the caller scope before querying report data", async () => {
+test("report generation rejects a fund outside the caller scope before querying report data", async (t) => {
     let reportQueryCalled = false;
     const reports = createReportService({
         async query(sql) {
@@ -423,7 +426,7 @@ test("report generation rejects a fund outside the caller scope before querying 
         },
     });
 
-    test("M-Pesa export distinguishes verification from settlement and filters transaction status", async () => {
+    await t.test("M-Pesa export distinguishes verification from settlement and filters transaction status", async () => {
         const calls = [];
         const reports = createReportService({
             async query(sql, params = []) {
@@ -554,6 +557,7 @@ test("notification responses preserve legacy sent_at with provider-acceptance fa
     assert.match(calls[0], /provider_message_id/);
     assert.match(calls[0], /delivered_at/);
     assert.match(calls[0], /last_error_code/);
+    assert.match(calls[0], /n\.admin_request_key/);
     for (const sql of calls) {
         assert.match(sql, /COALESCE\((?:n\.)?sent_at,\s*(?:n\.)?provider_accepted_at\)\s+AS\s+sent_at/);
         assert.match(sql, /provider_accepted_at/);

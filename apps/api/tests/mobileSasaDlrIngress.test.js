@@ -66,7 +66,7 @@ function appFor(environment, now, bodyLimit = "8kb", rateLimitOptions = {}) {
     return app;
 }
 
-test("DLR ingress verifies the raw-body signature and accepts a valid signed report", async () => {
+test("DLR ingress verifies the raw-body signature and accepts a valid signed report", async (t) => {
     const secret = "test-webhook-secret";
     const now = 1_700_000_000_000;
     const timestamp = String(Math.floor(now / 1000));
@@ -89,7 +89,7 @@ test("DLR ingress verifies the raw-body signature and accepts a valid signed rep
         });
     });
 
-    test("callback rate limiting returns a retryable response without growing past its bound", async () => {
+    await t.test("callback rate limiting returns a retryable response without growing past its bound", async () => {
         const secret = "test-webhook-secret";
         const now = 1_700_000_000_000;
         const timestamp = String(Math.floor(now / 1000));

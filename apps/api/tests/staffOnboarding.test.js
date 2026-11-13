@@ -114,13 +114,27 @@ test("creates staff with a temporary password, activates only after SMS acceptan
 
 test("leaves a staff account inactive when the SMS provider rejects onboarding", async () => {
     let insertCount = 0;
+    const infoLogs = [];
     let loggedFailure;
     bcrypt.hash = async () => "temporary-password-hash";
-    smsService.sendSms = async () => {
+    smsService.sendSms = async (_payload, options) => {
+        assert.equal(options.provider, "MOBILE_SASA");
+        assert.equal(options.logger, console);
         const error = new Error("provider rejection");
         error.code = "SMS_PROVIDER_REJECTED";
+        error.diagnostics = {
+            errorCode: "SMS_PROVIDER_REJECTED",
+            errorClass: "Error",
+            requestStarted: true,
+            httpResponseReceived: true,
+            httpStatus: 422,
+            responseCode: "0402",
+            failureCategory: "provider_rejection",
+            deliveryOutcomeUnknown: false,
+        };
         throw error;
     };
+    process.env.TRANSACTIONAL_SMS_PROVIDER = "MOBILE_SASA";
     pool.connect = async () => ({
         async query(query) {
             if (query === "BEGIN" || query === "COMMIT" || query === "ROLLBACK") return { rows: [] };
@@ -133,9 +147,12 @@ test("leaves a staff account inactive when the SMS provider rejects onboarding",
         },
         release() {},
     });
+
     const originalConsoleError = console.error;
+    const originalConsoleInfo = console.info;
+    console.info = (message) => infoLogs.push(JSON.parse(message));
     console.error = (message) => {
-        loggedFailure = message;
+        loggedFailure = JSON.parse(message);
     };
     try {
         const res = response();
@@ -147,9 +164,126 @@ test("leaves a staff account inactive when the SMS provider rejects onboarding",
         assert.equal(res.body.data.sms_accepted, false);
         assert.match(res.body.message, /remains inactive/i);
         assert.equal(insertCount, 1);
-        assert.doesNotMatch(loggedFailure, /userId|B{25}|provider rejection/i);
+        assert.equal(infoLogs[0].event, "admin.staff_onboarding.sms_attempt_started");
+        assert.equal(infoLogs[0].provider, "MOBILE_SASA");
+        assert.deepEqual(loggedFailure, {
+            event: "admin.staff_onboarding.sms_failed",
+            provider: "MOBILE_SASA",
+            requestStarted: true,
+            httpResponseReceived: true,
+            httpStatus: 422,
+            responseCode: "0402",
+            errorCode: "SMS_PROVIDER_REJECTED",
+            errorClass: "Error",
+            failureCategory: "provider_rejection",
+            deliveryOutcomeUnknown: false,
+        });
+        assert.doesNotMatch(JSON.stringify([...infoLogs, loggedFailure]), /userId|B{25}|provider rejection|temporary-password|\+254/);
     } finally {
         console.error = originalConsoleError;
+        console.info = originalConsoleInfo;
+    }
+});
+
+test("development onboarding delivers only to the SMS allowlist and activates only after acceptance", async () => {
+    const environmentNames = [
+        "NODE_ENV",
+        "TRANSACTIONAL_SMS_PROVIDER",
+        "COMMUNICATIONS_DEV_DELIVERY_ENABLED",
+        "COMMUNICATIONS_DEV_SMS_ENABLED",
+        "COMMUNICATIONS_DEV_ALLOWED_PHONES",
+        "MOBILESASA_SMS_ENABLED",
+        "MOBILE_SASA_SMS_API_TOKEN",
+        "MOBILE_SASA_SMS_SENDER_ID",
+    ];
+    const originalEnvironment = Object.fromEntries(
+        environmentNames.map((name) => [name, process.env[name]])
+    );
+    const originalFetch = global.fetch;
+    const originalHash = bcrypt.hash;
+    const originalConnect = pool.connect;
+    const previousSendSms = smsService.sendSms;
+    let active = false;
+    let providerRequests = 0;
+    process.env.NODE_ENV = "development";
+    process.env.TRANSACTIONAL_SMS_PROVIDER = "MOBILE_SASA";
+    process.env.COMMUNICATIONS_DEV_DELIVERY_ENABLED = "true";
+    process.env.COMMUNICATIONS_DEV_SMS_ENABLED = "true";
+    process.env.COMMUNICATIONS_DEV_ALLOWED_PHONES = "0712345678";
+    process.env.MOBILESASA_SMS_ENABLED = "true";
+    process.env.MOBILE_SASA_SMS_API_TOKEN = "mbs_test-token";
+    process.env.MOBILE_SASA_SMS_SENDER_ID = "MicoPesa";
+    bcrypt.hash = async () => "temporary-password-hash";
+    smsService.sendSms = originalSendSms;
+    global.fetch = async () => {
+        providerRequests += 1;
+        return {
+            ok: true,
+            status: 200,
+            async json() {
+                return { status: true, responseCode: "0200", messageId: "mock-accepted-1" };
+            },
+        };
+    };
+
+    function installDatabaseMock() {
+        pool.connect = async () => ({
+            async query(query, values = []) {
+                if (query === "BEGIN" || query === "COMMIT" || query === "ROLLBACK") {
+                    return { rows: [] };
+                }
+                if (query.includes("INSERT INTO users")) {
+                    return {
+                        rows: [{
+                            user_id: "A".repeat(25),
+                            full_name: values[0],
+                            phone: values[1],
+                            role: values[3],
+                            account_status: "INACTIVE",
+                        }],
+                    };
+                }
+                if (query.includes("UPDATE users SET account_status = 'ACTIVE'")) {
+                    active = true;
+                    return { rows: [{ user_id: "A".repeat(25) }] };
+                }
+                if (query.includes("INSERT INTO audit_logs")) return { rows: [] };
+                assert.fail(`Unexpected query: ${query}`);
+            },
+            release() {},
+        });
+    }
+
+    try {
+        installDatabaseMock();
+        const accepted = response();
+        await createStaff({
+            user: { userId: "ADMIN-USER-12345678901234567890" },
+            body: { full_name: "Development Staff", phone: "0712 345 678", role: "REGULATOR" },
+        }, accepted);
+        assert.equal(accepted.body.data.sms_accepted, true);
+        assert.equal(active, true);
+        assert.equal(providerRequests, 1);
+
+        active = false;
+        installDatabaseMock();
+        const blocked = response();
+        await createStaff({
+            user: { userId: "ADMIN-USER-12345678901234567890" },
+            body: { full_name: "Blocked Staff", phone: "0711 111 111", role: "REGULATOR" },
+        }, blocked);
+        assert.equal(blocked.body.data.sms_accepted, false);
+        assert.equal(active, false);
+        assert.equal(providerRequests, 1);
+    } finally {
+        pool.connect = originalConnect;
+        bcrypt.hash = originalHash;
+        smsService.sendSms = previousSendSms;
+        global.fetch = originalFetch;
+        for (const name of environmentNames) {
+            if (originalEnvironment[name] === undefined) delete process.env[name];
+            else process.env[name] = originalEnvironment[name];
+        }
     }
 });
 

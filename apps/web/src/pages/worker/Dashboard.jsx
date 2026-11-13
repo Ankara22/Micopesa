@@ -6,7 +6,6 @@ import useApi from "../../hooks/useApi";
 import { getMyBalance, getMyContributions } from "../../services/accountService";
 import { getRetirementPlan } from "../../services/retirementApi";
 import { StatCard } from "../../components/ui/Card";
-import SkeletonLoader from "../../components/ui/SkeletonLoader";
 import ErrorState from "../../components/ui/ErrorState";
 import LoadingState from "../../components/ui/LoadingState";
 import StatusBadge from "../../components/ui/StatusBadge";
@@ -37,7 +36,13 @@ function WorkerDashboard() {
     const contributionsApi = useApi(getMyContributions, [loginSessionId]);
     const fetchPlan = useCallback(
         () => getRetirementPlan().catch((error) => {
-            if (error.status === 404) return null;
+            if (
+                error.status === 404 &&
+                error.data?.code === "RETIREMENT_PLAN_NOT_FOUND" &&
+                error.data?.data?.plan === null
+            ) {
+                return error.data.data;
+            }
             throw error;
         }),
         []
@@ -61,48 +66,68 @@ function WorkerDashboard() {
                 </div>
             </header>
 
+            {user?.phone_verified !== true && (
+                <p className="worker-dashboard-verification" role="note">
+                    {t("worker.dashboard.verifyPhonePrompt")}{" "}
+                    <Link to="/worker/profile">{t("worker.dashboard.verifyPhoneLink")}</Link>
+                </p>
+            )}
+
             <section aria-label={t("worker.dashboard.summaryLabel")}>
-                {balanceApi.loading && balanceApi.data === null ? (
-                    <SkeletonLoader variant="metrics" count={3} label={t("worker.dashboard.loadingSummary")} />
-                ) : balanceApi.error && balanceApi.data === null ? (
-                    <ErrorState message={t("worker.common.errors.load")} title={t("worker.common.unableToLoad")} retryLabel={t("worker.common.tryAgain")} onRetry={balanceApi.refetch} />
-                ) : (
-                    <>
-                        {balanceApi.refreshing && <LoadingState message={t("worker.dashboard.refreshingSummary")} />}
-                        {balanceApi.error && <ErrorState message={t("worker.common.errors.load")} title={t("worker.common.unableToLoad")} retryLabel={t("worker.common.tryAgain")} onRetry={balanceApi.refetch} />}
-                        <div className="stat-card-grid">
-                            <StatCard
-                                label={t("worker.dashboard.balance")}
-                                value={formatKes(balanceApi.data?.current_balance, i18n.language) || t("worker.common.notAvailable")}
-                                hint={balanceApi.data?.account_status
-                                    ? t("worker.dashboard.accountStatus", { status: t(`worker.common.statuses.${balanceApi.data.account_status}`, { defaultValue: balanceApi.data.account_status }) })
-                                    : t("worker.dashboard.accountStatusUnavailable")}
-                            />
-                            <StatCard
-                                label={t("worker.dashboard.completedRecords")}
-                                value={contributionsApi.data === null ? "—" : completedContributions.length}
-                                hint={contributionsApi.data === null
-                                    ? t("worker.dashboard.contributionSummaryUnavailable")
-                                    : t("worker.dashboard.recordedTotal", { amount: formatKes(completedTotal, i18n.language) })}
-                            />
-                            <StatCard
-                                label={t("worker.dashboard.retirementTarget")}
-                                value={planApi.data?.plan?.target_age
-                                    ? t("worker.retirement.age", { age: planApi.data.plan.target_age })
-                                    : planApi.loading ? t("worker.dashboard.loading") : t("worker.dashboard.notSet")}
-                                hint={planApi.data?.plan?.target_amount
+                {(balanceApi.refreshing || contributionsApi.refreshing || planApi.refreshing) && (
+                    <LoadingState message={t("worker.dashboard.refreshingSummary")} />
+                )}
+                <div className="stat-card-grid">
+                    <StatCard
+                        label={t("worker.dashboard.balance")}
+                        value={balanceApi.data
+                            ? formatKes(balanceApi.data.current_balance, i18n.language) || t("worker.common.notAvailable")
+                            : balanceApi.loading ? t("worker.dashboard.loading") : t("worker.common.notAvailable")}
+                        hint={balanceApi.data?.account_status
+                            ? t("worker.dashboard.accountStatus", { status: t(`worker.common.statuses.${balanceApi.data.account_status}`, { defaultValue: balanceApi.data.account_status }) })
+                            : t("worker.dashboard.accountStatusUnavailable")}
+                    />
+                    <StatCard
+                        label={t("worker.dashboard.completedRecords")}
+                        value={contributionsApi.data === null
+                            ? contributionsApi.loading ? t("worker.dashboard.loading") : t("worker.common.notAvailable")
+                            : completedContributions.length}
+                        hint={contributionsApi.data === null
+                            ? t("worker.dashboard.contributionSummaryUnavailable")
+                            : t("worker.dashboard.recordedTotal", { amount: formatKes(completedTotal, i18n.language) })}
+                    />
+                    <StatCard
+                        label={t("worker.dashboard.retirementTarget")}
+                        value={planApi.data?.plan?.target_age
+                            ? t("worker.retirement.age", { age: planApi.data.plan.target_age })
+                            : planApi.loading
+                                ? t("worker.dashboard.loading")
+                                : planApi.error
+                                    ? t("worker.common.notAvailable")
+                                    : t("worker.dashboard.notSet")}
+                        hint={planApi.error
+                            ? ""
+                            : planApi.loading
+                                ? ""
+                                : planApi.data?.plan?.target_amount
                                     ? t("worker.dashboard.goal", { amount: formatKes(planApi.data.plan.target_amount, i18n.language) })
                                     : t("worker.dashboard.setTarget")}
-                            />
-                        </div>
-                        {contributionsApi.error && <ErrorState message={t("worker.common.errors.load")} title={t("worker.common.unableToLoad")} retryLabel={t("worker.common.tryAgain")} onRetry={contributionsApi.refetch} />}
-                        {planApi.error && <ErrorState message={t("worker.common.errors.load")} title={t("worker.common.unableToLoad")} retryLabel={t("worker.common.tryAgain")} onRetry={planApi.refetch} />}
-                        {planApi.data?.plan?.plan_status && (
-                            <p className="worker-dashboard-supporting">
-                                {t("worker.dashboard.planStatus")} <StatusBadge status={planApi.data.plan.plan_status} label={t(`worker.common.statuses.${planApi.data.plan.plan_status}`, { defaultValue: planApi.data.plan.plan_status })} />
-                            </p>
-                        )}
-                    </>
+                    />
+                </div>
+                {balanceApi.error && <ErrorState message={t("worker.common.errors.load")} title={t("worker.common.unableToLoad")} retryLabel={t("worker.common.tryAgain")} onRetry={balanceApi.refetch} />}
+                {contributionsApi.error && <ErrorState message={t("worker.common.errors.load")} title={t("worker.common.unableToLoad")} retryLabel={t("worker.common.tryAgain")} onRetry={contributionsApi.refetch} />}
+                {planApi.error && <ErrorState message={t("worker.common.errors.load")} title={t("worker.common.unableToLoad")} retryLabel={t("worker.common.tryAgain")} onRetry={planApi.refetch} />}
+                {planApi.data?.plan?.plan_status && (
+                    <p className="worker-dashboard-supporting">
+                        {t("worker.dashboard.planStatus")} <StatusBadge status={planApi.data.plan.plan_status} label={t(`worker.common.statuses.${planApi.data.plan.plan_status}`, { defaultValue: planApi.data.plan.plan_status })} />
+                    </p>
+                )}
+                {planApi.data && !planApi.data.plan && (
+                    <p className="worker-dashboard-supporting">
+                        <Link className="worker-dashboard-text-link" to="/worker/retirement-plan">
+                            {t("worker.dashboard.createRetirementPlan")}
+                        </Link>
+                    </p>
                 )}
             </section>
 

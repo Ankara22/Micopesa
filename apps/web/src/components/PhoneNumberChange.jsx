@@ -15,10 +15,12 @@ const ERROR_KEYS = {
     PHONE_CHANGE_SMS_UNAVAILABLE: "smsUnavailable",
 };
 
-function PhoneNumberChange({ currentPhone, onVerified }) {
+function PhoneNumberChange({ currentPhone, currentPhoneVerified = false, onVerified }) {
     const { t } = useTranslation();
     const [stage, setStage] = useState("request");
-    const [newPhone, setNewPhone] = useState("");
+    const [newPhone, setNewPhone] = useState(() =>
+        !currentPhoneVerified && currentPhone ? currentPhone : ""
+    );
     const [currentPassword, setCurrentPassword] = useState("");
     const [confirmed, setConfirmed] = useState(false);
     const [code, setCode] = useState("");
@@ -87,7 +89,9 @@ function PhoneNumberChange({ currentPhone, onVerified }) {
             </p>
             {stage === "request" ? (
                 <form className="phone-change-form" onSubmit={handleRequest}>
-                    <label htmlFor="phone-change-new">{t("phoneChange.newPhone")}</label>
+                    <label htmlFor="phone-change-new">
+                        {t(currentPhoneVerified ? "phoneChange.newPhone" : "phoneChange.phoneToVerify")}
+                    </label>
                     <input
                         id="phone-change-new"
                         name="new_phone"
@@ -104,7 +108,9 @@ function PhoneNumberChange({ currentPhone, onVerified }) {
                         required
                         disabled={working}
                     />
-                    <p className="form-field-hint">{t("phoneChange.phoneHint")}</p>
+                    <p className="form-field-hint">
+                        {t(currentPhoneVerified ? "phoneChange.phoneHint" : "phoneChange.unverifiedPhoneHint")}
+                    </p>
                     <label htmlFor="phone-change-password">{t("phoneChange.currentPassword")}</label>
                     <input
                         id="phone-change-password"

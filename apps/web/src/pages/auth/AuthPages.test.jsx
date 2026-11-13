@@ -40,7 +40,7 @@ function renderAuth(initialEntry = "/login") {
     );
 }
 
-function fillLoginForm(identifier = "worker@example.com", password = "correct-password") {
+function fillLoginForm(identifier = "07120000000", password = "correct-password") {
     fireEvent.change(screen.getByLabelText(/Email address|Verified phone number/), { target: { value: identifier } });
     fireEvent.change(screen.getByLabelText("Password"), { target: { value: password } });
 }
@@ -68,20 +68,20 @@ describe("authentication pages", () => {
         authMocks.verifyEmail.mockResolvedValue({ status: "success" });
     });
 
-    it("presents email as primary login and offers the verified phone path", () => {
+    it("presents verified phone as primary login and offers email as an alternative", () => {
         const { container } = renderAuth();
 
         expect(screen.getByRole("heading", { name: "Sign in" })).toBeInTheDocument();
         expect(container.querySelector(".auth-art img"))
             .toHaveAttribute("src", "/images/micopesa-login-reference-hd.png");
-        expect(screen.getByLabelText("Email address")).toHaveAttribute("autocomplete", "email");
+        expect(screen.getByLabelText("Verified phone number")).toHaveAttribute("autocomplete", "tel");
         expect(screen.getByLabelText("Password")).toHaveAttribute("autocomplete", "current-password");
         expect(screen.getByRole("link", { name: "Create an account" })).toHaveAttribute("href", "/register");
 
-        fireEvent.click(screen.getByRole("button", { name: "Sign in with phone" }));
-        expect(screen.getByLabelText("Verified phone number")).toHaveAttribute("autocomplete", "tel");
         fireEvent.click(screen.getByRole("button", { name: "Sign in with email instead" }));
         expect(screen.getByLabelText("Email address")).toBeInTheDocument();
+        fireEvent.click(screen.getByRole("button", { name: "Sign in with phone" }));
+        expect(screen.getByLabelText("Verified phone number")).toBeInTheDocument();
 
         fireEvent.click(screen.getByRole("link", { name: "Create an account" }));
         expect(screen.getByRole("heading", { name: "Create account" })).toBeInTheDocument();
@@ -95,7 +95,7 @@ describe("authentication pages", () => {
         renderAuth();
 
         fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
-        expect(screen.getByRole("alert")).toHaveTextContent("Email address and password are required.");
+        expect(screen.getByRole("alert")).toHaveTextContent("Phone number and password are required.");
         expect(authMocks.login).not.toHaveBeenCalled();
 
         fillLoginForm();
@@ -133,7 +133,6 @@ describe("authentication pages", () => {
             user: { role: "FUND_MANAGER" },
         });
         renderAuth();
-        fireEvent.click(screen.getByRole("button", { name: "Sign in with phone" }));
         fillLoginForm("  +254700123456  ", "my-password");
 
         fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
@@ -144,6 +143,7 @@ describe("authentication pages", () => {
 
     it("accepts a verified email identifier without changing the existing login contract", async () => {
         renderAuth();
+        fireEvent.click(screen.getByRole("button", { name: "Sign in with email instead" }));
         fillLoginForm("verified@example.com", "my-password");
 
         fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
@@ -154,6 +154,7 @@ describe("authentication pages", () => {
 
     it("offers a generic verification resend path without exposing account existence", async () => {
         renderAuth();
+        fireEvent.click(screen.getByRole("button", { name: "Sign in with email instead" }));
         fillLoginForm("new@example.com");
         fireEvent.click(screen.getByRole("button", { name: "Resend verification email" }));
 

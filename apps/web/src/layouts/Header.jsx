@@ -6,18 +6,21 @@ import UserAvatar from "../components/UserAvatar";
 import LanguageSwitcher from "../components/LanguageSwitcher";
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
+import { useToast } from "../components/ui/ToastContext";
 import "./layout.css";
 
 function Header({ onToggleSidebar, sidebarOpen, className = "" }) {
     const { user, logout } = useAuth();
     const { t } = useTranslation();
+    const toast = useToast();
     const [loggingOut, setLoggingOut] = useState(false);
 
     async function handleLogout() {
         if (loggingOut) return;
         setLoggingOut(true);
         try {
-            await logout();
+            const auditRecorded = await logout();
+            if (!auditRecorded) toast.error(t("header.logoutAuditFailed"));
         } finally {
             setLoggingOut(false);
         }

@@ -9,6 +9,7 @@
     "test:frontend": "npm run test:web",
     "test:api": "npm run test:unit",
     "test:integration": "node tests/scripts/runIntegrationTests.js",
+    "test:integration:micopesa": "node tests/scripts/runMicopesaIntegrationTests.js",
     "test:db": "node tests/scripts/runDatabaseTests.js",
     "test:withdrawal:integration": "node tests/scripts/runIntegrationTests.js apps/api/tests/withdrawalPostgres.integration.test.js",
     "test:finance-reconcile": "node --test apps/api/tests/financeReconcile.test.js",

@@ -3,8 +3,13 @@ const {
     createWebPushService,
     validatePushEndpoint,
 } = require("../services/webPushService");
-const { isSmsDispatcherEnabled } = require("../services/smsDeliveryDispatcher");
+const {
+    isEmailDispatcherEnabled,
+    isSmsDispatcherEnabled,
+} = require("../services/smsDeliveryDispatcher");
 const mobileSasaService = require("../services/mobileSasaService");
+const { isDevelopmentDeliveryRuntime } = require("../services/communicationDeliveryPolicy");
+const { createNotificationEventService } = require("../services/notificationEventService");
 
 const SUBSCRIPTION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const P256DH_KEY_PATTERN = /^[A-Za-z0-9_-]{40,200}$/;
@@ -13,6 +18,7 @@ const AUTH_KEY_PATTERN = /^[A-Za-z0-9_-]{16,100}$/;
 function createNotificationController({
     repository,
     webPushService,
+    eventService,
     environment = process.env,
     testSmsService = mobileSasaService,
     externalSmsService = mobileSasaService,
@@ -21,7 +27,6 @@ function createNotificationController({
     if (!webPushService || typeof webPushService.getPublicKey !== "function") {
         throw new TypeError("A Web Push service is required.");
     }
-
     function sendError(res, error, fallbackMessage) {
         const statusCode = Number.isInteger(error?.statusCode) &&
             error.statusCode >= 400 && error.statusCode <= 599
@@ -43,8 +48,35 @@ function createNotificationController({
         });
     }
 
+    function getEventService() {
+        if (!eventService) {
+            const pool = require("../db/database");
+            eventService = createNotificationEventService(pool);
+        }
+        return eventService;
+    }
+
     return {
         async createNotification(req, res) {
+            if (isDevelopmentDeliveryRuntime(environment)) {
+                const channels = req.body?.channels;
+                if (Array.isArray(channels) &&
+                    channels.includes("SMS") && !isSmsDispatcherEnabled(environment)) {
+                    return res.status(503).json({
+                        status: "error",
+                        code: "NOTIFICATION_SMS_UNAVAILABLE",
+                        message: "Development SMS delivery requires its explicit channel switch, Mobile Sasa configuration, and a non-empty allowlist.",
+                    });
+                }
+                if (Array.isArray(channels) &&
+                    channels.includes("EMAIL") && !isEmailDispatcherEnabled(environment)) {
+                    return res.status(503).json({
+                        status: "error",
+                        code: "NOTIFICATION_EMAIL_UNAVAILABLE",
+                        message: "Development email delivery requires its explicit channel switch, SMTP configuration, and a non-empty allowlist.",
+                    });
+                }
+            }
             try {
                 const data = await repository.queueRoleNotifications({
                     senderId: req.user.userId,
@@ -357,6 +389,27 @@ function createNotificationController({
             }
         },
 
+        async getMyNotificationPreferences(req, res) {
+            try {
+                const preferences = await getEventService().getPreferences(req.user.userId);
+                return res.status(200).json({ status: "success", data: preferences });
+            } catch (error) {
+                return sendError(res, error, "Could not load notification preferences.");
+            }
+        },
+
+        async updateMyNotificationPreferences(req, res) {
+            try {
+                const preferences = await getEventService().updatePreferences(
+                    req.user.userId,
+                    req.body
+                );
+                return res.status(200).json({ status: "success", data: preferences });
+            } catch (error) {
+                return sendError(res, error, "Could not update notification preferences.");
+            }
+        },
+
         async getPushPublicKey(_req, res) {
             try {
                 return res.status(200).json({
@@ -428,7 +481,12 @@ function getDefaultController() {
         const pool = require("../db/database");
         const repository = createNotificationRepository(pool);
         const webPushService = createWebPushService({ repository });
-        defaultController = createNotificationController({ repository, webPushService });
+        const eventService = createNotificationEventService(pool);
+        defaultController = createNotificationController({
+            repository,
+            webPushService,
+            eventService,
+        });
     }
     return defaultController;
 }
@@ -443,9 +501,11 @@ const controller = Object.fromEntries([
     "listRoleRecipients",
     "listNotificationAudit",
     "getMyNotifications",
+    "getMyNotificationPreferences",
     "getPushPublicKey",
     "registerPushSubscription",
     "removePushSubscription",
+    "updateMyNotificationPreferences",
 ].map((handlerName) => [
     handlerName,
     (...args) => getDefaultController()[handlerName](...args),

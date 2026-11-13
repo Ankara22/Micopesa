@@ -1,5 +1,6 @@
 const pool = require("../db/database");
 const { writeAuditLog } = require("../utils/auditLog");
+const { enqueueBusinessNotification } = require("../services/notificationEventService");
 
 async function listPendingSubmissions(_req, res) {
     try {
@@ -23,7 +24,13 @@ async function listPendingSubmissions(_req, res) {
             })),
         });
     } catch (error) {
-        console.error("Failed to load pending KYC submissions:", error.code || "KYC_REVIEW_READ_FAILED");
+        console.error("Failed to load pending KYC submissions:", {
+            code: error.code,
+            message: error.message,
+            detail: error.detail,
+            hint: error.hint,
+            position: error.position,
+        });
         return res.status(500).json({ status: "error", message: "Unable to load KYC review items." });
     }
 }
@@ -109,6 +116,11 @@ async function reviewSubmission(req, res) {
             details: { status },
         });
         await client.query("COMMIT");
+        void enqueueBusinessNotification({
+            userId: updated.rows[0].user_id,
+            eventType: status === "VERIFIED" ? "KYC_VERIFIED" : "KYC_REJECTED",
+            referenceId: updated.rows[0].kyc_id,
+        });
         return res.status(200).json({ status: "success", data: { submission: updated.rows[0] } });
     } catch (error) {
         if (client) await client.query("ROLLBACK").catch(() => {});

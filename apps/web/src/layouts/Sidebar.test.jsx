@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import Sidebar from "./Sidebar";
 import AppLayout from "./AppLayout";
 import { ROLE_NAV } from "../routes/roleRoutes";
+import { ToastProvider } from "../components/ui/ToastContext";
 
 const authMock = vi.hoisted(() => ({ useAuth: vi.fn() }));
 vi.mock("../context/AuthContext", () => ({ useAuth: authMock.useAuth }));
@@ -57,14 +58,16 @@ describe("role-aware sidebar", () => {
             logout: vi.fn(),
         });
         render(
-            <MemoryRouter initialEntries={["/worker/dashboard"]}>
-                <Routes>
-                    <Route element={<AppLayout />}>
-                        <Route path="/worker/dashboard" element={<h1>Dashboard content</h1>} />
-                        <Route path="/worker/funds" element={<h1>Funds content</h1>} />
-                    </Route>
-                </Routes>
-            </MemoryRouter>
+            <ToastProvider>
+                <MemoryRouter initialEntries={["/worker/dashboard"]}>
+                    <Routes>
+                        <Route element={<AppLayout />}>
+                            <Route path="/worker/dashboard" element={<h1>Dashboard content</h1>} />
+                            <Route path="/worker/funds" element={<h1>Funds content</h1>} />
+                        </Route>
+                    </Routes>
+                </MemoryRouter>
+            </ToastProvider>
         );
 
         const toggle = screen.getByRole("button", { name: "Toggle navigation menu" });

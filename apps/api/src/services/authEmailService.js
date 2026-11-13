@@ -1,7 +1,7 @@
 const crypto = require("node:crypto");
-const nodemailer = require("nodemailer");
 const pool = require("../db/database");
 const mobileSasaService = require("./mobileSasaService");
+const smtpEmailTransport = require("./smtpEmailTransport");
 const { captureRegistrationEmail, isCaptureModeRequested } = require("./localEmailCapture");
 
 const TOKEN_EXPIRY_MINUTES = {
@@ -57,34 +57,7 @@ function getFrontendBaseUrl() {
 }
 
 function getEmailConfiguration(environment = process.env) {
-    const user = typeof environment.GMAIL_USER === "string"
-        ? environment.GMAIL_USER.trim().toLowerCase()
-        : "";
-    const password = typeof environment.GMAIL_APP_PASSWORD === "string"
-        ? environment.GMAIL_APP_PASSWORD.replace(/\s/g, "")
-        : "";
-    const missingVariables = [];
-    if (!user) missingVariables.push("GMAIL_USER");
-    if (!password) missingVariables.push("GMAIL_APP_PASSWORD");
-    if (missingVariables.length) {
-        const error = new Error("Gmail SMTP configuration is incomplete");
-        error.code = "EMAIL_SMTP_CONFIGURATION_MISSING";
-        error.missingVariables = missingVariables;
-        throw error;
-    }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(user)) {
-        const error = new Error("Gmail SMTP username is invalid");
-        error.code = "EMAIL_SMTP_CONFIGURATION_INVALID";
-        error.invalidVariables = ["GMAIL_USER"];
-        throw error;
-    }
-    if (!/^[A-Za-z0-9]{16}$/.test(password)) {
-        const error = new Error("Gmail app password format is invalid");
-        error.code = "EMAIL_SMTP_CONFIGURATION_INVALID";
-        error.invalidVariables = ["GMAIL_APP_PASSWORD"];
-        throw error;
-    }
-    return { user, password };
+    return smtpEmailTransport.getSmtpConfiguration(environment);
 }
 
 function getEmailProvider(environment = process.env) {
@@ -125,12 +98,9 @@ function assertEmailProviderConfigured(environment = process.env) {
 }
 
 function createEmailTransporter(configuration = getEmailConfiguration()) {
-    return nodemailer.createTransport({
-        service: "gmail",
-        auth: { user: configuration.user, pass: configuration.password },
-        connectionTimeout: 10000,
-        greetingTimeout: 10000,
-        socketTimeout: 20000,
+    return smtpEmailTransport.createSmtpTransporter({
+        GMAIL_USER: configuration.user,
+        GMAIL_APP_PASSWORD: configuration.password,
     });
 }
 
@@ -151,18 +121,7 @@ function safeSmtpMessage(error) {
 }
 
 function logEmailDeliveryFailure(purpose, error) {
-    console.error(JSON.stringify({
-        event: "email.smtp.failed",
-        purpose,
-        errorClass: error?.smtpErrorClass || error?.name || "Error",
-        smtpCode: typeof error?.smtpCode === "string"
-            ? error.smtpCode
-            : typeof error?.code === "string" ? error.code : undefined,
-        responseCode: Number.isInteger(error?.responseCode) ? error.responseCode : undefined,
-        ...((error?.smtpMessage || safeSmtpMessage(error))
-            ? { diagnostic: error.smtpMessage || safeSmtpMessage(error) }
-            : {}),
-    }));
+    smtpEmailTransport.logSmtpFailure(purpose, error);
 }
 
 async function sendEmailWithTransporter(transporter, {
@@ -172,38 +131,15 @@ async function sendEmailWithTransporter(transporter, {
     html,
     purpose = "GENERAL",
 }) {
-    const sender = getEmailConfiguration().user;
-    let info;
-    try {
-        info = await transporter.sendMail({
-            from: sender,
-            to,
-            subject,
-            text,
-            ...(typeof html === "string" && html ? { html } : {}),
-        });
-    } catch (error) {
-        error.smtpErrorClass = error.name || "Error";
-        error.smtpCode = typeof error.code === "string" ? error.code : undefined;
-        error.smtpMessage = safeSmtpMessage(error);
-        error.code = "EMAIL_SMTP_DELIVERY_FAILED";
-        throw error;
-    }
-    const accepted = Array.isArray(info.accepted)
-        && info.accepted.some((address) => String(address).trim().toLowerCase() === to.trim().toLowerCase());
-    if (!accepted) {
-        const error = new Error("SMTP server did not accept the recipient");
-        error.code = "EMAIL_SMTP_RECIPIENT_REJECTED";
-        throw error;
-    }
-    const messageId = typeof info.messageId === "string" ? info.messageId : undefined;
-    console.info(JSON.stringify({
-        event: "email.smtp.accepted",
+    return smtpEmailTransport.sendSmtpEmail({
+        to,
+        subject,
+        text,
+        html,
         purpose,
-        ...(messageId ? { messageId } : {}),
-        inboxDelivery: "unconfirmed",
-    }));
-    return { messageId };
+        environment: process.env,
+        transporter,
+    });
 }
 
 function textToHtml(text) {
@@ -252,7 +188,7 @@ async function sendEmail({ to, subject, text, html, purpose = "GENERAL" }) {
     }
 
     const provider = getEmailProvider();
-    const configuration = assertEmailProviderConfigured();
+    assertEmailProviderConfigured();
     const message = {
         to,
         subject: subject.trim(),
@@ -272,8 +208,10 @@ async function sendEmail({ to, subject, text, html, purpose = "GENERAL" }) {
             ...(result.deliveryResult ? { deliveryResult: result.deliveryResult } : {}),
         };
     }
-    const transporter = createEmailTransporter(configuration);
-    return sendEmailWithTransporter(transporter, message);
+    return smtpEmailTransport.sendSmtpEmail({
+        ...message,
+        environment: process.env,
+    });
 }
 
 async function issueEmailToken({ userId, email, purpose }) {
@@ -299,6 +237,7 @@ async function issueEmailToken({ userId, email, purpose }) {
     const verification = purpose === "EMAIL_VERIFICATION";
     const link = new URL(verification ? "/verify-email" : "/reset-password", frontendBaseUrl);
     link.searchParams.set("token", token);
+    if (verification) link.searchParams.set("flow", "email-verification");
     await pool.query(
         `UPDATE auth_tokens SET consumed_at = now()
          WHERE user_id = $1 AND purpose = $2 AND consumed_at IS NULL`,
@@ -342,7 +281,7 @@ async function sendPendingRegistrationEmail({ email, token }) {
         to: email,
         subject: "Complete your MicoPesa registration",
         purpose: "REGISTRATION_VERIFICATION",
-        text: `Complete your MicoPesa registration using this link (expires in 30 minutes): ${link.href}. If you did not request this, ignore this email.`,
+        text: `Complete your MicoPesa registration using this link (expires in 30 minutes):\n${link.href}\n\nIf you did not request this, ignore this email.`,
     });
 }
 
