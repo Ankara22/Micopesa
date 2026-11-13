@@ -6,6 +6,7 @@ import DataTable from "../../components/ui/DataTable";
 import Button from "../../components/ui/Button";
 import Modal from "../../components/ui/Modal";
 import PushSubscriptionControl from "../../components/Notifications/PushSubscriptionControl";
+import ChannelNotificationPreferences from "../../components/Notifications/ChannelNotificationPreferences";
 import { normalizeNotificationStatus } from "../../components/ui/notificationStatus";
 import { useToast } from "../../components/ui/ToastContext";
 import {
@@ -265,6 +266,7 @@ function RoleNotifications() {
                 />
             </section>
 
+            <ChannelNotificationPreferences />
             <PushSubscriptionControl />
 
             <Modal

@@ -102,7 +102,7 @@ async function startPhoneChange({
     try {
         await client.query("BEGIN");
         const accountResult = await client.query(
-            `SELECT user_id, phone, password_hash
+            `SELECT user_id, phone, phone_verified_at, password_hash
              FROM users
              WHERE user_id = $1
              FOR UPDATE`,
@@ -119,7 +119,7 @@ async function startPhoneChange({
                 401
             );
         }
-        if (normalizeKenyanPhone(account.phone) === phone) {
+        if (normalizeKenyanPhone(account.phone) === phone && account.phone_verified_at) {
             throw createPhoneChangeError(
                 "That number is already registered to your account.",
                 "PHONE_CHANGE_SAME_PHONE",
@@ -388,7 +388,11 @@ async function verifyPhoneChange({ userId, code }, {
 
         const updateResult = await client.query(
             `UPDATE users
-             SET phone = $2, phone_verified_at = $3
+             SET phone = CASE
+                     WHEN (${normalizedPhoneSql("phone")}) = $2 THEN phone
+                     ELSE $2
+                 END,
+                 phone_verified_at = $3
              WHERE user_id = $1
                AND NOT EXISTS (
                    SELECT 1 FROM users other

@@ -30,12 +30,21 @@ databases built from `database/schema.sql` already include the final
 definitions and must not run these migrations again. These steps apply only to
 existing databases that have not already received the listed changes.
 
-The public `POST /api/mpesa/stkpush` route remains explicitly gated with HTTP
-503. Payment orchestration is not enabled through that route. Daraja endpoint,
-credentials, and any future authorization to enable initiation remain separate
-deployment decisions. Callback verification and administrator reconciliation
-settle only after verified evidence and use the atomic settlement workflow.
-Mocked tests do not verify live payments.
+The public `POST /api/mpesa/stkpush` route returns HTTP 503 unless Daraja is
+selected, its environment and required configuration are valid, dispatch is
+explicitly enabled, and the selected environment's own opt-in is enabled.
+Sandbox initiation requires both `MPESA_PROVIDER_DISPATCH_ENABLED=true` and
+`MPESA_SANDBOX_ENABLED=true` with `DARAJA_ENV=sandbox` (or its documented
+alias). Production additionally requires
+`MPESA_LIVE_PAYMENTS_ENABLED=true` and `DARAJA_ENV=production`; these settings
+must remain off until a separately authorized production release. The service
+uses the corresponding Safaricom API host and validates the callback as an
+HTTPS URL without credentials or a fragment; the deployment operator must
+register the correct callback with the matching sandbox or production Daraja
+application. Missing or conflicting settings produce an unavailable response.
+Callback verification and administrator reconciliation settle only after
+verified evidence and use the atomic settlement workflow. Mocked tests do not
+verify live payments.
 
 ## Persistent SMS delivery
 
@@ -69,8 +78,8 @@ all credential values on the server. Mobile Sasa SMS delivery reports are
 supported by a separate callback inbox, but remain disabled unless
 `MOBILESASA_SMS_DLR_ENABLED=true` and `MOBILESASA_WEBHOOK_SECRET` are configured.
 Before enabling it, an authorized operator must review and apply
-`database/migration_mobilesasa_sms_delivery_reports.sql` after the notification
-schema is present, then register
+`database/migration_mobilesasa_sms_delivery_reports.sql` after both the
+persistent SMS and unified-notification migrations, then register
 `https://<api-host>/api/integrations/mobilesasa/delivery-reports` in Mobile
 Sasa. The endpoint validates the timestamped signature over the raw body,
 deduplicates reports, and correlates only by exact provider message reference
@@ -80,9 +89,11 @@ an administrator can request replay at
 `POST /api/integrations/mobilesasa/delivery-reports/replay`. `Sent` means
 provider acceptance, while only a confirmed `Delivered` report sets
 `DELIVERED`. Keep the flag off until the migration and provider webhook
-registration have both been verified. This migration is prepared but has not
-been applied by this code change. Establish an evidence-retention policy
-before enabling production callback storage.
+registration have both been verified. The canonical fresh-install schema
+already includes the callback inbox; do not apply the additive inbox migration
+to that schema. The migration is for eligible existing installations only and
+has not been applied by this code change. Establish an evidence-retention
+policy before enabling production callback storage.
 
 ## Unified administrator notifications
 
@@ -143,13 +154,107 @@ funds explicitly assigned to them by an administrator. The API enforces the
 role-specific notification categories and scope; notification audit views
 mask recipient contact details.
 
-Existing databases must apply
-`database/migration_role_notifications_and_reporting.sql` after the SMS and
-unified-notification migrations, in that order. The new migration adds
-regulator fund assignments, notification categories and append-only
-notification audit records, plus report history/download metadata. Do not
-apply it to a fresh database built from the canonical `database/schema.sql`.
-It is a proposal only and has not been applied.
+### Fresh installation versus existing database upgrade
+
+`database/schema.sql` is the authoritative complete schema for a fresh
+installation only. Its preamble drops existing tables with `CASCADE`; never
+run it against an existing installation or as an upgrade. It defines the
+notification table and its delivery fields,
+`notification_preferences`, `push_subscriptions`, the
+`uq_notifications_user_channel_event_key` index, role-scoped notification
+audit, regulator assignments, report generation/download history, compliance
+submission/review history, and the MobileSasa callback inbox. Do not replay
+upgrade migrations over a database created from this schema.
+
+For an existing database, first compare its actual migration ledger and schema
+with the migration preconditions; the repository does not have a single
+automatic migration runner or a universal starting version. The dependency
+graph from the SQL is:
+
+```text
+pre-persistent notifications
+  -> migration_sms_persistent_delivery
+  -> migration_unified_notifications
+       -> migration_transactional_notifications
+       -> migration_role_notifications_and_reporting
+       -> migration_external_recipient_sms (optional)
+       -> migration_mobilesasa_sms_delivery_reports (optional; also needs persistent SMS fields)
+```
+
+The transactional and role/reporting migrations are independent of each other
+after the unified migration. The transactional migration creates
+`notification_preferences` and `uq_notifications_user_channel_event_key`.
+The role/reporting migration creates `notification_category` and replaces the
+unified migration's administrator-request index. The external-recipient
+migration requires the unified migration's channel-snapshot constraint and
+request/contact columns. The MobileSasa delivery-report migration requires
+`delivery_result` from the unified migration and persistent delivery columns.
+
+`notificationEventService.js` inserts `notification_category` and
+`deduplication_key` and reads `notification_preferences`; therefore the
+application service requires the persistent, unified, transactional, and
+role/reporting migrations, not merely the migration that creates preferences.
+`smsNotificationRepository.js` also uses persistent delivery fields,
+unified channel snapshots, and transactional preferences. A safe recommended
+application/API rollout is:
+
+1. `database/migration_sms_persistent_delivery.sql` — delivery state and
+   stable notification tracking fields. It drops a constraint named
+   `notifications_delivery_status_check` and expects the pre-persistent table
+   shape; it is a one-time migration, not an idempotent script. The canonical
+   `schema.sql` instead defines `ck_notifications_delivery_status` and already
+   contains the persistent fields, so this migration cannot be applied to the
+   canonical schema. The repository does not preserve a separate historical
+   pre-persistent schema snapshot; confirm that the actual target has the
+   exact constraint name and columns used by this migration before approving
+   an upgrade.
+2. `database/migration_unified_notifications.sql` — email/push snapshots and
+   browser push subscriptions; it expects the prior migration's columns.
+3. `database/migration_role_notifications_and_reporting.sql` — creates
+   notification categories/scopes and audit, regulator assignments, and
+   report generation/download history. It expects the unified migration's
+   administrator-request index.
+4. `database/migration_transactional_notifications.sql` — in-app event type,
+   event idempotency index, and opt-in preferences. It requires persistent
+   delivery's `deduplication_key`; the documented position also ensures the
+   role category exists before deploying `notificationEventService.js`.
+5. `database/migration_external_recipient_sms.sql` only if that feature is
+   authorized and the target schema has the unified-notification channel
+   snapshot constraint. Its preflight rejects absent prerequisites and
+   already-present external-recipient objects rather than silently accepting
+   an incompatible partial schema.
+6. `database/migration_mobilesasa_sms_delivery_reports.sql` only if the
+   callback inbox feature is authorized; it requires both persistent
+   delivery fields and the unified migration's `delivery_result` column.
+
+The transactional migration explicitly rejects an already-present
+preferences table or event-key index rather than silently accepting a
+partially/freshly upgraded schema. Those definitions are intentionally present
+both in the canonical fresh schema and in the upgrade migration; only one path
+is used for a given database. These steps preserve existing notification rows
+and preferences, but they must not be repeated on a database where the
+corresponding migration already ran.
+
+These scripts are safe only when the target has exactly the expected starting
+schema and migration history. In particular, the persistent, unified, and
+role/reporting migrations use one-time `ALTER`, `DROP INDEX`, and `CREATE`
+statements without a universal compatibility preflight. Any partially
+applied, manually modified, or differently versioned schema must be reviewed
+against each SQL statement before proceeding; do not rely on filenames or
+comments as proof of compatibility.
+
+Compliance workflow upgrades are a separate one-time chain for databases
+still on the pre-workflow compliance schema:
+`migration_compliance_review_workflow.sql`,
+`migration_compliance_actor_snapshots.sql`, then
+`migration_compliance_workflow_enforcement.sql`. The first migration validates
+the expected pre-workflow columns and refuses to run against the finalized
+schema. Do not apply any of these to a fresh database built from
+`database/schema.sql`; that schema already contains the final reporting,
+regulator, and compliance objects. Never infer that a migration is needed
+without checking the target's migration ledger and preconditions.
+
+No migration has been applied as part of this source review.
 
 Reports are authorized by role and current fund scope. CSV, XLSX, and PDF
 exports are generated in memory and capped at 5,000 rows. Download requests

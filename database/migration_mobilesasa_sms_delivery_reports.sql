@@ -5,6 +5,41 @@
 -- Rolling back by dropping this table permanently deletes all stored callbacks.
 BEGIN;
 
+DO $$
+DECLARE
+    required_column TEXT;
+BEGIN
+    IF to_regclass('notifications') IS NULL THEN
+        RAISE EXCEPTION
+            'Incompatible schema: notifications must exist before the Mobile Sasa callback inbox';
+    END IF;
+    IF to_regclass('mobilesasa_sms_delivery_callbacks') IS NOT NULL THEN
+        RAISE EXCEPTION
+            'Mobile Sasa callback inbox already exists; do not reapply this upgrade migration';
+    END IF;
+
+    FOREACH required_column IN ARRAY ARRAY[
+        'notification_id',
+        'notification_type',
+        'delivery_status',
+        'delivery_result',
+        'provider_message_id'
+    ]
+    LOOP
+        IF NOT EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'notifications'
+              AND column_name = required_column
+        ) THEN
+            RAISE EXCEPTION
+                'Incompatible schema: notifications.% is required for delivery reports',
+                required_column;
+        END IF;
+    END LOOP;
+END $$;
+
 CREATE TABLE mobilesasa_sms_delivery_callbacks (
     callback_id                 BIGSERIAL PRIMARY KEY,
     provider                    VARCHAR(20) NOT NULL DEFAULT 'MOBILE_SASA'

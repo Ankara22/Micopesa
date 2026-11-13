@@ -84,6 +84,7 @@ function createRoleApi(initialRole) {
             };
         }
         if (query.includes("SET failed_login_attempts = 0")) return { rows: [] };
+        if (query.includes("INSERT INTO audit_logs")) return { rows: [], rowCount: 1 };
         assert.fail(`Unexpected pool query: ${query}`);
     };
 

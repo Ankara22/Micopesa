@@ -1,7 +1,9 @@
 import React from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider, useAuth } from "./AuthContext";
+import WorkerDashboard from "../pages/worker/Dashboard";
 
 const apiMocks = vi.hoisted(() => ({
     get: vi.fn(),
@@ -23,6 +25,7 @@ function deferred() {
 function SessionProbe() {
     const {
         user,
+        token,
         login,
         register,
         loginSessionId,
@@ -32,6 +35,7 @@ function SessionProbe() {
     } = useAuth();
     const [profileResult, setProfileResult] = React.useState("");
     const [loginOutcome, setLoginOutcome] = React.useState("");
+    const [logoutOutcome, setLogoutOutcome] = React.useState("");
 
     async function attemptLogin(identifier) {
         const result = await login(identifier, "password");
@@ -48,15 +52,24 @@ function SessionProbe() {
         setProfileResult(syncProfile(response.data.data.user, request) ? "applied" : "ignored");
     }
 
+    async function signOut() {
+        setLogoutOutcome(String(await logout()));
+    }
+
     return (
         <div>
             <span data-testid="user-id">{user?.user_id || "signed-out"}</span>
+            <span data-testid="user-role">{user?.role || "signed-out"}</span>
+            <span data-testid="auth-token">{token || "signed-out"}</span>
             <span data-testid="user-name">{user?.full_name || ""}</span>
             <span data-testid="user-email">{user?.email || ""}</span>
+            <span data-testid="user-phone-verified">{String(user?.phone_verified ?? "")}</span>
+            <span data-testid="user-pending-email">{user?.pending_email || ""}</span>
             <span data-testid="user-photo">{String(user?.profile_photo_available ?? "")}</span>
             <span>Login session: {loginSessionId}</span>
             <span data-testid="profile-result">{profileResult}</span>
             <span data-testid="login-outcome">{loginOutcome}</span>
+            <span data-testid="logout-outcome">{logoutOutcome}</span>
             <button onClick={() => attemptLogin("account-a")}>Sign in as A</button>
             <button onClick={() => attemptLogin("account-b")}>Sign in as B</button>
             <button onClick={() => register(
@@ -70,12 +83,22 @@ function SessionProbe() {
                 Register new worker
             </button>
             <button onClick={loadProfile}>Load profile</button>
-            <button onClick={logout}>Sign out</button>
+            <button onClick={signOut}>Sign out</button>
         </div>
     );
 }
 
-function loginResponse(userId, name, email, photoAvailable, token) {
+function DashboardAfterLoginProbe() {
+    const { user, login } = useAuth();
+    return (
+        <div>
+            <button onClick={() => login("worker-account", "password")}>Sign in to worker dashboard</button>
+            {user && <MemoryRouter><WorkerDashboard /></MemoryRouter>}
+        </div>
+    );
+}
+
+function loginResponse(userId, name, email, photoAvailable, token, phoneVerified = false, pendingEmail = null, role = "WORKER") {
     return {
         data: {
             data: {
@@ -85,14 +108,16 @@ function loginResponse(userId, name, email, photoAvailable, token) {
                     full_name: name,
                     email,
                     profile_photo_available: photoAvailable,
-                    role: "WORKER",
+                    phone_verified: phoneVerified,
+                    pending_email: pendingEmail,
+                    role,
                 },
             },
         },
     };
 }
 
-function profileResponse(userId, fullName, email, photoAvailable) {
+function profileResponse(userId, fullName, email, photoAvailable, phoneVerified = false, pendingEmail = null) {
     return {
         data: {
             data: {
@@ -101,6 +126,8 @@ function profileResponse(userId, fullName, email, photoAvailable) {
                     full_name: fullName,
                     email,
                     profile_photo_available: photoAvailable,
+                    phone_verified: phoneVerified,
+                    pending_email: pendingEmail,
                     updated_at: `2026-10-26T14:00:0${photoAvailable ? "1" : "2"}.000Z`,
                 },
             },
@@ -162,6 +189,7 @@ describe("AuthContext session-bound profile synchronization", () => {
             status: 500,
             message: "Login failed due to a server error",
         });
+
         renderProbe();
         fireEvent.click(screen.getByRole("button", { name: "Sign in as A" }));
 
@@ -171,6 +199,34 @@ describe("AuthContext session-bound profile synchronization", () => {
         }));
         await waitFor(() => expect(screen.getByTestId("login-outcome")).toHaveTextContent("false:500"));
         expect(screen.getByTestId("user-id")).toHaveTextContent("signed-out");
+    });
+
+    it("keeps phone verification and pending email state through login and profile refresh", async () => {
+        apiMocks.post.mockResolvedValueOnce(loginResponse(
+            "account-a-id",
+            "Account A",
+            "a@example.com",
+            false,
+            "token-a",
+            false,
+            "pending@example.com",
+        ));
+        apiMocks.get.mockResolvedValueOnce(profileResponse(
+            "account-a-id",
+            "Account A",
+            "a@example.com",
+            false,
+            true,
+            "next@example.com",
+        ));
+        renderProbe();
+        fireEvent.click(screen.getByRole("button", { name: "Sign in as A" }));
+
+        await waitFor(() => expect(screen.getByTestId("user-phone-verified")).toHaveTextContent("false"));
+        expect(screen.getByTestId("user-pending-email")).toHaveTextContent("pending@example.com");
+        fireEvent.click(screen.getByRole("button", { name: "Load profile" }));
+        await waitFor(() => expect(screen.getByTestId("user-phone-verified")).toHaveTextContent("true"));
+        expect(screen.getByTestId("user-pending-email")).toHaveTextContent("next@example.com");
     });
 
     it("ignores a profile response that completes after sign-out", async () => {
@@ -190,14 +246,79 @@ describe("AuthContext session-bound profile synchronization", () => {
         await waitFor(() => expect(apiMocks.get).toHaveBeenCalledWith("/api/profile/me"));
 
         fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
-        await waitFor(() => expect(screen.getByTestId("user-id")).toHaveTextContent("signed-out"));
+        fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+        await waitFor(() => expect(apiMocks.post).toHaveBeenCalledWith("/api/auth/logout"));
+        expect(apiMocks.post.mock.calls.filter(([url]) => url === "/api/auth/logout")).toHaveLength(1);
+        expect(screen.getByTestId("user-id")).toHaveTextContent("account-a-id");
+        expect(localStorage.getItem("micopesa_token")).toBe("token-a");
+
         pendingProfile.resolve(profileResponse("account-a-id", "A Private Name", "private-a@example.com", true));
         await waitFor(() => expect(screen.getByTestId("profile-result")).toHaveTextContent("ignored"));
 
+        pendingLogout.resolve({});
+        await waitFor(() => expect(screen.getByTestId("user-id")).toHaveTextContent("signed-out"));
         expect(screen.getByTestId("user-name")).toBeEmptyDOMElement();
         expect(screen.getByTestId("user-email")).toBeEmptyDOMElement();
         expect(screen.getByTestId("user-photo")).toBeEmptyDOMElement();
-        pendingLogout.resolve({});
+        expect(localStorage.getItem("micopesa_token")).toBeNull();
+        await waitFor(() => expect(screen.getByTestId("logout-outcome")).toHaveTextContent("true"));
+    });
+
+    it("clears the local session even when the explicit logout request fails", async () => {
+        apiMocks.post.mockImplementation((url) => {
+            if (url === "/api/auth/logout") return Promise.reject(new Error("network unavailable"));
+            if (url === "/api/auth/login") {
+                return Promise.resolve(loginResponse(
+                    "account-a-id", "Account A", "a@example.com", false, "token-a"
+                ));
+            }
+            return Promise.resolve({});
+        });
+        renderProbe();
+        fireEvent.click(screen.getByRole("button", { name: "Sign in as A" }));
+        await waitFor(() => expect(screen.getByTestId("user-id")).toHaveTextContent("account-a-id"));
+
+        fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+
+        await waitFor(() => {
+            expect(screen.getByTestId("user-id")).toHaveTextContent("signed-out");
+            expect(screen.getByTestId("auth-token")).toHaveTextContent("signed-out");
+        });
+        expect(localStorage.getItem("micopesa_token")).toBeNull();
+        await waitFor(() => expect(screen.getByTestId("logout-outcome")).toHaveTextContent("false"));
+    });
+
+    it("clears an existing session when an explicit login attempt fails", async () => {
+        apiMocks.post
+            .mockResolvedValueOnce(loginResponse("account-a-id", "Account A", "a@example.com", false, "token-a"))
+            .mockRejectedValueOnce({ status: 401, message: "Invalid phone number or password" });
+        renderProbe();
+        fireEvent.click(screen.getByRole("button", { name: "Sign in as A" }));
+        await waitFor(() => expect(screen.getByTestId("user-id")).toHaveTextContent("account-a-id"));
+
+        fireEvent.click(screen.getByRole("button", { name: "Sign in as B" }));
+        await waitFor(() => expect(screen.getByTestId("login-outcome")).toHaveTextContent("false:401"));
+        expect(screen.getByTestId("user-id")).toHaveTextContent("signed-out");
+        expect(screen.getByTestId("user-role")).toHaveTextContent("signed-out");
+        expect(screen.getByTestId("auth-token")).toHaveTextContent("signed-out");
+        expect(localStorage.getItem("micopesa_token")).toBeNull();
+    });
+
+    it("clears the current session when an authenticated request reports an invalid session", async () => {
+        apiMocks.post.mockResolvedValueOnce(loginResponse(
+            "account-a-id", "Account A", "a@example.com", false, "token-a"
+        ));
+        renderProbe();
+        fireEvent.click(screen.getByRole("button", { name: "Sign in as A" }));
+        await waitFor(() => expect(screen.getByTestId("user-id")).toHaveTextContent("account-a-id"));
+
+        localStorage.removeItem("micopesa_token");
+        window.dispatchEvent(new Event("micopesa:auth-invalid"));
+
+        await waitFor(() => {
+            expect(screen.getByTestId("user-id")).toHaveTextContent("signed-out");
+            expect(screen.getByTestId("auth-token")).toHaveTextContent("signed-out");
+        });
     });
 
     it("does not merge a delayed account A response after account B signs in", async () => {
@@ -270,5 +391,65 @@ describe("AuthContext session-bound profile synchronization", () => {
         await waitFor(() => expect(screen.getByText("Login session: 1")).toBeInTheDocument());
         fireEvent.click(screen.getByRole("button", { name: "Sign in as B" }));
         await waitFor(() => expect(screen.getByText("Login session: 2")).toBeInTheDocument());
+    });
+
+    it("replaces the authenticated user, role, and token when switching accounts", async () => {
+        apiMocks.post
+            .mockResolvedValueOnce(loginResponse(
+                "account-a-id", "Account A", "a@example.com", false, "token-a"
+            ))
+            .mockResolvedValueOnce(loginResponse(
+                "account-b-id", "Account B", "b@example.com", true, "token-b", false, null, "ADMIN"
+            ));
+        renderProbe();
+        fireEvent.click(screen.getByRole("button", { name: "Sign in as A" }));
+        await waitFor(() => expect(screen.getByTestId("user-id")).toHaveTextContent("account-a-id"));
+        expect(screen.getByTestId("user-role")).toHaveTextContent("WORKER");
+
+        fireEvent.click(screen.getByRole("button", { name: "Sign in as B" }));
+        await waitFor(() => {
+            expect(screen.getByTestId("user-id")).toHaveTextContent("account-b-id");
+            expect(screen.getByTestId("user-role")).toHaveTextContent("ADMIN");
+            expect(screen.getByTestId("auth-token")).toHaveTextContent("token-b");
+        });
+        expect(localStorage.getItem("micopesa_token")).toBe("token-b");
+    });
+
+    it("loads the worker dashboard after a successful login with the current session", async () => {
+        apiMocks.post.mockResolvedValueOnce(loginResponse(
+            "worker-dashboard-user",
+            "Dashboard Worker",
+            "worker@example.com",
+            false,
+            "dashboard-session-token"
+        ));
+        apiMocks.get.mockImplementation((url) => {
+            if (url === "/api/accounts/my-balance") {
+                return Promise.resolve({ data: { data: { current_balance: "12300.00", account_status: "ACTIVE" } } });
+            }
+            if (url === "/api/accounts/my-contributions") {
+                return Promise.resolve({ data: { data: [{ amount: "300.00", contribution_status: "COMPLETED" }] } });
+            }
+            if (url === "/api/retirement/my-plan") {
+                return Promise.resolve({ data: { data: { plan: { target_amount: "600000.00", target_age: 60 } } } });
+            }
+            return Promise.resolve({ data: { data: { user: null } } });
+        });
+        render(
+            <AuthProvider>
+                <DashboardAfterLoginProbe />
+            </AuthProvider>
+        );
+
+        fireEvent.click(screen.getByRole("button", { name: "Sign in to worker dashboard" }));
+
+        expect(await screen.findByRole("heading", { name: /Good .*Dashboard/ })).toBeInTheDocument();
+        expect(await screen.findByText("KSh 12,300.00")).toBeInTheDocument();
+        expect(screen.getByText("Recorded total KSh 300.00")).toBeInTheDocument();
+        expect(screen.getByText("Goal KSh 600,000.00")).toBeInTheDocument();
+        expect(localStorage.getItem("micopesa_token")).toBe("dashboard-session-token");
+        expect(apiMocks.get).toHaveBeenCalledWith("/api/accounts/my-balance");
+        expect(apiMocks.get).toHaveBeenCalledWith("/api/accounts/my-contributions");
+        expect(apiMocks.get).toHaveBeenCalledWith("/api/retirement/my-plan");
     });
 });

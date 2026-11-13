@@ -1,9 +1,10 @@
 const { randomUUID } = require("node:crypto");
 const { writeAuditLog } = require("../utils/auditLog");
+const { normalizeKenyanPhone } = require("../utils/kenyanPhone");
+const { normalizeRecipient } = require("./communicationDeliveryPolicy");
 
 const CHANNELS = new Set(["SMS", "EMAIL", "PUSH"]);
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const PHONE_PATTERN = /^\+?254[17]\d{8}$|^0[17]\d{8}$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const EXTERNAL_E164_PHONE_PATTERN = /^\+254[17]\d{8}$/;
 const HEADER_CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
@@ -215,7 +216,8 @@ function createNotificationRepository(pool) {
                 });
             }
             const recipientResult = await pool.query(
-                `SELECT u.user_id, u.phone, u.email, u.email_verified,
+                `SELECT u.user_id, u.full_name, u.phone, u.phone_verified_at,
+                        u.email, u.email_verified,
                         EXISTS (
                             SELECT 1 FROM push_subscriptions ps WHERE ps.user_id = u.user_id
                         ) AS has_push_subscription
@@ -228,18 +230,6 @@ function createNotificationRepository(pool) {
             );
             if (recipientById.size !== userIds.length) {
                 throw repositoryError("One or more active recipients were not found.", "NOTIFICATION_RECIPIENT_NOT_FOUND", 404);
-            }
-            for (const recipient of recipientById.values()) {
-                if (channels.includes("SMS") && !PHONE_PATTERN.test(recipient.phone || "")) {
-                    throw repositoryError("A recipient does not have a valid mobile number.", "NOTIFICATION_CONTACT_UNAVAILABLE", 422);
-                }
-                if (channels.includes("EMAIL") &&
-                    (!recipient.email_verified || !EMAIL_PATTERN.test(recipient.email || ""))) {
-                    throw repositoryError("A recipient does not have a verified email address.", "NOTIFICATION_CONTACT_UNAVAILABLE", 422);
-                }
-                if (channels.includes("PUSH") && !recipient.has_push_subscription) {
-                    throw repositoryError("A recipient has no registered push subscription.", "NOTIFICATION_CONTACT_UNAVAILABLE", 422);
-                }
             }
             const prior = await pool.query(
                 `SELECT DISTINCT recipient_user_id
@@ -257,23 +247,79 @@ function createNotificationRepository(pool) {
                 );
             }
             const results = [];
-            for (const [index, recipientId] of userIds.entries()) {
-                const recipientResults = await queueRoleNotifications({
-                    senderId,
-                    senderRole,
-                    userId: recipientId,
-                    channels,
-                    message,
-                    subject,
-                    title,
-                    html,
-                    requestId,
-                    idempotencyKey: requestId,
-                    skipRateLimit: index > 0,
-                    category,
-                    fundId,
-                });
-                results.push(...recipientResults);
+            let rateLimitChecked = false;
+            for (const recipientId of userIds) {
+                const recipient = recipientById.get(recipientId);
+                const availableChannels = [];
+                const skippedChannels = [];
+                for (const channel of channels) {
+                    let skipCode = null;
+                    if (channel === "SMS") {
+                        if (!normalizeKenyanPhone(recipient.phone)) skipCode = "NOTIFICATION_PHONE_INVALID";
+                        else if (!recipient.phone_verified_at) skipCode = "NOTIFICATION_PHONE_UNVERIFIED";
+                    } else if (channel === "EMAIL") {
+                        if (!recipient.email_verified ||
+                            !normalizeRecipient("EMAIL", recipient.email)) {
+                            skipCode = "NOTIFICATION_EMAIL_UNAVAILABLE";
+                        }
+                    } else if (!recipient.has_push_subscription) {
+                        skipCode = "NOTIFICATION_PUSH_UNAVAILABLE";
+                    }
+
+                    if (skipCode) {
+                        skippedChannels.push(channel);
+                        results.push({
+                            notification_id: `skipped-${recipientId}-${channel}`,
+                            notification_type: channel,
+                            delivery_status: "SKIPPED",
+                            last_error_code: skipCode,
+                            recipient_name: recipient.full_name,
+                            recipient_user_id: recipientId,
+                        });
+                    } else {
+                        availableChannels.push(channel);
+                    }
+                }
+
+                if (availableChannels.length) {
+                    const recipientResults = await queueRoleNotifications({
+                        senderId,
+                        senderRole,
+                        userId: recipientId,
+                        channels: availableChannels,
+                        message,
+                        subject,
+                        title,
+                        html,
+                        requestId,
+                        idempotencyKey: requestId,
+                        skipRateLimit: rateLimitChecked,
+                        category,
+                        fundId,
+                    });
+                    rateLimitChecked = true;
+                    results.push(...recipientResults);
+                }
+                if (skippedChannels.length) {
+                    await pool.query(
+                        `INSERT INTO notification_audit_events (
+                            request_id, sender_user_id, sender_role, recipient_user_id,
+                            notification_category, channels, authorization_outcome,
+                            outcome_code
+                         )
+                         SELECT $1, $2, $3, $4, $5, $6::jsonb, 'AUTHORIZED',
+                                'CONTACT_UNAVAILABLE'
+                         WHERE NOT EXISTS (
+                            SELECT 1 FROM notification_audit_events
+                            WHERE request_id = $1 AND sender_user_id = $2
+                              AND recipient_user_id = $4
+                              AND outcome_code = 'CONTACT_UNAVAILABLE'
+                              AND channels = $6::jsonb
+                         )`,
+                        [requestId, senderId, senderRole, recipientId, category,
+                            JSON.stringify(skippedChannels.sort())]
+                    );
+                }
             }
             return results;
         }
@@ -432,11 +478,11 @@ function createNotificationRepository(pool) {
                 transactionStarted = false;
                 throw repositoryError("The selected recipient is outside your authorized scope.", "NOTIFICATION_FORBIDDEN", 403);
             }
-            if (channels.includes("SMS") && !PHONE_PATTERN.test(user.phone || "")) {
+            if (channels.includes("SMS") && !normalizeKenyanPhone(user.phone)) {
                 throw repositoryError("The recipient does not have a valid mobile number.", "NOTIFICATION_CONTACT_UNAVAILABLE", 422);
             }
             if (channels.includes("EMAIL") &&
-                (!user.email_verified || !EMAIL_PATTERN.test(user.email || ""))) {
+                (!user.email_verified || !normalizeRecipient("EMAIL", user.email))) {
                 throw repositoryError("The recipient does not have a verified email address.", "NOTIFICATION_CONTACT_UNAVAILABLE", 422);
             }
             if (channels.includes("PUSH")) {
@@ -462,8 +508,10 @@ function createNotificationRepository(pool) {
                      WHERE admin_request_key IS NOT NULL DO NOTHING`,
                     [
                         user.user_id, senderId, channel, message,
-                        channel === "SMS" ? user.phone : null,
-                        channel === "EMAIL" ? user.email : null,
+                        channel === "SMS"
+                            ? (testSms ? user.phone : normalizeKenyanPhone(user.phone))
+                            : null,
+                        channel === "EMAIL" ? normalizeRecipient("EMAIL", user.email) : null,
                         channel === "EMAIL" ? subject.trim() : null,
                         channel === "EMAIL" && typeof html === "string" && html.trim() ? html : null,
                         channel === "PUSH" ? title.trim() : null,
@@ -537,6 +585,7 @@ function createNotificationRepository(pool) {
                 scope_fund_id: scopeFundId,
                 recipient_name: user.full_name,
                 recipient_user_id: user.user_id,
+                admin_request_key: idempotencyKey,
             }));
         } catch (error) {
             if (transactionStarted) await client.query("ROLLBACK");
@@ -1067,7 +1116,7 @@ function createNotificationRepository(pool) {
             if (!user) {
                 throw repositoryError("An active recipient was not found.", "NOTIFICATION_RECIPIENT_NOT_FOUND", 404);
             }
-            if (channels.includes("SMS") && !PHONE_PATTERN.test(user.phone || "")) {
+            if (channels.includes("SMS") && !normalizeKenyanPhone(user.phone)) {
                 throw repositoryError("The recipient does not have a valid mobile number.", "NOTIFICATION_CONTACT_UNAVAILABLE", 422);
             }
             if (channels.includes("EMAIL") &&
@@ -1182,7 +1231,7 @@ function createNotificationRepository(pool) {
 
     async function listAdminNotifications() {
         const result = await pool.query(
-            `SELECT n.notification_id, n.user_id,
+            `SELECT n.notification_id, n.user_id, n.admin_request_key,
                     COALESCE(u.full_name,
                         CASE WHEN n.user_id IS NULL THEN n.recipient_phone END
                     ) AS recipient_name,

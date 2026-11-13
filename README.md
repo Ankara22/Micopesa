@@ -21,3 +21,7 @@ npm run test:db -- apps/api/tests/regression.test.js
 The setup refuses missing databases rather than creating or redirecting them. It applies the canonical schema and listed migrations, which drop/recreate application tables; use only the disposable `micopesa_registration_test` database at the exact target above. `db:test:setup` has the same safeguards. Database teardown is separate and requires `NODE_ENV=test` and `ALLOW_DESTRUCTIVE_TEST_DB_TEARDOWN=1` in addition to the verified local database URLs.
 
 Connection details must be supplied through shell environment variables; test commands do not load `.env` files. Database-backed tests can mutate the dedicated test database. Mocked tests do not establish PostgreSQL concurrency behavior, and no test command initiates M-Pesa payments or contacts a provider.
+
+## Payment and notification integrations
+
+Daraja configuration, sandbox preparation, production activation safeguards, and verification limits are documented in [docs/deployment/daraja-mpesa-integration.md](./docs/deployment/daraja-mpesa-integration.md). MobileSasa SMS/email configuration and delivery-report requirements are documented in [docs/deployment/mobilesasa-integration.md](./docs/deployment/mobilesasa-integration.md). Integration migrations are reviewed artifacts only and must be applied through an authorized deployment process.

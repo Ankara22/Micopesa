@@ -88,7 +88,18 @@ test("sends through Gmail using normalized credentials and confirms SMTP accepta
         text: "Verification instructions",
     });
 
-    assert.equal(options.service, "gmail");
+    assert.deepEqual(options, {
+        host: "smtp.gmail.com",
+        port: 465,
+        secure: true,
+        auth: {
+            user: "micopesa.test@gmail.com",
+            pass: "abcdefghijklmnop",
+        },
+        connectionTimeout: 10000,
+        greetingTimeout: 10000,
+        socketTimeout: 20000,
+    });
     assert.deepEqual(options.auth, {
         user: "micopesa.test@gmail.com",
         pass: "abcdefghijklmnop",
@@ -133,6 +144,31 @@ test("provider authentication/send rejection is observable without logging recip
     assert.doesNotMatch(diagnostic, /worker@example\.test|https:\/\/|a{40}|abcdefghijklmnop/);
 });
 
+test("SMTP timeout is logged as an uncertain result without recipient or content", async () => {
+    nodemailer.createTransport = () => ({
+        sendMail: async () => {
+            const error = new Error("Timed out while sending to worker@example.test");
+            error.code = "ETIMEDOUT";
+            throw error;
+        },
+    });
+    const logged = [];
+    console.error = (message) => logged.push(message);
+
+    await assert.rejects(authEmailService.sendEmail({
+        to: "worker@example.test",
+        subject: "Private subject",
+        text: "Private message",
+        purpose: "REGISTRATION_VERIFICATION",
+    }), { code: "EMAIL_SMTP_DELIVERY_FAILED", smtpCode: "ETIMEDOUT" });
+
+    const diagnostic = logged.join("\n");
+    assert.match(diagnostic, /"purpose":"REGISTRATION_VERIFICATION"/);
+    assert.match(diagnostic, /"failureCategory":"timeout"/);
+    assert.match(diagnostic, /"deliveryOutcomeUnknown":true/);
+    assert.doesNotMatch(diagnostic, /worker@example\.test|Private subject|Private message/);
+});
+
 test("missing Gmail SMTP configuration fails before a verification token is persisted", async () => {
     delete process.env.GMAIL_APP_PASSWORD;
     await assert.rejects(
@@ -151,14 +187,22 @@ test("SMTP must explicitly accept the user's recipient before delivery is report
     nodemailer.createTransport = () => ({
         sendMail: async () => ({ accepted: [], rejected: ["worker@example.test"] }),
     });
-    await assert.rejects(
-        authEmailService.sendEmail({
+    const logged = [];
+    const originalConsoleError = console.error;
+    console.error = (message) => logged.push(message);
+    try {
+        await assert.rejects(authEmailService.sendEmail({
             to: "worker@example.test",
             subject: "Verify",
             text: "Instructions",
-        }),
-        (error) => error.code === "EMAIL_SMTP_RECIPIENT_REJECTED",
-    );
+        }), { code: "EMAIL_SMTP_RECIPIENT_REJECTED" });
+        const diagnostic = logged.join("\n");
+        assert.match(diagnostic, /"failureCategory":"provider_rejection"/);
+        assert.match(diagnostic, /"deliveryOutcomeUnknown":false/);
+        assert.doesNotMatch(diagnostic, /worker@example\.test|Verify|Instructions/);
+    } finally {
+        console.error = originalConsoleError;
+    }
 });
 
 test("authentication verification and reset templates can select Mobile Sasa", async () => {
@@ -217,13 +261,15 @@ test("verification email links use the configured frontend origin without sendin
         purpose: "EMAIL_VERIFICATION",
     });
 
-    const urlMatch = outgoingMessage.text.match(/http:\/\/localhost:4178\/verify-email\?token=[^\s]+/);
+    const urlMatch = outgoingMessage.text.match(/https?:\/\/[^\s]+/);
     assert.ok(urlMatch);
+    assert.doesNotMatch(urlMatch[0], /[.,)\]}!?]$/);
     const verificationUrl = new URL(urlMatch[0]);
     assert.equal(verificationUrl.origin, "http://localhost:4178");
     assert.equal(verificationUrl.pathname, "/verify-email");
     assert.ok(verificationUrl.searchParams.get("token"));
-    assert.equal([...verificationUrl.searchParams.keys()].join(","), "token");
+    assert.equal(verificationUrl.searchParams.get("flow"), "email-verification");
+    assert.equal([...verificationUrl.searchParams.keys()].join(","), "token,flow");
 });
 
 test("pending registration email uses one field-neutral verification message", async () => {
@@ -243,11 +289,17 @@ test("pending registration email uses one field-neutral verification message", a
         token: "mock-registration-token",
     });
 
-    const url = new URL(outgoingMessage.text.match(/https?:\/\/\S+/)[0].replace(/\.$/, ""));
+    const urlLine = outgoingMessage.text.split(/\r?\n/).find((line) => line.startsWith("http://"));
+    assert.ok(urlLine);
+    assert.equal(urlLine, urlLine.trim());
+    assert.doesNotMatch(urlLine, /[.,)\]}!?]$/);
+    const url = new URL(urlLine);
     assert.equal(url.origin, "http://localhost:4178");
     assert.equal(url.pathname, "/verify-email");
     assert.equal(url.searchParams.get("token"), "mock-registration-token");
     assert.equal(url.searchParams.get("flow"), "registration");
+    assert.equal([...url.searchParams.keys()].join(","), "token,flow");
+    assert.equal(outgoingMessage.text.split(/\r?\n/)[1], url.href);
     assert.equal(outgoingMessage.subject, "Complete your MicoPesa registration");
     assert.match(outgoingMessage.text, /If you did not request this, ignore this email/);
     assert.doesNotMatch(outgoingMessage.text, /National ID|date of birth|phone|12345678/i);

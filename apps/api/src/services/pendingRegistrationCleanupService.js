@@ -13,7 +13,11 @@ function startPendingRegistrationCleanup(pool) {
             await deleteExpiredPendingRegistrations(pool);
         } catch (error) {
             console.error("Pending registration cleanup failed.", {
-                code: typeof error?.code === "string" ? error.code : "PENDING_REGISTRATION_CLEANUP_FAILED",
+                code: error.code,
+                message: error.message,
+                detail: error.detail,
+                hint: error.hint,
+                position: error.position,
             });
         } finally {
             running = false;

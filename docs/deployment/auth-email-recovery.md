@@ -8,7 +8,7 @@ For a new database, use `database/schema.sql` instead of running the incremental
 
 The recovery migration adds `pending_email`, `email_verified` (defaulting to `FALSE`), `auth_version`, one-time authentication tokens, and hashed rate-limit keys. Existing email addresses are not marked verified.
 
-The login-policy migration adds `login_method` with `PHONE` as the default, preserving the existing login policy for all rows already in the database. New public registrations explicitly receive `EMAIL` from the backend. Do not bulk-change existing users to `EMAIL`.
+The login-policy migration adds `login_method` with `PHONE` as the default, preserving the existing login policy for all rows already in the database. New public registrations explicitly receive `EMAIL` from the backend. Do not bulk-change existing users to `EMAIL`. The sign-in page presents phone first and email as an alternative. A verified registered phone can identify an account regardless of its original `login_method`; legacy `PHONE`-policy accounts retain their existing phone-login behavior. Email identifiers remain restricted to verified email addresses.
 
 The migration has not been run as part of this implementation. Back up the target database and follow the deployment's normal reviewed migration procedure. Do not enable the new API against a database where the migration has not been applied.
 
@@ -28,7 +28,7 @@ Configure these API environment variables through the deployment's secret/config
 - `GMAIL_APP_PASSWORD`: an app password for that account (not the Gmail account password).
 - `FRONTEND_BASE_URL`: trusted public frontend origin used for verification and reset links. Production must use HTTPS.
 
-These settings must be available to the API process, not only to a frontend build. The API and diagnostic script load `apps/api/.env` explicitly, independent of the current working directory. Normalize the Gmail address and remove whitespace from the app password before configuring SMTP. Do not add these secrets to frontend environment variables or source control.
+Both registration verification and Admin Notifications use the shared Gmail SMTP transport at `smtp.gmail.com:465` with implicit TLS. The normalized `GMAIL_USER` is both the authenticated account and the sender; whitespace is removed from the app password. These settings must be available to the API process, not only to a frontend build. The API and diagnostic script load `apps/api/.env` explicitly, independent of the current working directory. Do not add these secrets to frontend environment variables or source control.
 
 Before delivery, enable 2-Step Verification for the Gmail account and create an app password if Google Workspace/account policy permits it. The authenticated Gmail account is the sender; do not configure a different sender address. Gmail accepting a message is not proof of inbox delivery.
 
@@ -48,13 +48,15 @@ The send option accepts one recipient and sends one message. The script reports 
 
 Registration returns an account-created response with `verificationEmailSent` to the registering client. If it is false, the account remains unverified and the page offers a resend action; the user must not register again. Public resend and password-reset responses remain generic to avoid revealing whether an address has an account. Successful SMTP acceptance is recorded with a message ID when available; failures log only sanitized SMTP diagnostics. Do not log complete verification/reset links, tokens, credentials, or full recipient addresses.
 
+Admin Notifications are independently queued and dispatched. In production, enable `NOTIFICATION_DISPATCHER_ENABLED=true` and `EMAIL_NOTIFICATIONS_ENABLED=true`; in local development, use the explicit communications email switch and a non-empty tester-controlled email allowlist. Admin email targets only active users with verified registered email addresses. A queued status is not SMTP acceptance; the notification history reports the later dispatch result. SMTP acceptance does not confirm inbox delivery.
+
 The frontend builds can optionally set `VITE_SUPPORT_CONTACT_URL` to the official recovery contact published by the deployment. Supported link protocols are HTTPS, `mailto:`, and `tel:`. Do not set this value to an unapproved or undocumented channel. If it is absent or invalid, the recovery page does not offer a contact link and states that manual recovery is unavailable through the page.
 
 Never put provider credentials in frontend variables, source control, or logs. Email delivery must be verified in the target environment before release; unit tests mock Nodemailer and do not contact Gmail.
 
 ## Existing users and verified email
 
-Existing users retain phone/password login. An existing email is not trusted for login or password reset until the user signs in and completes the email-verification flow from their profile. Password-reset requests return the same public response whether or not an eligible account exists. Reset and verification tokens are single-use, expire after 30 minutes, and are stored as hashes.
+Existing users retain their existing phone/password login policy. An email is not trusted for login or password reset until the user signs in and completes the email-verification flow from their profile. Incorrect passwords and unknown identifiers receive the same generic response; account-state details are disclosed only after the password is correct. Password-reset requests return the same public response whether or not an eligible account exists. Reset and verification tokens are single-use, expire after 30 minutes, and are stored as hashes.
 
 ## Manual recovery when verified email is unavailable
 

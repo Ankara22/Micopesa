@@ -15,6 +15,7 @@ const PROFILE_USER_FIELDS = [
     "users.email_verified",
     "users.phone",
     "users.phone_verified_at",
+    "(users.phone_verified_at IS NOT NULL) AS phone_verified",
     "users.role",
     "users.occupation",
     "users.account_status",

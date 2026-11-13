@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ToastProvider } from "../../components/ui/ToastContext";
 import i18n from "../../i18n";
@@ -11,6 +11,8 @@ const mocks = vi.hoisted(() => ({
     listNotifications: vi.fn(),
     sendExternalRecipientSms: vi.fn(),
     sendAdminTestSms: vi.fn(),
+    getMyNotificationPreferences: vi.fn(),
+    updateMyNotificationPreferences: vi.fn(),
 }));
 
 vi.mock("../../services/adminService", () => ({
@@ -24,6 +26,10 @@ vi.mock("../../services/adminService", () => ({
 vi.mock("../../context/AuthContext", () => ({
     useAuth: () => ({ user: { user_id: "admin-1" } }),
 }));
+vi.mock("../../services/notificationService", () => ({
+    getMyNotificationPreferences: mocks.getMyNotificationPreferences,
+    updateMyNotificationPreferences: mocks.updateMyNotificationPreferences,
+}));
 
 function renderPage() {
     return render(<ToastProvider><Notifications /></ToastProvider>);
@@ -34,6 +40,10 @@ describe("admin unified notifications", () => {
 
     beforeEach(() => {
         vi.clearAllMocks();
+        mocks.getMyNotificationPreferences.mockResolvedValue({
+            email_enabled: false,
+            sms_enabled: false,
+        });
         originalCrypto = Object.getOwnPropertyDescriptor(window, "crypto");
         Object.defineProperty(window, "crypto", {
             configurable: true,
@@ -52,7 +62,7 @@ describe("admin unified notifications", () => {
             user_id: "worker-2",
             full_name: "Binti Worker",
             role: "WORKER",
-            phone: "0711111111",
+            phone: "",
             email: "binti@example.test",
             push_subscription_count: 0,
         }]);
@@ -81,6 +91,39 @@ describe("admin unified notifications", () => {
     });
 
     it("previews and confirms independent SMS, email, and push messages for one worker", async () => {
+        mocks.createNotification.mockImplementationOnce(async () => {
+            mocks.listNotifications.mockResolvedValue([
+                {
+                    notification_id: "sms-1",
+                    notification_type: "SMS",
+                    delivery_status: "PROVIDER_ACCEPTED",
+                    admin_request_key: "request-1",
+                    user_id: "worker-1",
+                    provider_message_id: "sms-provider-1",
+                    provider_accepted_at: "2025-01-02T03:04:05.000Z",
+                },
+                {
+                    notification_id: "email-1",
+                    notification_type: "EMAIL",
+                    delivery_status: "FAILED",
+                    last_error_code: "EMAIL_SMTP_AUTH_FAILED",
+                    admin_request_key: "request-1",
+                    user_id: "worker-1",
+                },
+                {
+                    notification_id: "push-1",
+                    notification_type: "PUSH",
+                    delivery_status: "UNKNOWN",
+                    admin_request_key: "request-1",
+                    user_id: "worker-1",
+                },
+            ]);
+            return [
+                { notification_id: "sms-1", notification_type: "SMS", delivery_status: "PENDING" },
+                { notification_id: "email-1", notification_type: "EMAIL", delivery_status: "PENDING" },
+                { notification_id: "push-1", notification_type: "PUSH", delivery_status: "PENDING" },
+            ];
+        });
         renderPage();
 
         fireEvent.click(await screen.findByLabelText("Akinyi Worker (Worker)"));
@@ -114,13 +157,17 @@ describe("admin unified notifications", () => {
         expect(dialog).toHaveTextContent("Your contribution was recorded.");
         expect(dialog).toHaveTextContent("Hello member");
         expect(dialog).not.toHaveTextContent("alert(1)");
+        expect(dialog).toHaveTextContent("Preview only: nothing is queued or sent");
         expect(mocks.createNotification).not.toHaveBeenCalled();
+        expect(mocks.sendAdminTestSms).not.toHaveBeenCalled();
+        expect(mocks.sendExternalRecipientSms).not.toHaveBeenCalled();
 
         const confirm = screen.getByRole("button", { name: "Confirm and queue" });
         fireEvent.click(confirm);
         fireEvent.click(confirm);
 
         await waitFor(() => expect(mocks.createNotification).toHaveBeenCalledTimes(1));
+        expect(await screen.findByText(/Notification request queued/)).toBeInTheDocument();
         expect(mocks.createNotification).toHaveBeenCalledWith({
             user_ids: ["worker-1"],
             channels: ["SMS", "EMAIL", "PUSH"],
@@ -132,34 +179,63 @@ describe("admin unified notifications", () => {
             request_id: "4c3b9f30-7cb7-4b2f-83d1-1f24c9b2b1d5",
         });
         await waitFor(() => {
-            const resultLines = screen.getAllByRole("listitem")
+            const resultCard = screen.getByRole("heading", { name: "Result" }).closest(".admin-card");
+            const resultLines = within(resultCard).getAllByRole("listitem")
                 .map((item) => item.textContent)
                 .filter((text) => /Text message|Email|Push notification/.test(text));
             expect(resultLines).toHaveLength(3);
             expect(resultLines[0]).toContain("Text message");
-            expect(resultLines[0]).toContain("PENDING");
+            expect(resultLines[0]).toContain("Sent");
+            expect(resultLines[0]).toContain("Partially sent");
+            expect(resultLines[0]).toContain("sms-provider-1");
             expect(resultLines[1]).toContain("Email");
-            expect(resultLines[1]).toContain("PENDING");
+            expect(resultLines[1]).toContain("Failed");
+            expect(resultLines[1]).toContain("SMTP authentication was rejected");
             expect(resultLines[2]).toContain("Push notification");
-            expect(resultLines[2]).toContain("PENDING");
+            expect(resultLines[2]).toContain("Unknown");
         });
 
         mocks.listNotifications.mockResolvedValue([
-            { notification_id: "sms-1", notification_type: "SMS", delivery_status: "SENT" },
-            { notification_id: "email-1", notification_type: "EMAIL", delivery_status: "FAILED" },
-            { notification_id: "push-1", notification_type: "PUSH", delivery_status: "UNKNOWN" },
+            {
+                notification_id: "sms-1",
+                notification_type: "SMS",
+                delivery_status: "SENT",
+                admin_request_key: "request-1",
+                user_id: "worker-1",
+                provider_message_id: "sms-provider-1",
+                provider_accepted_at: "2025-01-02T03:04:05.000Z",
+            },
+            {
+                notification_id: "email-1",
+                notification_type: "EMAIL",
+                delivery_status: "FAILED",
+                last_error_code: "EMAIL_SMTP_AUTH_FAILED",
+                admin_request_key: "request-1",
+                user_id: "worker-1",
+            },
+            {
+                notification_id: "push-1",
+                notification_type: "PUSH",
+                delivery_status: "UNKNOWN",
+                admin_request_key: "request-1",
+                user_id: "worker-1",
+            },
         ]);
         fireEvent.click(screen.getByRole("button", { name: "Refresh delivery statuses" }));
         await waitFor(() => {
-            const resultLines = screen.getAllByRole("listitem")
+            const resultCard = screen.getByRole("heading", { name: "Result" }).closest(".admin-card");
+            const resultLines = within(resultCard).getAllByRole("listitem")
                 .map((item) => item.textContent)
                 .filter((text) => /Text message|Email|Push notification/.test(text));
-            expect(resultLines[0]).toContain("Accepted by provider");
-            expect(resultLines[1]).toContain("FAILED");
-            expect(resultLines[2]).toContain("Outcome unknown");
+            expect(resultLines[0]).toContain("Sent");
+            expect(resultLines[0]).toContain("Partially sent");
+            expect(resultLines[0]).toContain("sms-provider-1");
+            expect(resultLines[1]).toContain("Failed");
+            expect(resultLines[1]).toContain("SMTP authentication was rejected");
+            expect(resultLines[2]).toContain("Unknown");
         });
-        const acceptedStatus = screen.getByText("Accepted by provider", { selector: ".badge" });
-        expect(acceptedStatus).toHaveTextContent("Accepted by provider");
+        const acceptedStatus = screen.getByText("Sent", { selector: ".badge" });
+        expect(acceptedStatus).toHaveTextContent("Sent");
     });
 
     it("previews the complete external message and requires consent before one send", async () => {
@@ -202,6 +278,41 @@ describe("admin unified notifications", () => {
         });
     });
 
+    it("updates a queued email with SMTP acceptance without claiming inbox delivery", async () => {
+        mocks.createNotification.mockImplementationOnce(async () => {
+            mocks.listNotifications.mockResolvedValue([{
+                notification_id: "email-1",
+                notification_type: "EMAIL",
+                delivery_status: "PROVIDER_ACCEPTED",
+                delivery_result: { provider: "GMAIL" },
+            }]);
+            return [{
+                notification_id: "email-1",
+                notification_type: "EMAIL",
+                delivery_status: "PENDING",
+            }];
+        });
+        renderPage();
+        fireEvent.click(await screen.findByLabelText("Akinyi Worker (Worker)"));
+        fireEvent.click(screen.getByLabelText("Email"));
+        fireEvent.change(screen.getByLabelText("Email subject"), {
+            target: { value: "Account update" },
+        });
+        fireEvent.change(screen.getByLabelText("Message"), {
+            target: { value: "Your account has an update." },
+        });
+        fireEvent.click(screen.getByRole("button", { name: "Preview" }));
+        fireEvent.click(await screen.findByRole("button", { name: "Confirm and queue" }));
+
+        const resultHeading = await screen.findByRole("heading", { name: "Result" });
+        const resultCard = resultHeading.closest(".admin-card");
+        expect(await within(resultCard).findByText(/Email.*Sent.*Provider: GMAIL/))
+            .toBeInTheDocument();
+        expect(await screen.findByText(
+            "The provider accepted the message; final delivery is not confirmed."
+        )).toBeInTheDocument();
+    });
+
     it("keeps the external recipient form unavailable when the feature flag is off", async () => {
         renderPage();
         expect(await screen.findByText(
@@ -241,15 +352,16 @@ describe("admin unified notifications", () => {
         renderPage();
 
         fireEvent.click(await screen.findByRole("button", { name: "View" }));
-        expect(screen.getByText("MOBILE_SASA")).toBeInTheDocument();
-        expect(screen.getByText("provider-reference-1")).toBeInTheDocument();
-        expect(screen.getByText("2", { selector: "p" })).toBeInTheDocument();
-        expect(screen.getByText("Delivery confirmation time:")).toBeInTheDocument();
+        const details = await screen.findByRole("dialog", { name: "Notification details" });
+        expect(within(details).getByText("MOBILE_SASA")).toBeInTheDocument();
+        expect(within(details).getByText("provider-reference-1")).toBeInTheDocument();
+        expect(within(details).getByText("2", { selector: "p" })).toBeInTheDocument();
+        expect(within(details).getByText("Delivery confirmation time:")).toBeInTheDocument();
 
         await i18n.changeLanguage("sw");
-        expect(screen.getByText("Mtoa huduma:")).toBeInTheDocument();
-        expect(screen.getByText("Kumbukumbu ya mtoa huduma:")).toBeInTheDocument();
-        expect(screen.getByText("Muda wa kuthibitishwa kufika:")).toBeInTheDocument();
+        expect(within(details).getByText("Mtoa huduma:")).toBeInTheDocument();
+        expect(within(details).getByText("Kumbukumbu ya mtoa huduma:")).toBeInTheDocument();
+        expect(within(details).getByText("Muda wa kuthibitishwa kufika:")).toBeInTheDocument();
     });
 
     it("previews and queues one announcement for multiple selected users", async () => {
@@ -274,6 +386,30 @@ describe("admin unified notifications", () => {
                 message: "Service update",
             }));
         });
+    });
+
+    it("reports skipped recipient contacts and makes clear that queueing is not delivery", async () => {
+        mocks.createNotification.mockResolvedValue([{
+            notification_id: "skipped-worker-1-SMS",
+            notification_type: "SMS",
+            recipient_name: "Akinyi Worker",
+            delivery_status: "SKIPPED",
+            last_error_code: "NOTIFICATION_PHONE_UNVERIFIED",
+        }]);
+        renderPage();
+        fireEvent.click(await screen.findByLabelText("Akinyi Worker (Worker)"));
+        fireEvent.click(screen.getByLabelText("SMS"));
+        fireEvent.change(screen.getByLabelText("Message"), {
+            target: { value: "Service update" },
+        });
+        fireEvent.click(screen.getByRole("button", { name: "Preview" }));
+        fireEvent.click(await screen.findByRole("button", { name: "Confirm and queue" }));
+
+        expect(await screen.findByText(/Skipped — Registered phone number is not verified/))
+            .toBeInTheDocument();
+        expect(await screen.findByText(
+            "Notification request queued. Check each channel's status below; queueing does not confirm delivery."
+        )).toBeInTheDocument();
     });
 
     it("lets administrators opt in to push on their own authenticated device", async () => {

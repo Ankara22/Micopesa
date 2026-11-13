@@ -20,6 +20,7 @@ export function AuthProvider({ children }) {
     const authSessionRef = useRef({ userId: null, token: null, generation: 0 });
     const authUserRef = useRef(null);
     const profileRequestIdRef = useRef(0);
+    const logoutInProgressRef = useRef(false);
 
     const clearSession = useCallback(() => {
         const generation = ++sessionVersionRef.current;
@@ -31,6 +32,14 @@ export function AuthProvider({ children }) {
         setUser(null);
         setLoginSessionId(generation);
     }, []);
+
+    useEffect(() => {
+        const handleInvalidSession = () => {
+            if (!localStorage.getItem(TOKEN_KEY)) clearSession();
+        };
+        window.addEventListener("micopesa:auth-invalid", handleInvalidSession);
+        return () => window.removeEventListener("micopesa:auth-invalid", handleInvalidSession);
+    }, [clearSession]);
 
     // On initial mount, if a token is already stored, verify it's still
     // valid and restore the user session via GET /api/auth/me.
@@ -82,31 +91,41 @@ export function AuthProvider({ children }) {
 
     const login = useCallback(async (identifier, password) => {
         setError(null);
+        clearSession();
+        const loginGeneration = sessionVersionRef.current;
         try {
             const response = await api.post("/api/auth/login", { identifier, password });
-            const { token: newToken, user: loggedInUser } = response.data.data;
-            const generation = ++sessionVersionRef.current;
-            profileRequestIdRef.current += 1;
+            const { token: newToken, user: loggedInUser } = response?.data?.data || {};
+            if (
+                typeof newToken !== "string" ||
+                !newToken ||
+                typeof loggedInUser?.user_id !== "string" ||
+                typeof loggedInUser?.role !== "string"
+            ) {
+                throw new Error("Unable to complete sign-in. Please try again.");
+            }
+            if (sessionVersionRef.current !== loginGeneration) {
+                return { success: false, message: "Sign-in attempt was superseded.", status: null };
+            }
             authSessionRef.current = {
                 userId: loggedInUser.user_id,
                 token: newToken,
-                generation,
+                generation: loginGeneration,
             };
             authUserRef.current = loggedInUser;
             localStorage.setItem(TOKEN_KEY, newToken);
             setToken(newToken);
             setUser(loggedInUser);
-            setLoginSessionId(generation);
             return { success: true, user: loggedInUser };
         } catch (err) {
-            setError(err.message);
+            if (sessionVersionRef.current === loginGeneration) setError(err.message);
             return {
                 success: false,
                 message: err.message,
                 status: Number.isInteger(err?.status) ? err.status : null,
             };
         }
-    }, []);
+    }, [clearSession]);
 
     const changeTemporaryPassword = useCallback(async (newPassword) => {
         const response = await api.post("/api/auth/change-password", { new_password: newPassword });
@@ -188,6 +207,8 @@ export function AuthProvider({ children }) {
             email: profile.email,
             email_verified: profile.email_verified,
             pending_email: profile.pending_email,
+            phone_verified: profile.phone_verified ??
+                Boolean(profile.phone_verified_at ?? current.phone_verified),
             updated_at: profile.updated_at,
             profile_photo_available: profile.profile_photo_available,
             profile_photo_version: photoUpdated
@@ -200,22 +221,25 @@ export function AuthProvider({ children }) {
     }, [isProfileRequestCurrent]);
 
     const logout = useCallback(async () => {
+        if (logoutInProgressRef.current) return;
+        logoutInProgressRef.current = true;
         const generation = ++sessionVersionRef.current;
         profileRequestIdRef.current += 1;
-        authSessionRef.current = { userId: null, token: null, generation };
-        authUserRef.current = null;
-        setUser(null);
-        setToken(null);
-        setLoginSessionId(generation);
         try {
             await api.post("/api/auth/logout");
+            return true;
         } catch {
-            // Best-effort only: the API's JWTs are stateless, so logout is
-            // primarily a client-side action. The local session is cleared below.
+            return false;
         } finally {
             if (sessionVersionRef.current === generation) {
+                authSessionRef.current = { userId: null, token: null, generation };
+                authUserRef.current = null;
                 localStorage.removeItem(TOKEN_KEY);
+                setToken(null);
+                setUser(null);
+                setLoginSessionId(generation);
             }
+            logoutInProgressRef.current = false;
         }
     }, []);
     const register = useCallback(async (full_name, email, phone, occupation, nationalId, dateOfBirth) => {

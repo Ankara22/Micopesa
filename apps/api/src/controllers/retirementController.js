@@ -1,4 +1,5 @@
 const pool = require("../db/database");
+const { enqueueBusinessNotification } = require("../services/notificationEventService");
 const { calculateProjection, validateProjectionInputs } = require("../services/projectionService");
 const { loadAdminSettings } = require("../services/adminSettingsService");
 
@@ -188,6 +189,11 @@ async function upsertPlan(req, res) {
 
         await client.query("COMMIT");
         transactionStarted = false;
+        void enqueueBusinessNotification({
+            userId: req.user.userId,
+            eventType: "RETIREMENT_PLAN_SAVED",
+            referenceId: projectionResult.rows[0].projection_id,
+        });
 
         return res.status(200).json({
             status: "success",

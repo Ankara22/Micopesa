@@ -3,10 +3,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Notifications from "./Notifications";
 import i18n from "../../i18n";
 
-const mocks = vi.hoisted(() => ({ getMyNotifications: vi.fn(), useAuth: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+    getMyNotifications: vi.fn(),
+    getMyNotificationPreferences: vi.fn(),
+    updateMyNotificationPreferences: vi.fn(),
+    useAuth: vi.fn(),
+}));
 
 vi.mock("../../services/notificationService", () => ({
     getMyNotifications: mocks.getMyNotifications,
+    getMyNotificationPreferences: mocks.getMyNotificationPreferences,
+    updateMyNotificationPreferences: mocks.updateMyNotificationPreferences,
     getPushPublicKey: vi.fn(),
     registerPushSubscription: vi.fn(),
     removePushSubscription: vi.fn(),
@@ -32,6 +39,10 @@ describe("worker notifications loading and retry", () => {
     beforeEach(() => {
         vi.clearAllMocks();
         mocks.useAuth.mockReturnValue({ user: { user_id: "worker-1" } });
+        mocks.getMyNotificationPreferences.mockResolvedValue({
+            email_enabled: false,
+            sms_enabled: false,
+        });
     });
 
     it("shows an accessible retry after initial failure and loads notifications on success", async () => {

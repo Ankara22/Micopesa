@@ -74,10 +74,21 @@ describe("email recovery pages", () => {
 
     it("validates a verification token and displays the server response", async () => {
         authEmailMocks.verifyEmail.mockResolvedValue({ message: "Email address verified successfully." });
-        renderPage("/verify-email?token=email-token", <VerifyEmail />);
+        renderPage("/verify-email?token=email-token&flow=email-verification", <VerifyEmail />);
 
         await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Email address verified successfully."));
         expect(authEmailMocks.verifyEmail).toHaveBeenCalledWith("email-token");
+    });
+
+    it.each([
+        "/verify-email?token=email-token",
+        "/verify-email?token=email-token&flow=unexpected",
+    ])("rejects a verification link without a supported flow: %s", (path) => {
+        renderPage(path, <VerifyEmail />);
+        expect(screen.getByRole("alert")).toHaveTextContent(
+            "This verification link is missing its flow type or has an invalid one.",
+        );
+        expect(authEmailMocks.verifyEmail).not.toHaveBeenCalled();
     });
 
     it("keeps reset submission disabled without a token", () => {
@@ -88,8 +99,11 @@ describe("email recovery pages", () => {
 
     it("reports verification failures", () => {
         authEmailMocks.verifyEmail.mockRejectedValue(new Error("This verification link is invalid or expired."));
-        renderPage("/verify-email", <VerifyEmail />);
-        expect(screen.getByRole("alert")).toHaveTextContent("This verification link is invalid or expired.");
-        expect(authEmailMocks.verifyEmail).not.toHaveBeenCalled();
+        renderPage("/verify-email?token=email-token&flow=email-verification", <VerifyEmail />);
+        expect(screen.getByRole("status")).toHaveTextContent("Verifying your email address");
+        return waitFor(() => {
+            expect(screen.getByRole("alert")).toHaveTextContent("This verification link is invalid or expired.");
+            expect(authEmailMocks.verifyEmail).toHaveBeenCalledWith("email-token");
+        });
     });
 });

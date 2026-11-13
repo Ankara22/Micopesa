@@ -104,6 +104,8 @@ test("returns only the authenticated user's KYC fields with a masked National ID
             user_id: userId,
             full_name: "Amina Worker",
             role: "WORKER",
+            phone_verified: true,
+            phone_verified_at: new Date("2026-11-05T12:00:00Z"),
             date_of_birth: "1990-04-15",
             national_id_last_four: "1234",
             kyc_status: "PENDING",
@@ -119,9 +121,11 @@ test("returns only the authenticated user's KYC fields with a masked National ID
     assert.equal(res.statusCode, 200);
     assert.deepEqual(queryValues, [userId]);
     assert.match(queryText, /LEFT JOIN kyc_records kyc ON kyc\.user_id = users\.user_id/);
+    assert.match(queryText, /phone_verified_at IS NOT NULL\) AS phone_verified/i);
     assert.match(queryText, /right\(kyc\.national_id, 4\) AS national_id_last_four/i);
     assert.doesNotMatch(queryText, /(?:^|,)\s*kyc\.national_id\s*(?:,|FROM)/i);
     assert.equal(res.body.data.user.date_of_birth, "1990-04-15");
+    assert.equal(res.body.data.user.phone_verified, true);
     assert.equal(res.body.data.user.masked_national_id, "****1234");
     assert.equal(res.body.data.user.kyc_status, "PENDING");
     assert.equal(Object.hasOwn(res.body.data.user, "national_id"), false);

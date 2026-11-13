@@ -20,6 +20,7 @@ const { sendAdminEmail } = require("./services/adminEmailNotificationService");
 const {
     createSmsDeliveryDispatcher,
     enabledChannels,
+    getNotificationSmsProvider,
 } = require("./services/smsDeliveryDispatcher");
 const {
     createSmsNotificationRepository,
@@ -145,7 +146,7 @@ if (require.main === module) {
         smsDispatcher = createSmsDeliveryDispatcher({
             repository: notificationRepository,
             sendSms: (message) => sendSms(message, {
-                provider: process.env.NOTIFICATION_SMS_PROVIDER?.trim().toUpperCase() || "AFRICAS_TALKING",
+                provider: getNotificationSmsProvider(process.env),
             }),
             sendEmail: sendAdminEmail,
             sendPush: (notification) => webPushService.sendToUser(notification),

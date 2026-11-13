@@ -6,6 +6,7 @@ import StatusBadge from "../../components/ui/StatusBadge";
 import Button from "../../components/ui/Button";
 import { normalizeNotificationStatus } from "../../components/ui/notificationStatus";
 import PushSubscriptionControl from "../../components/Notifications/PushSubscriptionControl";
+import ChannelNotificationPreferences from "../../components/Notifications/ChannelNotificationPreferences";
 import "../notifications/notifications.css";
 
 const STATUSES = ["PENDING", "PROVIDER_ACCEPTED", "DELIVERED", "FAILED", "UNKNOWN"];
@@ -184,6 +185,7 @@ function Notifications() {
                     </p>
                 )}
             </section>
+            <ChannelNotificationPreferences />
             <PushSubscriptionControl />
         </div>
     );

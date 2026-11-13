@@ -8,13 +8,17 @@ const mocks = vi.hoisted(() => ({
     createRoleNotification: vi.fn(),
     listNotificationAudit: vi.fn(),
     listRoleNotificationRecipients: vi.fn(),
+    getMyNotificationPreferences: vi.fn(),
+    updateMyNotificationPreferences: vi.fn(),
     useAuth: vi.fn(),
 }));
 
 vi.mock("../../services/notificationService", () => ({
     createRoleNotification: mocks.createRoleNotification,
+    getMyNotificationPreferences: mocks.getMyNotificationPreferences,
     listNotificationAudit: mocks.listNotificationAudit,
     listRoleNotificationRecipients: mocks.listRoleNotificationRecipients,
+    updateMyNotificationPreferences: mocks.updateMyNotificationPreferences,
 }));
 vi.mock("../../context/AuthContext", () => ({
     useAuth: mocks.useAuth,
@@ -43,6 +47,10 @@ describe("role-scoped notifications", () => {
         }]);
         mocks.listNotificationAudit.mockResolvedValue([]);
         mocks.createRoleNotification.mockResolvedValue([]);
+        mocks.getMyNotificationPreferences.mockResolvedValue({
+            email_enabled: false,
+            sms_enabled: false,
+        });
     });
 
     afterEach(() => {

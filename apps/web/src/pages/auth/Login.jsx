@@ -14,7 +14,7 @@ function Login() {
     const location = useLocation();
 
     const [identifier, setIdentifier] = useState("");
-    const [identifierType, setIdentifierType] = useState("email");
+    const [identifierType, setIdentifierType] = useState("phone");
     const [password, setPassword] = useState("");
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [formError, setFormError] = useState("");

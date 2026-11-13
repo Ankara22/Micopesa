@@ -11,12 +11,15 @@ function VerifyEmail() {
     const { t } = useTranslation();
     const [searchParams] = useSearchParams();
     const token = searchParams.get("token") || "";
-    const isRegistration = searchParams.get("flow") === "registration";
+    const flow = searchParams.get("flow");
+    const isRegistration = flow === "registration";
+    const isExistingVerification = flow === "email-verification";
+    const hasValidFlow = isRegistration || isExistingVerification;
     const [state, setState] = useState(() => ({
-        loading: Boolean(token && !isRegistration),
+        loading: Boolean(token && isExistingVerification),
         submitting: false,
         success: false,
-        error: !token,
+        error: !token || !hasValidFlow,
         registrationUnavailable: false,
     }));
     const [password, setPassword] = useState("");
@@ -25,7 +28,7 @@ function VerifyEmail() {
 
     useEffect(() => {
         let current = true;
-        if (!token || isRegistration) return () => { current = false; };
+        if (!token || !isExistingVerification) return () => { current = false; };
         verifyEmail(token).then(() => {
             if (current) setState({
                 loading: false,
@@ -44,7 +47,7 @@ function VerifyEmail() {
             });
         });
         return () => { current = false; };
-    }, [token, isRegistration]);
+    }, [token, isExistingVerification]);
 
     async function handleRegistrationVerification(event) {
         event.preventDefault();
@@ -97,7 +100,11 @@ function VerifyEmail() {
                 <p className="auth-eyebrow auth-card-eyebrow">{t("auth.verify.eyebrow")}</p>
                 <h1>{t("auth.verify.title")}</h1>
                 {state.loading && <p className="auth-subtitle" role="status">{t("auth.verify.loading")}</p>}
-                {state.error && <div className="auth-error" role="alert">{t("auth.verify.invalidLink")}</div>}
+                {state.error && (
+                    <div className="auth-error" role="alert">
+                        {hasValidFlow ? t("auth.verify.invalidLink") : t("auth.verify.invalidFlow")}
+                    </div>
+                )}
                 {state.registrationUnavailable && (
                     <div className="auth-error" role="alert">{t("auth.verify.registrationUnavailable")}</div>
                 )}

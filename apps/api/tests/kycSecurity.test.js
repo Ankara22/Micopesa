@@ -57,6 +57,47 @@ test("pending KYC cannot access financial routes; verified KYC may proceed", asy
     assert.equal(nextCalls, 1);
 });
 
+test("missing KYC records fail closed and KYC database errors do not grant access", async () => {
+    let databaseFailure = false;
+    pool.query = async () => {
+        if (databaseFailure) throw Object.assign(new Error("synthetic database failure"), { code: "08006" });
+        return { rows: [] };
+    };
+    const req = { user: { userId: "worker-without-kyc" } };
+    let nextCalls = 0;
+    const missingRecordResponse = response();
+    await requireVerifiedKyc(req, missingRecordResponse, () => { nextCalls += 1; });
+    assert.equal(missingRecordResponse.statusCode, 403);
+    assert.equal(missingRecordResponse.body.code, "KYC_VERIFICATION_REQUIRED");
+    assert.equal(nextCalls, 0);
+
+    databaseFailure = true;
+    const databaseErrorResponse = response();
+    await requireVerifiedKyc(req, databaseErrorResponse, () => { nextCalls += 1; });
+    assert.equal(databaseErrorResponse.statusCode, 500);
+    assert.equal(nextCalls, 0);
+});
+
+test("worker-only route role checks reject non-workers before the KYC query", async () => {
+    let databaseQueries = 0;
+    pool.query = async () => {
+        databaseQueries += 1;
+        return { rows: [{ kyc_status: "VERIFIED" }] };
+    };
+    let nextCalls = 0;
+    const denied = response();
+    requireRole("WORKER")({ user: { role: "ADMIN" } }, denied, async () => {
+        await requireVerifiedKyc(
+            { user: { userId: "admin-1" } },
+            response(),
+            () => { nextCalls += 1; }
+        );
+    });
+    assert.equal(denied.statusCode, 403);
+    assert.equal(databaseQueries, 0);
+    assert.equal(nextCalls, 0);
+});
+
 test("KYC review role guard allows admins and rejects workers", () => {
     const middleware = requireRole("ADMIN");
     const denied = response();

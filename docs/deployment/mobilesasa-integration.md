@@ -23,22 +23,36 @@ Mobile Sasa SMS requires:
 
 - `NODE_ENV=production`
 - `MOBILESASA_SMS_ENABLED=true`
-- `MOBILE_SASA_SMS_API_TOKEN`
-- `MOBILE_SASA_SMS_SENDER_ID` (approved for the Mobile Sasa account)
+- `MOBILESASA_TOKEN` (or legacy `MOBILE_SASA_SMS_API_TOKEN`)
+- `MOBILESASA_SENDER_ID` (or legacy `MOBILE_SASA_SMS_SENDER_ID`, approved
+  for the Mobile Sasa account)
 
-The SMS v2 API receives a stable per-send `trackingId`. Staff onboarding also
-records the selected provider, tracking ID, and provider message reference in
-the onboarding audit evidence when acceptance is recorded. Queued notifications
-persist their provider tracking ID and provider reference with notification
-delivery evidence. Provider acceptance is not handset delivery. The response
-`cost` is saved as SMS-part count, not money. Ambiguous timeouts and
-possible-duplicate responses are not retried automatically; only explicit
-rate-limit rejections are eligible for bounded retry.
+If both canonical and legacy names are set, their values must match; conflicting
+values disable SMS dispatch.
+
+The SMS client uses Mobile Sasa's v1 single-message endpoint and retains a
+stable application-generated `trackingId` internally; it does not send that
+field to the provider. On acceptance, the provider `messageId` and internal
+notification reference are persisted for delivery evidence. Provider
+acceptance is not handset delivery. If a response includes `cost`, it is saved
+as SMS-part count, not money. Ambiguous timeouts and possible-duplicate
+responses are not retried automatically; only explicit rate-limit rejections
+are eligible for bounded retry.
 
 All current outbound SMS paths are the queued notification dispatcher and
 staff-onboarding create/resend flows. No SMS flow is configured to fan out to
 both providers. Africa's Talking remains the default; Mobile Sasa is not
 selected unless configured.
+
+The SMS integration uses the requested v1 endpoint
+`POST https://api.mobilesasa.com/v1/send/message` with `senderID`, `phone`, and
+`message`. The official [v1 reference](https://docs.mobilesasa.com/sms/send)
+says provider acceptance is queued, not delivered, and identifies `messageId`
+as the send handle. Mobile Sasa's [v2 reference](https://docs.mobilesasa.com/sms/v2)
+recommends v2 when a caller needs the provider to echo its own `trackingId`.
+This integration follows v1 and therefore correlates delivery reports by the
+persisted provider message reference; a provider acceptance identifier lost
+during an ambiguous timeout may not be recoverable from a later callback.
 
 ## Email provider coverage
 
@@ -132,3 +146,27 @@ unless the provider reference can be correlated by the exact stable tracking
 identifier or by a separately persisted provider dispatch reference. Do not
 resend solely because a callback is unmatched or a provider outcome is
 ambiguous.
+
+## Registered-user transactional channel preferences
+
+Authenticated users can manage their optional SMS and email notification
+preferences from their Notifications page. The API identifies the current
+account from the authenticated session; clients cannot choose another user's
+preference record. SMS and email require an explicit channel opt-in and a
+verified contact address at queue and dispatch time. In-app notifications and
+browser push remain separate channels.
+
+The central business-event dispatcher supports contribution-confirmed,
+KYC-decision, and retirement-plan-saved notices. Registration and email
+verification continue to use the existing authentication email/token flow;
+ordinary notifications do not reuse verification tokens. Email templates
+include escaped HTML and plain text and do not include passwords, OTPs,
+National IDs, or full payment details.
+
+The additive `database/migration_transactional_notifications.sql` depends on
+the unified-notification schema (including SMS delivery fields, email
+snapshots, `users`, and `set_updated_at()`). It has not been applied. Apply the
+unified notification migration first, review both migrations against the
+target schema, and deploy them only through the authorized database process.
+No database connection or migration application was performed during this
+implementation.

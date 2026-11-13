@@ -4,6 +4,24 @@
     gap: 22px;
 }
 
+.kyc-status-banner {
+    padding: 13px 16px;
+    border-left: 4px solid;
+    border-radius: 8px;
+    color: var(--text);
+    line-height: 1.5;
+}
+
+.kyc-status-banner--pending {
+    border-color: #b7791f;
+    background: rgba(245, 158, 11, 0.1);
+}
+
+.kyc-status-banner--rejected {
+    border-color: #c53030;
+    background: rgba(239, 68, 68, 0.1);
+}
+
 .profile-hero {
     display: flex;
     align-items: center;
