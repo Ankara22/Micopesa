@@ -3,6 +3,7 @@ const os = require("node:os");
 const path = require("node:path");
 const paymentAttemptRepository = require("../services/mpesaPaymentAttemptRepository");
 const simulatorProviderService = require("../services/mpesaSimulatorService");
+const darajaProviderService = require("../services/mpesaService");
 const {
     assertSimulatorRequest,
     getPaymentProviderConfiguration,
@@ -10,6 +11,9 @@ const {
 const {
     createMpesaPaymentOrchestrationService,
 } = require("../services/mpesaPaymentOrchestrationService");
+const {
+    createPensionLedgerReadinessGuard,
+} = require("../services/mpesaLedgerReadiness");
 const { verificationService } = require("./mpesaController");
 
 function writeSanitizedDiagnostic(diagnostic) {
@@ -30,6 +34,7 @@ function writeSanitizedDiagnostic(diagnostic) {
 function createMpesaSimulatorController({
     repository = paymentAttemptRepository,
     providerService = simulatorProviderService,
+    darajaConfigurationService = darajaProviderService,
     paymentVerificationService = verificationService,
     environmentProvider = () => process.env,
     diagnosticSink = writeSanitizedDiagnostic,
@@ -37,6 +42,11 @@ function createMpesaSimulatorController({
     const orchestrationService = createMpesaPaymentOrchestrationService({
         paymentAttemptRepository: repository,
         providerService,
+        environmentProvider,
+    });
+    const assertLedgerReady = createPensionLedgerReadinessGuard({
+        environmentProvider,
+        assertPensionLedgerActive: repository.assertPensionLedgerActive,
     });
 
     function requireWorker(req, res) {
@@ -162,20 +172,55 @@ function createMpesaSimulatorController({
     }
 
     return {
-        getPaymentProvider(_req, res) {
+        async getPaymentProvider(_req, res) {
             try {
                 const configuration = getPaymentProviderConfiguration(environmentProvider());
-                const simulatorEnabled = configuration.simulatorEnabled &&
-                    configuration.environmentName !== "production";
+                let paymentEnabled = configuration.paymentEnabled;
+                let messageKey = paymentEnabled
+                    ? "MPESA_PAYMENTS_AVAILABLE"
+                    : "MPESA_PAYMENTS_DISABLED";
+                if (configuration.provider === "DARAJA" && paymentEnabled) {
+                    try {
+                        const darajaConfiguration = darajaConfigurationService.assertConfigured();
+                        paymentEnabled = darajaConfiguration?.paymentEnabled === true;
+                        if (!paymentEnabled) messageKey = "MPESA_PAYMENTS_DISABLED";
+                    } catch {
+                        paymentEnabled = false;
+                        messageKey = "MPESA_CONFIGURATION_INCOMPLETE";
+                    }
+                }
+                if (paymentEnabled) {
+                    try {
+                        await assertLedgerReady();
+                    } catch (error) {
+                        paymentEnabled = false;
+                        messageKey = error?.code === "PENSION_LEDGER_ENFORCEMENT_CONFIG_INVALID"
+                            ? "MPESA_CONFIGURATION_INVALID"
+                            : "MPESA_LEDGER_NOT_READY";
+                    }
+                }
+                const environment = configuration.provider === "SIMULATOR"
+                    ? "simulator"
+                    : configuration.darajaEnvironment || "unavailable";
                 return res.status(200).json({
                     status: "success",
                     data: {
-                        provider: simulatorEnabled ? "SIMULATOR" : "DARAJA",
-                        simulator_enabled: simulatorEnabled,
+                        provider: configuration.provider,
+                        environment,
+                        payment_enabled: paymentEnabled,
+                        message_key: messageKey,
                     },
                 });
-            } catch (error) {
-                return sendFailure(res, error, _req);
+            } catch {
+                return res.status(200).json({
+                    status: "success",
+                    data: {
+                        provider: "UNAVAILABLE",
+                        environment: "unavailable",
+                        payment_enabled: false,
+                        message_key: "MPESA_CONFIGURATION_INVALID",
+                    },
+                });
             }
         },
 

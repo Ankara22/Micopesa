@@ -23,6 +23,14 @@ describe("ChannelNotificationPreferences", () => {
         getMyNotificationPreferences.mockResolvedValue({
             email_enabled: false,
             sms_enabled: false,
+            email_registered: true,
+            email_verified: false,
+            phone_registered: true,
+            phone_verified: true,
+            push_enabled: true,
+            sms_delivery_enabled: true,
+            email_delivery_enabled: false,
+            push_delivery_enabled: false,
         });
     });
 
@@ -30,6 +38,14 @@ describe("ChannelNotificationPreferences", () => {
         updateMyNotificationPreferences.mockResolvedValue({
             email_enabled: true,
             sms_enabled: false,
+            email_registered: true,
+            email_verified: false,
+            phone_registered: true,
+            phone_verified: true,
+            push_enabled: true,
+            sms_delivery_enabled: true,
+            email_delivery_enabled: false,
+            push_delivery_enabled: false,
         });
         render(<ChannelNotificationPreferences />);
 
@@ -48,6 +64,38 @@ describe("ChannelNotificationPreferences", () => {
             });
         });
         expect(await screen.findByText("Notification preferences saved.")).toBeInTheDocument();
+        expect(screen.getByText(/The registered email address is not verified yet/)).toBeInTheDocument();
+        expect(screen.getByText("The registered phone number is verified.")).toBeInTheDocument();
+        expect(screen.getByText(/A browser push subscription is registered for this account/)).toBeInTheDocument();
+        expect(screen.getByText(/Email delivery is currently unavailable/)).toBeInTheDocument();
+    });
+
+    it("reloads saved channel choices after the preferences view is remounted", async () => {
+        let persisted = {
+            email_enabled: false,
+            sms_enabled: false,
+            email_registered: true,
+            email_verified: true,
+            phone_registered: true,
+            phone_verified: true,
+            push_enabled: false,
+        };
+        getMyNotificationPreferences.mockImplementation(async () => ({ ...persisted }));
+        updateMyNotificationPreferences.mockImplementation(async (changes) => {
+            persisted = { ...persisted, ...changes };
+            return { ...persisted };
+        });
+
+        const firstView = render(<ChannelNotificationPreferences />);
+        fireEvent.click(await screen.findByLabelText("Email notifications"));
+        fireEvent.click(screen.getByRole("button", { name: "Save preferences" }));
+        await waitFor(() => expect(persisted.email_enabled).toBe(true));
+        firstView.unmount();
+
+        render(<ChannelNotificationPreferences />);
+
+        expect(await screen.findByLabelText("Email notifications")).toBeChecked();
+        expect(getMyNotificationPreferences).toHaveBeenCalledTimes(2);
     });
 
     it("shows a retryable generic error if preferences cannot be loaded", async () => {

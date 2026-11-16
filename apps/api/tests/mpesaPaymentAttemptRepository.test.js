@@ -36,6 +36,7 @@ function createMockPool({
     simulateConcurrentConflict = false,
     concurrentWinner = {},
     simulateActiveAttemptConstraintConflict = false,
+    ledgerStatus = "ACTIVE",
     account = { account_id: "account_001", user_id: workerId },
     allocations = [
         { allocation_id: "allocation_001", fund_id: "fund_001", percentage: "70.00", fund_name: "Balanced", fund_status: "ACTIVE" },
@@ -60,9 +61,30 @@ function createMockPool({
         concurrentWinnerRecord: null,
         account: copy(account),
         allocations: copy(allocations),
+        ledgerStatus,
+        simulateLedgerCloseRace: false,
+        ledgerShareLock: false,
+        signalLedgerShareAcquired() {},
+        releaseLedgerShareLock() {},
+        waitAfterLedgerShareLock() {},
         queries: [],
         snapshot: null,
     };
+    let signalLedgerShareAcquired;
+    const ledgerShareAcquired = new Promise((resolve) => {
+        signalLedgerShareAcquired = resolve;
+    });
+    let releaseLedgerShareLock;
+    const ledgerShareLockReleased = new Promise((resolve) => {
+        releaseLedgerShareLock = resolve;
+    });
+    state.signalLedgerShareAcquired = signalLedgerShareAcquired;
+    state.releaseLedgerShareLock = releaseLedgerShareLock;
+    let proceedWithAttemptCreation;
+    const attemptCreationCanProceed = new Promise((resolve) => {
+        proceedWithAttemptCreation = resolve;
+    });
+    state.waitAfterLedgerShareLock = () => attemptCreationCanProceed;
 
     const client = {
         async query(sql, params = []) {
@@ -84,6 +106,10 @@ function createMockPool({
             }
             if (normalizedSql === "COMMIT") {
                 state.snapshot = null;
+                if (state.ledgerShareLock) {
+                    state.ledgerShareLock = false;
+                    state.releaseLedgerShareLock();
+                }
                 return { rows: [] };
             }
             if (normalizedSql === "ROLLBACK") {
@@ -99,7 +125,25 @@ function createMockPool({
                     state.balances = state.snapshot.balances;
                 }
                 state.snapshot = null;
+                if (state.ledgerShareLock) {
+                    state.ledgerShareLock = false;
+                    state.releaseLedgerShareLock();
+                }
                 return { rows: [] };
+            }
+            if (normalizedSql ===
+                "SELECT pg_advisory_xact_lock_shared(1296917328, 1280265540)") {
+                if (state.simulateLedgerCloseRace) {
+                    state.ledgerShareLock = true;
+                    state.signalLedgerShareAcquired();
+                    await state.waitAfterLedgerShareLock();
+                }
+                return { rows: [] };
+            }
+            if (normalizedSql === "SELECT status FROM pension_ledger WHERE singleton_key IS TRUE") {
+                return {
+                    rows: state.ledgerStatus === null ? [] : [{ status: state.ledgerStatus }],
+                };
             }
             if (
                 normalizedSql.startsWith("UPDATE mpesa_payment_verifications") &&
@@ -117,6 +161,7 @@ function createMockPool({
                     simulator_outcome: simulatorOutcome,
                     completed_at: new Date().toISOString(),
                 });
+
                 return { rows: [copy(verification)] };
             }
             if (normalizedSql.includes("SELECT c.contribution_id")) {
@@ -413,15 +458,41 @@ function createMockPool({
 
     return {
         state,
+        async waitForLedgerShareLock() {
+            await ledgerShareAcquired;
+        },
+        proceedWithAttemptCreation() {
+            proceedWithAttemptCreation();
+        },
+        async closeLedger() {
+            if (state.ledgerShareLock) await ledgerShareLockReleased;
+            if (state.attempts.some((attempt) =>
+                ["PENDING", "OUTCOME_UNKNOWN", "PROMPT_ACCEPTED"].includes(attempt.attempt_status)
+            )) {
+                throw Object.assign(new Error("Cannot close while an attempt is unsettled."), {
+                    code: "55000",
+                    constraint: "chk_pension_ledger_no_unsettled_mpesa_attempts",
+                });
+            }
+            state.ledgerStatus = "CLOSED";
+        },
         pool: { connect: async () => client, query: client.query },
     };
 }
 
-function createRepository(options) {
-    const mock = createMockPool(options);
+function createRepository(options = {}) {
+    const {
+        ledgerEnforcementEnabled = false,
+        ...poolOptions
+    } = options;
+    const mock = createMockPool(poolOptions);
     return {
         ...mock,
-        repository: createMpesaPaymentAttemptRepository(mock.pool),
+        repository: createMpesaPaymentAttemptRepository(mock.pool, {
+            environmentProvider: () => ({
+                MPESA_LEDGER_ENFORCEMENT_ENABLED: ledgerEnforcementEnabled ? "true" : "false",
+            }),
+        }),
     };
 }
 
@@ -448,6 +519,80 @@ test("creates a pending attempt tied to an existing pending contribution", async
     assert.equal(state.balances.account_001, 1000);
     assert.equal(state.queries.some((sql) => sql.startsWith("UPDATE contributions")), false);
     assert.equal(state.queries.some((sql) => sql.startsWith("UPDATE pension_accounts")), false);
+});
+
+test("ledger enforcement rejects a new attempt before creating financial records", async () => {
+    const { repository, state } = createRepository({
+        ledgerEnforcementEnabled: true,
+        ledgerStatus: "PREPARING",
+    });
+
+    await assert.rejects(repository.createPendingPaymentAttempt(request()), {
+        code: "PENSION_LEDGER_NOT_ACTIVE",
+        statusCode: 503,
+    });
+
+    assert.equal(state.attempts.length, 0);
+    assert.equal(state.createdTransactions.length, 0);
+    assert.equal(state.createdContributions.length, 0);
+    assert.equal(state.rollbackCount, 1);
+});
+
+test("injected ledger configuration governs the repository transaction check", async () => {
+    const { repository, state } = createRepository({
+        ledgerStatus: "PREPARING",
+    });
+    const environmentProvider = () => ({
+        MPESA_LEDGER_ENFORCEMENT_ENABLED: "true",
+    });
+
+    await assert.rejects(
+        repository.createPendingPaymentAttempt(request(), { environmentProvider }),
+        { code: "PENSION_LEDGER_NOT_ACTIVE", statusCode: 503 }
+    );
+
+    assert.ok(state.queries.some((sql) =>
+        sql === "SELECT pg_advisory_xact_lock_shared(1296917328, 1280265540)"
+    ));
+    assert.equal(state.createdTransactions.length, 0);
+    assert.equal(state.attempts.length, 0);
+    assert.equal(state.rollbackCount, 1);
+});
+
+test("concurrent ledger closure waits for attempt creation and rejects the unresolved attempt", async () => {
+    const mock = createMockPool();
+    mock.state.simulateLedgerCloseRace = true;
+    const repository = createMpesaPaymentAttemptRepository(mock.pool, {
+        environmentProvider: () => ({
+            MPESA_LEDGER_ENFORCEMENT_ENABLED: "true",
+        }),
+    });
+    const creation = repository.createPendingMpesaPayment({
+        workerId,
+        idempotencyKey: "ledger-close-race-key",
+        amount: 2500,
+        phoneNumber,
+    });
+
+    await mock.waitForLedgerShareLock();
+    const closure = mock.closeLedger();
+    let closureFinished = false;
+    closure.then(
+        () => { closureFinished = true; },
+        () => { closureFinished = true; }
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(closureFinished, false);
+
+    mock.proceedWithAttemptCreation();
+    await creation;
+    await assert.rejects(closure, {
+        code: "55000",
+        constraint: "chk_pension_ledger_no_unsettled_mpesa_attempts",
+    });
+    assert.equal(mock.state.ledgerStatus, "ACTIVE");
+    assert.equal(mock.state.attempts.length, 1);
+    assert.equal(mock.state.attempts[0].attempt_status, "PENDING");
 });
 
 test("attempt provider is assigned from server configuration, not client input", async () => {

@@ -89,6 +89,7 @@ describe("authentication pages", () => {
         expect(container.querySelector(".auth-art img"))
             .toHaveAttribute("src", "/images/micopesa-signup-reference-hd.png");
         expect(screen.getByLabelText("Email address (used to sign in)")).toBeRequired();
+        expect(screen.getByLabelText("Date of birth")).toBeRequired();
     });
 
     it("validates required login fields and displays authentication errors", async () => {
@@ -230,6 +231,7 @@ describe("authentication pages", () => {
         renderAuth("/register");
         fireEvent.click(screen.getByRole("button", { name: "Create account" }));
         expect(screen.getByText("Email address is required.")).toBeInTheDocument();
+        expect(screen.getByText("Date of birth is required.")).toBeInTheDocument();
         expect(authMocks.register).not.toHaveBeenCalled();
 
         fireEvent.change(screen.getByLabelText("Email address (used to sign in)"), { target: { value: "invalid" } });

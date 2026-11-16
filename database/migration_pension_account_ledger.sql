@@ -3,7 +3,9 @@ BEGIN;
 -- Deployment must freeze and drain every legacy financial writer before this
 -- migration starts. This lock only protects the snapshot while this transaction
 -- is open; it does not replace the deployment freeze after commit.
-LOCK TABLE pension_accounts IN SHARE ROW EXCLUSIVE MODE;
+LOCK TABLE pension_accounts, mpesa_payment_attempts,
+    mpesa_payment_verifications, transactions, contributions
+    IN SHARE ROW EXCLUSIVE MODE;
 
 ALTER TABLE pension_accounts
     ADD CONSTRAINT uq_pension_accounts_id_user UNIQUE (account_id, user_id);
@@ -120,6 +122,144 @@ CREATE TABLE simulator_payment_confirmations (
     UNIQUE (confirmation_id, attempt_id, verification_id, provider_mode),
     UNIQUE (verification_id)
 );
+
+DO $$
+DECLARE status_check_name TEXT;
+BEGIN
+    SELECT conname
+    INTO status_check_name
+    FROM pg_constraint
+    WHERE conrelid = 'mpesa_payment_attempts'::regclass
+      AND contype = 'c'
+      AND pg_get_constraintdef(oid) LIKE '%attempt_status%'
+      AND pg_get_constraintdef(oid) LIKE '%OUTCOME_UNKNOWN%'
+      AND pg_get_constraintdef(oid) LIKE '%TIMED_OUT%'
+      AND pg_get_constraintdef(oid) NOT LIKE '%provider_accepted_at%'
+    ORDER BY conname
+    LIMIT 1;
+
+    IF status_check_name IS NULL THEN
+        RAISE EXCEPTION 'Could not identify the M-Pesa attempt status constraint';
+    END IF;
+
+    EXECUTE format(
+        'ALTER TABLE mpesa_payment_attempts DROP CONSTRAINT %I',
+        status_check_name
+    );
+END;
+$$;
+
+ALTER TABLE mpesa_payment_attempts
+    ADD CONSTRAINT chk_mpesa_payment_attempt_status
+    CHECK (attempt_status IN (
+        'PENDING',
+        'PROMPT_ACCEPTED',
+        'OUTCOME_UNKNOWN',
+        'FAILED',
+        'CANCELLED',
+        'TIMED_OUT',
+        'SETTLED'
+    ));
+
+CREATE TEMP TABLE legacy_simulator_settlements (
+    attempt_id VARCHAR(25) PRIMARY KEY,
+    verification_id BIGINT NOT NULL UNIQUE,
+    checkout_request_id VARCHAR(100) NOT NULL UNIQUE,
+    confirmed_at TIMESTAMPTZ NOT NULL
+) ON COMMIT DROP;
+
+-- Classify only fully reconciled legacy simulations before provider evidence is immutable.
+INSERT INTO legacy_simulator_settlements (
+    attempt_id, verification_id, checkout_request_id, confirmed_at
+)
+SELECT a.attempt_id, v.verification_id, a.checkout_request_id, v.completed_at
+FROM mpesa_payment_attempts a
+JOIN mpesa_payment_verifications v
+  ON v.attempt_id = a.attempt_id
+JOIN contributions c
+  ON c.contribution_id = a.contribution_id
+ AND c.account_id = a.account_id
+ AND c.transaction_id = a.transaction_id
+JOIN transactions t
+  ON t.transaction_id = a.transaction_id
+ AND t.transaction_type = 'CONTRIBUTION'
+JOIN pension_accounts p
+  ON p.account_id = a.account_id
+WHERE a.attempt_status = 'PROMPT_ACCEPTED'
+  AND a.provider_mode IS NULL
+  AND v.provider_mode IS NULL
+  AND v.simulator_outcome IS NULL
+  AND a.checkout_request_id ~ '^SIM[A-F0-9]{22}$'
+  AND a.merchant_request_id =
+      'SIMM' || substring(a.checkout_request_id FROM 4 FOR 21)
+  AND a.provider_accepted_at IS NOT NULL
+  AND v.verification_status = 'VERIFIED_SUCCESS'
+  AND v.verification_source = 'RECONCILIATION'
+  AND v.checkout_request_id = a.checkout_request_id
+  AND v.merchant_request_id = a.merchant_request_id
+  AND v.provider_result_code = '0'
+  AND v.provider_result_description =
+      'SIMULATED: Payment succeeded; no real money was transferred.'
+  AND v.completed_at IS NOT NULL
+  AND v.callback_fingerprint IS NULL
+  AND v.callback_result_code IS NULL
+  AND v.callback_amount_matches IS NULL
+  AND v.callback_phone_matches IS NULL
+  AND v.callback_receipt IS NULL
+  AND c.contribution_status = 'COMPLETED'
+  AND c.channel = 'MPESA'
+  AND c.amount = a.expected_amount
+  AND t.transaction_status = 'COMPLETED'
+  AND t.amount = a.expected_amount
+  AND t.mpesa_result_code = 0
+  AND t.mpesa_result_description =
+      'SIMULATED: Payment succeeded; no real money was transferred.'
+  AND t.checkout_request_id = a.checkout_request_id
+  AND t.mpesa_phone = a.mpesa_phone
+  AND (t.mpesa_receipt IS NULL OR t.mpesa_receipt = a.checkout_request_id)
+  AND t.completed_at IS NOT NULL
+  AND NOT EXISTS (
+      SELECT 1
+      FROM simulator_payment_confirmations s
+      WHERE s.attempt_id = a.attempt_id
+         OR s.verification_id = v.verification_id
+         OR s.synthetic_reference = a.checkout_request_id
+  )
+ORDER BY a.attempt_id
+FOR UPDATE OF a, v, c, t;
+
+DO $$
+DECLARE candidate_count INTEGER;
+BEGIN
+    SELECT count(*) INTO candidate_count FROM legacy_simulator_settlements;
+    IF candidate_count NOT IN (0, 2) THEN
+        RAISE EXCEPTION
+            'Expected zero or exactly two evidence-complete legacy simulator settlements; found %',
+            candidate_count;
+    END IF;
+END;
+$$;
+
+UPDATE mpesa_payment_verifications v
+SET provider_mode = 'SIMULATOR',
+    simulator_outcome = 'SUCCESS'
+FROM legacy_simulator_settlements l
+WHERE v.verification_id = l.verification_id
+  AND v.attempt_id = l.attempt_id;
+
+UPDATE mpesa_payment_attempts a
+SET provider_mode = 'SIMULATOR',
+    attempt_status = 'SETTLED'
+FROM legacy_simulator_settlements l
+WHERE a.attempt_id = l.attempt_id;
+
+INSERT INTO simulator_payment_confirmations (
+    confirmation_id, attempt_id, verification_id, provider_mode,
+    outcome, synthetic_reference, confirmed_at
+)
+SELECT gen_random_uuid(), attempt_id, verification_id, 'SIMULATOR',
+       'SUCCESS', checkout_request_id, confirmed_at
+FROM legacy_simulator_settlements;
 
 CREATE TABLE pension_adjustment_requests (
     request_id UUID PRIMARY KEY,
@@ -1411,7 +1551,9 @@ BEGIN
            OR evidence_row.verification_provider IS DISTINCT FROM NEW.provider_mode
            OR evidence_row.verification_status <> 'VERIFIED_SUCCESS'
            OR evidence_row.provider_result_code IS DISTINCT FROM '0'
-           OR evidence_row.attempt_status NOT IN ('PROMPT_ACCEPTED', 'OUTCOME_UNKNOWN')
+           OR evidence_row.attempt_status NOT IN (
+               'PROMPT_ACCEPTED', 'OUTCOME_UNKNOWN', 'SETTLED'
+           )
            OR evidence_row.contribution_status <> 'COMPLETED'
            OR evidence_row.contribution_channel <> 'MPESA'
            OR evidence_row.transaction_type <> 'CONTRIBUTION'

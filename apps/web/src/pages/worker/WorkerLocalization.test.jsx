@@ -68,6 +68,9 @@ describe("worker language switching", () => {
     it("changes language immediately without losing the route, modal, or form input", async () => {
         renderContributionsRoute();
         expect(await screen.findByRole("heading", { name: "Contributions / Deposit" })).toBeInTheDocument();
+        expect(screen.getByText(
+            "M-Pesa deposits are credited only after the provider verifies the payment.",
+        )).toBeInTheDocument();
         expect(screen.getByTestId("current-path")).toHaveTextContent("/worker/contributions");
         fireEvent.click(screen.getByRole("button", { name: "Record contribution" }));
         fireEvent.change(screen.getByLabelText("Amount (KES)"), { target: { value: "72.50" } });

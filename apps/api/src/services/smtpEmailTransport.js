@@ -4,6 +4,7 @@ const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const EMAIL_HEADER_CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
 const MAX_EMAIL_TEXT_LENGTH = 5000;
 const MAX_EMAIL_HTML_LENGTH = 10000;
+const SMTP_PASSWORD_PATTERN = /^[A-Za-z0-9]{16}$/;
 const SAFE_SMTP_CODES = new Set([
     "EAUTH",
     "ECONNECTION",
@@ -27,28 +28,47 @@ function getSmtpConfiguration(environment = process.env) {
     const password = typeof environment.GMAIL_APP_PASSWORD === "string"
         ? environment.GMAIL_APP_PASSWORD.replace(/\s/g, "")
         : "";
-    const missingVariables = [];
-    if (!user) missingVariables.push("GMAIL_USER");
-    if (!password) missingVariables.push("GMAIL_APP_PASSWORD");
-    if (missingVariables.length) {
+    const status = getSmtpConfigurationStatus(environment);
+    if (status.missingVariables.length) {
         const error = new Error("Gmail SMTP configuration is incomplete");
         error.code = "EMAIL_SMTP_CONFIGURATION_MISSING";
-        error.missingVariables = missingVariables;
+        error.missingVariables = status.missingVariables;
         throw error;
     }
-    if (!EMAIL_PATTERN.test(user)) {
-        const error = new Error("Gmail SMTP username is invalid");
+    if (status.invalidVariables.length) {
+        const error = new Error(status.invalidVariables.includes("GMAIL_USER")
+            ? "Gmail SMTP username is invalid"
+            : "Gmail app password format is invalid");
         error.code = "EMAIL_SMTP_CONFIGURATION_INVALID";
-        error.invalidVariables = ["GMAIL_USER"];
-        throw error;
-    }
-    if (!/^[A-Za-z0-9]{16}$/.test(password)) {
-        const error = new Error("Gmail app password format is invalid");
-        error.code = "EMAIL_SMTP_CONFIGURATION_INVALID";
-        error.invalidVariables = ["GMAIL_APP_PASSWORD"];
+        error.invalidVariables = status.invalidVariables;
         throw error;
     }
     return { user, password };
+}
+
+function getSmtpConfigurationStatus(environment = process.env) {
+    const user = typeof environment.GMAIL_USER === "string"
+        ? environment.GMAIL_USER.trim().toLowerCase()
+        : "";
+    const password = typeof environment.GMAIL_APP_PASSWORD === "string"
+        ? environment.GMAIL_APP_PASSWORD.replace(/\s/g, "")
+        : "";
+    const missingVariables = [];
+    const invalidVariables = [];
+    if (!user) missingVariables.push("GMAIL_USER");
+    else if (!EMAIL_PATTERN.test(user)) invalidVariables.push("GMAIL_USER");
+    if (!password) missingVariables.push("GMAIL_APP_PASSWORD");
+    else if (!SMTP_PASSWORD_PATTERN.test(password)) invalidVariables.push("GMAIL_APP_PASSWORD");
+    return {
+        available: missingVariables.length === 0 && invalidVariables.length === 0,
+        errorCode: missingVariables.length
+            ? "EMAIL_SMTP_CONFIGURATION_MISSING"
+            : invalidVariables.length
+                ? "EMAIL_SMTP_CONFIGURATION_INVALID"
+                : null,
+        missingVariables,
+        invalidVariables,
+    };
 }
 
 function createSmtpTransporter(environment = process.env, createTransport = nodemailer.createTransport) {
@@ -191,6 +211,7 @@ module.exports = {
     classifySmtpFailure,
     createSmtpTransporter,
     getSmtpConfiguration,
+    getSmtpConfigurationStatus,
     logSmtpFailure,
     sendSmtpEmail,
 };

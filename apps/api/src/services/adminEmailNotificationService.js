@@ -1,6 +1,6 @@
 const sanitizeHtml = require("sanitize-html");
 const mobileSasaService = require("./mobileSasaService");
-const { sendSmtpEmail } = require("./smtpEmailTransport");
+const { getSmtpConfigurationStatus, sendSmtpEmail } = require("./smtpEmailTransport");
 const {
     assertDevelopmentRecipientAllowed,
     normalizeRecipient,
@@ -22,6 +22,29 @@ function createEmailError(message, code) {
     const error = new Error(message);
     error.code = code;
     return error;
+}
+
+function getEmailProviderConfigurationStatus(environment = process.env) {
+    const provider = environment.EMAIL_PROVIDER?.trim().toUpperCase() || "GMAIL";
+    if (provider === "GMAIL") {
+        return {
+            provider,
+            ...getSmtpConfigurationStatus(environment),
+        };
+    }
+    if (provider === "MOBILE_SASA") {
+        return {
+            provider,
+            ...mobileSasaService.getEmailConfigurationStatus(environment),
+        };
+    }
+    return {
+        provider: null,
+        available: false,
+        errorCode: "EMAIL_PROVIDER_UNSUPPORTED",
+        missingVariables: [],
+        invalidVariables: ["EMAIL_PROVIDER"],
+    };
 }
 
 async function sendAdminEmail(
@@ -65,6 +88,16 @@ async function sendAdminEmail(
         };
     }
 
+    const providerConfiguration = getEmailProviderConfigurationStatus(environment);
+    if (!providerConfiguration.available) {
+        const error = createEmailError(
+            "The configured email provider is unavailable.",
+            providerConfiguration.errorCode
+        );
+        error.missingVariables = providerConfiguration.missingVariables;
+        error.invalidVariables = providerConfiguration.invalidVariables;
+        throw error;
+    }
     if (selectedProvider === "GMAIL") {
         const result = await sendSmtpEmail({
             ...message,
@@ -102,4 +135,8 @@ function textToHtml(text) {
     return `<p>${escaped.replace(/\r?\n/g, "<br>")}</p>`;
 }
 
-module.exports = { sendAdminEmail, sanitizeAdminEmailHtml: (html) => sanitizeHtml(html, HTML_OPTIONS) };
+module.exports = {
+    getEmailProviderConfigurationStatus,
+    sendAdminEmail,
+    sanitizeAdminEmailHtml: (html) => sanitizeHtml(html, HTML_OPTIONS),
+};

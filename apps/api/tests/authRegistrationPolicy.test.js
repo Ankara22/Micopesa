@@ -36,6 +36,7 @@ function createState() {
     return {
         users: [],
         accounts: [],
+        notificationPreferences: [],
         kycRecords: [],
         pendingRegistrations: [],
         tokens: new Map(),
@@ -146,6 +147,7 @@ function configureDb() {
                 if (query === "ROLLBACK") {
                     state.users = snapshot.users;
                     state.accounts = snapshot.accounts;
+                    state.notificationPreferences = snapshot.notificationPreferences;
                     state.kycRecords = snapshot.kycRecords;
                     state.pendingRegistrations = snapshot.pendingRegistrations;
                     state.tokens = snapshot.tokens;
@@ -240,6 +242,14 @@ function configureDb() {
                 }
                 if (query.includes("INSERT INTO pension_accounts")) {
                     state.accounts.push({ user_id: values[0] });
+                    return { rows: [] };
+                }
+                if (query.includes("INSERT INTO notification_preferences")) {
+                    state.notificationPreferences.push({
+                        user_id: values[0],
+                        sms_enabled: false,
+                        email_enabled: false,
+                    });
                     return { rows: [] };
                 }
                 if (query.includes("INSERT INTO kyc_records")) {
@@ -396,6 +406,11 @@ test("valid registration attempts return the same acknowledgement for existing i
         assert.equal(state.users[0].login_method, "EMAIL");
         assert.equal(state.users[0].role, "WORKER");
         assert.equal(state.users[0].password_hash, "hashed:secure-password");
+        assert.deepEqual(state.notificationPreferences, [{
+            user_id: state.users[0].user_id,
+            sms_enabled: false,
+            email_enabled: false,
+        }]);
         assert.deepEqual(state.kycRecords, [{
             user_id: state.users[0].user_id,
             national_id: "12345678",
@@ -656,6 +671,15 @@ test("registration validates National ID, calendar date, and worker age without 
         const invalidDate = await api.request("/register", { ...base, date_of_birth: "2001-02-29" });
         assert.equal(invalidDate.status, 400);
         assert.equal((await invalidDate.json()).code, "INVALID_DATE_OF_BIRTH");
+
+        const missingDate = await api.request("/register", { ...base, date_of_birth: "" });
+        assert.equal(missingDate.status, 400);
+        assert.equal((await missingDate.json()).code, "INVALID_DATE_OF_BIRTH");
+
+        const futureDate = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+        const futureBirthDate = await api.request("/register", { ...base, date_of_birth: futureDate });
+        assert.equal(futureBirthDate.status, 400);
+        assert.equal((await futureBirthDate.json()).code, "INVALID_DATE_OF_BIRTH");
 
         for (const date_of_birth of ["2010-01-01", "1900-01-01"]) {
             const response = await api.request("/register", { ...base, date_of_birth });

@@ -20,6 +20,7 @@ const { sendAdminEmail } = require("./services/adminEmailNotificationService");
 const {
     createSmsDeliveryDispatcher,
     enabledChannels,
+    getNotificationChannelAvailabilityMap,
     getNotificationSmsProvider,
 } = require("./services/smsDeliveryDispatcher");
 const {
@@ -147,17 +148,20 @@ if (require.main === module) {
             repository: notificationRepository,
             sendSms: (message) => sendSms(message, {
                 provider: getNotificationSmsProvider(process.env),
+                notificationDelivery: true,
             }),
             sendEmail: sendAdminEmail,
             sendPush: (notification) => webPushService.sendToUser(notification),
         });
         smsDispatcher.start();
-    } else if (
-        process.env.SMS_DISPATCHER_ENABLED === "true" ||
-        process.env.NOTIFICATION_DISPATCHER_ENABLED === "true" ||
-        process.env.EMAIL_NOTIFICATIONS_ENABLED === "true"
-    ) {
-        console.error("Notification dispatcher was not started because production channel configuration is incomplete.");
+    } else if (Object.values(getNotificationChannelAvailabilityMap(process.env)).some(
+        ({ reason_code }) => [
+            "provider_configuration_missing",
+            "provider_configuration_invalid",
+            "provider_unsupported",
+        ].includes(reason_code)
+    )) {
+        console.error("Notification dispatcher was not started because an enabled channel has incomplete provider configuration.");
     }
 
     let shuttingDown = false;

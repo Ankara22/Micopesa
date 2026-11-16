@@ -1,8 +1,12 @@
+const { createPensionLedgerReadinessGuard } = require("./mpesaLedgerReadiness");
+
 function createMpesaPaymentOrchestrationService({
     paymentAttemptRepository,
     providerService,
     amountValidator = require("./mpesaService").validateAmount,
     phoneNormalizer = require("./mpesaService").normalizePhoneNumber,
+    environmentProvider = () => process.env,
+    ledgerReadinessCheck,
 }) {
     if (!paymentAttemptRepository ||
         typeof paymentAttemptRepository.createPendingMpesaPayment !== "function") {
@@ -11,6 +15,12 @@ function createMpesaPaymentOrchestrationService({
     if (!providerService || typeof providerService.initiateStkPush !== "function") {
         throw new TypeError("An injected M-Pesa provider service is required.");
     }
+
+    const assertLedgerReady = createPensionLedgerReadinessGuard({
+        environmentProvider,
+        assertPensionLedgerActive:
+            ledgerReadinessCheck || paymentAttemptRepository.assertPensionLedgerActive,
+    });
 
     async function persistProviderAcceptance(input) {
         const retryableCodes = new Set([
@@ -38,6 +48,7 @@ function createMpesaPaymentOrchestrationService({
 
     function toPendingResult(attempt, { created }) {
         const status = attempt.attempt_status;
+        const settled = status === "SETTLED";
         return {
             amount: Number(attempt.expected_amount),
             attempt_id: attempt.attempt_id,
@@ -49,7 +60,8 @@ function createMpesaPaymentOrchestrationService({
             outcome_unknown: status === "OUTCOME_UNKNOWN",
             payment_status: status,
             transaction_id: attempt.transaction_id,
-            transaction_status: "PENDING",
+            transaction_status: settled ? "COMPLETED" : "PENDING",
+            ...(settled ? { contribution_status: "COMPLETED" } : {}),
         };
     }
 
@@ -127,11 +139,14 @@ function createMpesaPaymentOrchestrationService({
     async function initiateWorkerPayment({ workerId, idempotencyKey, amount, phoneNumber }) {
         const validatedAmount = amountValidator(amount);
         const normalizedPhone = phoneNormalizer(phoneNumber);
+        await assertLedgerReady();
         const pending = await paymentAttemptRepository.createPendingMpesaPayment({
             workerId,
             idempotencyKey,
             amount: validatedAmount,
             phoneNumber: normalizedPhone,
+        }, {
+            environmentProvider,
         });
         return dispatchPaymentAttempt(
             { ...pending, workerId },
@@ -152,12 +167,15 @@ function createMpesaPaymentOrchestrationService({
         }
         const validatedAmount = amountValidator(amount);
         const normalizedPhone = phoneNormalizer(phoneNumber);
+        await assertLedgerReady();
         const pending = await paymentAttemptRepository.createPaymentAttemptForContribution({
             workerId,
             contributionId,
             idempotencyKey,
             amount: validatedAmount,
             phoneNumber: normalizedPhone,
+        }, {
+            environmentProvider,
         });
         return dispatchPaymentAttempt(
             { ...pending, workerId },

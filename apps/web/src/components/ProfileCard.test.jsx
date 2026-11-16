@@ -219,6 +219,31 @@ describe("shared ProfileCard", () => {
         expect(screen.getByText("+254712345678")).toBeInTheDocument();
     });
 
+    it("shows distinct sanitized feedback for SMS configuration and provider failures", async () => {
+        mocks.requestPhoneChange
+            .mockRejectedValueOnce({ data: { code: "PHONE_CHANGE_SMS_CONFIGURATION_MISSING" } })
+            .mockRejectedValueOnce({ data: { code: "PHONE_CHANGE_SMS_PROVIDER_REJECTED" } });
+        renderProfile();
+        await screen.findByRole("heading", { name: "Amina Worker" });
+        fireEvent.change(screen.getByLabelText("New Kenyan mobile number"), {
+            target: { value: "0712 345 678" },
+        });
+        fireEvent.change(screen.getByLabelText("Current password"), {
+            target: { value: "current-password" },
+        });
+        fireEvent.click(screen.getByRole("checkbox"));
+        const sendButton = screen.getByRole("button", { name: "Send verification code" });
+        fireEvent.click(sendButton);
+
+        expect(await screen.findByRole("alert")).toHaveTextContent(
+            "Phone verification SMS is not configured for this environment",
+        );
+        fireEvent.click(sendButton);
+        expect(await screen.findByRole("alert")).toHaveTextContent(
+            "The SMS provider rejected the verification message",
+        );
+    });
+
     it("prefills an unverified registered phone for same-number SMS verification", async () => {
         mocks.getMyProfile.mockResolvedValueOnce({ ...profile, phone_verified_at: null });
         renderProfile();

@@ -1,8 +1,11 @@
 import { lazy, Suspense, useCallback } from "react";
 import { useTranslation } from "react-i18next";
+import { Link } from "react-router-dom";
 import { useAuth } from "../../context/AuthContext";
 import useApi from "../../hooks/useApi";
 import { getMyPlan, saveMyPlan } from "../../services/retirementService";
+import { getMyProfile } from "../../services/profileApi";
+import { getProfileAge } from "../../components/Retirement/retirementAge";
 import Card from "../../components/ui/Card";
 import ErrorState from "../../components/ui/ErrorState";
 import LoadingState from "../../components/ui/LoadingState";
@@ -71,8 +74,10 @@ function RetirementProjection() {
         return result;
     }, []);
     const planApi = useApi(fetchPlan, [loginSessionId]);
+    const profileApi = useApi(() => getMyProfile(), [loginSessionId]);
     const plan = planApi.data?.plan || null;
     const projection = planApi.data?.projection || null;
+    const profileAge = getProfileAge(profileApi.data?.date_of_birth);
     const validProjection = isValidProjectionData(plan, projection);
 
     async function saveProjection(payload) {
@@ -121,12 +126,30 @@ function RetirementProjection() {
                         </Card>
                     </div>
 
-                    <PlanForm
-                        key={loginSessionId || "projection-session"}
-                        plan={plan}
-                        projection={projection}
-                        onSaved={saveProjection}
-                    />
+                    {profileApi.loading && profileApi.data === null ? (
+                        <SkeletonLoader variant="form" label={t("worker.retirement.loadingProfile")} />
+                    ) : profileApi.error && profileApi.data === null ? (
+                        <ErrorState
+                            message={t("worker.common.errors.load")}
+                            title={t("worker.common.profileUnableToLoad")}
+                            retryLabel={t("worker.common.tryAgain")}
+                            onRetry={profileApi.refetch}
+                        />
+                    ) : profileAge === null ? (
+                        <div className="state-block" role="alert">
+                            <span className="state-title">{t("worker.retirement.dateOfBirthRequiredTitle")}</span>
+                            <span>{t("worker.retirement.dateOfBirthRequiredMessage")}</span>
+                            <Link to="/worker/profile">{t("worker.retirement.completeProfile")}</Link>
+                        </div>
+                    ) : (
+                        <PlanForm
+                            key={loginSessionId || "projection-session"}
+                            plan={plan}
+                            projection={projection}
+                            profileAge={profileAge}
+                            onSaved={saveProjection}
+                        />
+                    )}
 
                     {projection && !validProjection && (
                         <div className="state-block retirement-projection-empty" role="status">

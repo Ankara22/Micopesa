@@ -1,7 +1,8 @@
 const { randomUUID } = require("node:crypto");
 const { writeAuditLog } = require("../utils/auditLog");
-const { normalizeKenyanPhone } = require("../utils/kenyanPhone");
+const { normalizeKenyanPhone, normalizedPhoneSql } = require("../utils/kenyanPhone");
 const { normalizeRecipient } = require("./communicationDeliveryPolicy");
+const { isEssentialNotification } = require("./notificationEventPolicy");
 
 const CHANNELS = new Set(["SMS", "EMAIL", "PUSH"]);
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -24,6 +25,14 @@ function repositoryError(message, code, statusCode) {
     error.code = code;
     error.statusCode = statusCode;
     return error;
+}
+
+function validPhoneSql(column) {
+    return `(${normalizedPhoneSql(column)}) ~ '^[+]254[17][0-9]{8}$'`;
+}
+
+function validEmailSql(column) {
+    return `btrim(COALESCE(${column}, '')) ~ '^[^[:space:]@]+@[^[:space:]@]+[.][^[:space:]@]+$'`;
 }
 
 function validateAdminNotification(input) {
@@ -75,17 +84,24 @@ function createNotificationRepository(pool) {
             ? `%${search.trim().replace(/[\\%_]/g, "\\$&")}%`
             : null;
         const result = await pool.query(
-            `SELECT u.user_id, u.full_name, u.role, u.phone,
-                    CASE WHEN u.email_verified THEN u.email ELSE NULL END AS email,
-                    u.email_verified,
+            `SELECT u.user_id, u.full_name, u.role,
+                       (${validPhoneSql("u.phone")}) AS phone_registered,
+                    (u.phone_verified_at IS NOT NULL) AS phone_verified,
+                    (u.phone_verified_at IS NOT NULL
+                     AND ${validPhoneSql("u.phone")}) AS phone_available,
+                    (${validEmailSql("COALESCE(u.email, u.pending_email)")}) AS email_registered,
+                    (COALESCE(u.email_verified, FALSE) AND u.email IS NOT NULL) AS email_verified,
+                    (COALESCE(u.email_verified, FALSE)
+                     AND ${validEmailSql("u.email")}) AS email_available,
+                    COALESCE(np.sms_enabled, FALSE) AS sms_enabled,
+                    COALESCE(np.email_enabled, FALSE) AS email_enabled,
                     (SELECT count(*)::integer FROM push_subscriptions ps
                      WHERE ps.user_id = u.user_id) AS push_subscription_count
              FROM users u
+             LEFT JOIN notification_preferences np ON np.user_id = u.user_id
              WHERE u.account_status = 'ACTIVE'
                AND ($1::text IS NULL OR
                     u.full_name ILIKE $1 ESCAPE E'\\\\' OR
-                    u.email ILIKE $1 ESCAPE E'\\\\' OR
-                    u.phone ILIKE $1 ESCAPE E'\\\\' OR
                     u.user_id ILIKE $1 ESCAPE E'\\\\')
              ORDER BY u.full_name, u.user_id
              LIMIT 100`,
@@ -108,12 +124,21 @@ function createNotificationRepository(pool) {
         const scopeQuery = senderRole === "FUND_MANAGER"
             ? `SELECT DISTINCT ON (u.user_id)
                     u.user_id, u.full_name, u.role,
-                    CASE WHEN u.phone ~ '^0[17][0-9]{8}$' THEN TRUE ELSE FALSE END AS phone_available,
-                    (u.email_verified AND u.email IS NOT NULL) AS email_available,
+                 (${validPhoneSql("u.phone")}) AS phone_registered,
+                 (u.phone_verified_at IS NOT NULL) AS phone_verified,
+                 (u.phone_verified_at IS NOT NULL
+                  AND ${validPhoneSql("u.phone")}) AS phone_available,
+                 (${validEmailSql("COALESCE(u.email, u.pending_email)")}) AS email_registered,
+                 (COALESCE(u.email_verified, FALSE) AND u.email IS NOT NULL) AS email_verified,
+                 (COALESCE(u.email_verified, FALSE)
+                  AND ${validEmailSql("u.email")}) AS email_available,
+                 COALESCE(np.sms_enabled, FALSE) AS sms_enabled,
+                 COALESCE(np.email_enabled, FALSE) AS email_enabled,
                     (SELECT count(*)::integer FROM push_subscriptions ps
                      WHERE ps.user_id = u.user_id) AS push_subscription_count,
                     f.fund_id AS scope_fund_id
                FROM users u
+               LEFT JOIN notification_preferences np ON np.user_id = u.user_id
                JOIN pension_accounts pa ON pa.user_id = u.user_id
                JOIN fund_allocations fa ON fa.account_id = pa.account_id
                JOIN funds f ON f.fund_id = fa.fund_id
@@ -147,13 +172,22 @@ function createNotificationRepository(pool) {
                     GROUP BY u.user_id, u.full_name, u.role
                  )
                SELECT sr.user_id, sr.full_name, sr.role,
-                    (u.phone ~ '^0[17][0-9]{8}$') AS phone_available,
-                    (u.email_verified AND u.email IS NOT NULL) AS email_available,
+                    (${validPhoneSql("u.phone")}) AS phone_registered,
+                    (u.phone_verified_at IS NOT NULL) AS phone_verified,
+                    (u.phone_verified_at IS NOT NULL
+                     AND ${validPhoneSql("u.phone")}) AS phone_available,
+                    (${validEmailSql("COALESCE(u.email, u.pending_email)")}) AS email_registered,
+                    (COALESCE(u.email_verified, FALSE) AND u.email IS NOT NULL) AS email_verified,
+                    (COALESCE(u.email_verified, FALSE)
+                     AND ${validEmailSql("u.email")}) AS email_available,
+                    COALESCE(np.sms_enabled, FALSE) AS sms_enabled,
+                    COALESCE(np.email_enabled, FALSE) AS email_enabled,
                     (SELECT count(*)::integer FROM push_subscriptions ps
                      WHERE ps.user_id = u.user_id) AS push_subscription_count,
                     sr.scope_fund_id
                FROM scoped_recipients sr
                JOIN users u ON u.user_id = sr.user_id
+               LEFT JOIN notification_preferences np ON np.user_id = u.user_id
                WHERE ($2::text IS NULL OR sr.full_name ILIKE $2 ESCAPE E'\\\\'
                       OR sr.user_id ILIKE $2 ESCAPE E'\\\\')
                ORDER BY sr.full_name, sr.user_id
@@ -179,6 +213,7 @@ function createNotificationRepository(pool) {
         fundId = null,
         testSms = false,
     }) {
+        const bypassOptionalPreferences = senderRole === "ADMIN";
         if (!Object.hasOwn(CATEGORIES_BY_ROLE, senderRole) ||
             !CATEGORIES_BY_ROLE[senderRole].has(category)) {
             throw repositoryError("This notification category is not permitted for this role.", "NOTIFICATION_CATEGORY_FORBIDDEN", 403);
@@ -218,10 +253,13 @@ function createNotificationRepository(pool) {
             const recipientResult = await pool.query(
                 `SELECT u.user_id, u.full_name, u.phone, u.phone_verified_at,
                         u.email, u.email_verified,
+                        COALESCE(np.sms_enabled, FALSE) AS sms_enabled,
+                        COALESCE(np.email_enabled, FALSE) AS email_enabled,
                         EXISTS (
                             SELECT 1 FROM push_subscriptions ps WHERE ps.user_id = u.user_id
                         ) AS has_push_subscription
                  FROM users u
+                 LEFT JOIN notification_preferences np ON np.user_id = u.user_id
                  WHERE u.user_id = ANY($1::varchar[]) AND u.account_status = 'ACTIVE'`,
                 [userIds]
             );
@@ -257,10 +295,19 @@ function createNotificationRepository(pool) {
                     if (channel === "SMS") {
                         if (!normalizeKenyanPhone(recipient.phone)) skipCode = "NOTIFICATION_PHONE_INVALID";
                         else if (!recipient.phone_verified_at) skipCode = "NOTIFICATION_PHONE_UNVERIFIED";
+                        else if (!bypassOptionalPreferences &&
+                            !isEssentialNotification({ notificationCategory: category }) &&
+                            recipient.sms_enabled !== true) {
+                            skipCode = "NOTIFICATION_PREFERENCE_DISABLED";
+                        }
                     } else if (channel === "EMAIL") {
                         if (!recipient.email_verified ||
                             !normalizeRecipient("EMAIL", recipient.email)) {
                             skipCode = "NOTIFICATION_EMAIL_UNAVAILABLE";
+                        } else if (!bypassOptionalPreferences &&
+                            !isEssentialNotification({ notificationCategory: category }) &&
+                            recipient.email_enabled !== true) {
+                            skipCode = "NOTIFICATION_PREFERENCE_DISABLED";
                         }
                     } else if (!recipient.has_push_subscription) {
                         skipCode = "NOTIFICATION_PUSH_UNAVAILABLE";
@@ -453,10 +500,14 @@ function createNotificationRepository(pool) {
                 throw repositoryError("The selected fund was not found.", "NOTIFICATION_SCOPE_NOT_FOUND", 404);
             }
             const recipientResult = await client.query(
-                `SELECT user_id, full_name, phone, email, email_verified, role
-                 FROM users
-                 WHERE user_id = $1 AND account_status = 'ACTIVE'
-                 FOR SHARE`,
+                `SELECT u.user_id, u.full_name, u.phone, u.phone_verified_at,
+                        u.email, u.email_verified, u.role,
+                        COALESCE(np.sms_enabled, FALSE) AS sms_enabled,
+                        COALESCE(np.email_enabled, FALSE) AS email_enabled
+                 FROM users u
+                 LEFT JOIN notification_preferences np ON np.user_id = u.user_id
+                 WHERE u.user_id = $1 AND u.account_status = 'ACTIVE'
+                 FOR SHARE OF u`,
                 [userId]
             );
             const user = recipientResult.rows[0];
@@ -478,12 +529,25 @@ function createNotificationRepository(pool) {
                 transactionStarted = false;
                 throw repositoryError("The selected recipient is outside your authorized scope.", "NOTIFICATION_FORBIDDEN", 403);
             }
-            if (channels.includes("SMS") && !normalizeKenyanPhone(user.phone)) {
-                throw repositoryError("The recipient does not have a valid mobile number.", "NOTIFICATION_CONTACT_UNAVAILABLE", 422);
+            if (channels.includes("SMS") &&
+                (!normalizeKenyanPhone(user.phone) || !user.phone_verified_at)) {
+                throw repositoryError("The recipient does not have a valid verified mobile number.", "NOTIFICATION_CONTACT_UNAVAILABLE", 422);
+            }
+            if (channels.includes("SMS") &&
+                !bypassOptionalPreferences &&
+                !isEssentialNotification({ notificationCategory: category }) &&
+                user.sms_enabled !== true) {
+                throw repositoryError("The recipient has disabled SMS notifications.", "NOTIFICATION_PREFERENCE_DISABLED", 422);
             }
             if (channels.includes("EMAIL") &&
                 (!user.email_verified || !normalizeRecipient("EMAIL", user.email))) {
                 throw repositoryError("The recipient does not have a verified email address.", "NOTIFICATION_CONTACT_UNAVAILABLE", 422);
+            }
+            if (channels.includes("EMAIL") &&
+                !bypassOptionalPreferences &&
+                !isEssentialNotification({ notificationCategory: category }) &&
+                user.email_enabled !== true) {
+                throw repositoryError("The recipient has disabled email notifications.", "NOTIFICATION_PREFERENCE_DISABLED", 422);
             }
             if (channels.includes("PUSH")) {
                 const subscriptions = await client.query(
@@ -931,6 +995,16 @@ function createNotificationRepository(pool) {
                AND notification_category = 'ACCOUNT_SERVICE'
                AND message = $4
                AND delivery_status = 'PENDING'
+               AND EXISTS (
+                   SELECT 1
+                   FROM users u
+                   JOIN notification_preferences np ON np.user_id = u.user_id
+                   WHERE u.user_id = notifications.user_id
+                     AND u.account_status = 'ACTIVE'
+                     AND u.phone_verified_at IS NOT NULL
+                     AND np.sms_enabled IS TRUE
+                     AND (${normalizedPhoneSql("u.phone")}) = notifications.recipient_phone
+               )
              RETURNING notification_id, recipient_phone, message, attempt_count, claim_token`,
             [claimToken, adminId, requestId, ADMIN_TEST_SMS_MESSAGE]
         );
@@ -1106,22 +1180,34 @@ function createNotificationRepository(pool) {
             await client.query("BEGIN");
             transactionStarted = true;
             const userResult = await client.query(
-                `SELECT user_id, full_name, phone, email, email_verified, account_status
-                 FROM users
-                 WHERE user_id = $1 AND account_status = 'ACTIVE'
-                 FOR SHARE`,
+                `SELECT u.user_id, u.full_name, u.phone, u.phone_verified_at,
+                        u.email, u.email_verified,
+                        u.account_status,
+                        COALESCE(np.sms_enabled, FALSE) AS sms_enabled,
+                        COALESCE(np.email_enabled, FALSE) AS email_enabled
+                 FROM users u
+                 LEFT JOIN notification_preferences np ON np.user_id = u.user_id
+                 WHERE u.user_id = $1 AND u.account_status = 'ACTIVE'
+                 FOR SHARE OF u`,
                 [userId]
             );
             const user = userResult.rows[0];
             if (!user) {
                 throw repositoryError("An active recipient was not found.", "NOTIFICATION_RECIPIENT_NOT_FOUND", 404);
             }
-            if (channels.includes("SMS") && !normalizeKenyanPhone(user.phone)) {
-                throw repositoryError("The recipient does not have a valid mobile number.", "NOTIFICATION_CONTACT_UNAVAILABLE", 422);
+            if (channels.includes("SMS") &&
+                (!normalizeKenyanPhone(user.phone) || !user.phone_verified_at)) {
+                throw repositoryError("The recipient does not have a valid verified mobile number.", "NOTIFICATION_CONTACT_UNAVAILABLE", 422);
             }
             if (channels.includes("EMAIL") &&
                 (!user.email_verified || !EMAIL_PATTERN.test(user.email || ""))) {
                 throw repositoryError("The recipient does not have a verified email address.", "NOTIFICATION_CONTACT_UNAVAILABLE", 422);
+            }
+            if (channels.includes("SMS") && user.sms_enabled !== true) {
+                throw repositoryError("The recipient has disabled SMS notifications.", "NOTIFICATION_PREFERENCE_DISABLED", 422);
+            }
+            if (channels.includes("EMAIL") && user.email_enabled !== true) {
+                throw repositoryError("The recipient has disabled email notifications.", "NOTIFICATION_PREFERENCE_DISABLED", 422);
             }
             if (channels.includes("PUSH")) {
                 const subscriptions = await client.query(
@@ -1238,7 +1324,7 @@ function createNotificationRepository(pool) {
                     (n.user_id IS NULL) AS is_external_recipient, n.recipient_phone,
                     n.created_by, cu.full_name AS created_by_name,
                     n.notification_type, n.message, n.email_subject, n.email_html_body, n.push_title,
-                    n.notification_category, n.scope_fund_id,
+                    n.notification_category, n.notification_event_type, n.scope_fund_id,
                     n.delivery_status, n.delivery_result, n.created_at,
                     COALESCE(n.sent_at, n.provider_accepted_at) AS sent_at,
                     n.provider_accepted_at, n.provider_message_id, n.delivered_at,

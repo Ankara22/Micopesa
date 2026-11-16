@@ -14,15 +14,46 @@ function createPushError(message, code) {
     return error;
 }
 
+function getWebPushConfigurationStatus(environment = process.env) {
+    const missingVariables = [];
+    const invalidVariables = [];
+    const publicKey = environment.WEB_PUSH_PUBLIC_KEY?.trim();
+    const privateKey = environment.WEB_PUSH_PRIVATE_KEY?.trim();
+    const subject = environment.WEB_PUSH_SUBJECT?.trim();
+    if (!publicKey) missingVariables.push("WEB_PUSH_PUBLIC_KEY");
+    if (!privateKey) missingVariables.push("WEB_PUSH_PRIVATE_KEY");
+    if (!subject) missingVariables.push("WEB_PUSH_SUBJECT");
+    else if (!/^(mailto:[^\s@]+@[^\s@]+\.[^\s@]+|https:\/\/[^\s]+)$/.test(subject)) {
+        invalidVariables.push("WEB_PUSH_SUBJECT");
+    }
+    const available = missingVariables.length === 0 && invalidVariables.length === 0;
+    return {
+        available,
+        errorCode: available
+            ? null
+            : invalidVariables.length
+                ? "PUSH_CONFIGURATION_INVALID"
+                : "PUSH_CONFIGURATION_MISSING",
+        missingVariables,
+        invalidVariables,
+    };
+}
+
 function getWebPushConfiguration(environment = process.env) {
     const publicKey = environment.WEB_PUSH_PUBLIC_KEY?.trim();
     const privateKey = environment.WEB_PUSH_PRIVATE_KEY?.trim();
     const subject = environment.WEB_PUSH_SUBJECT?.trim();
-    if (!publicKey || !privateKey || !subject) {
-        throw createPushError("Web Push configuration is incomplete.", "PUSH_CONFIGURATION_MISSING");
-    }
-    if (!/^(mailto:[^\s@]+@[^\s@]+\.[^\s@]+|https:\/\/[^\s]+)$/.test(subject)) {
-        throw createPushError("Web Push contact subject is invalid.", "PUSH_CONFIGURATION_INVALID");
+    const status = getWebPushConfigurationStatus(environment);
+    if (!status.available) {
+        const error = createPushError(
+            status.errorCode === "PUSH_CONFIGURATION_INVALID"
+                ? "Web Push contact subject is invalid."
+                : "Web Push configuration is incomplete.",
+            status.errorCode
+        );
+        error.missingVariables = status.missingVariables;
+        error.invalidVariables = status.invalidVariables;
+        throw error;
     }
     return { publicKey, privateKey, subject };
 }
@@ -135,6 +166,7 @@ function createWebPushService({
 module.exports = {
     createWebPushService,
     getWebPushConfiguration,
+    getWebPushConfigurationStatus,
     validatePushEndpoint,
     validatePushNavigation,
 };

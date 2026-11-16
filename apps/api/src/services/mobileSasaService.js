@@ -87,32 +87,168 @@ function normalizeKenyanSmsRecipient(phone) {
 }
 
 function isSmsConfigured(environment = process.env) {
+    return getSmsConfigurationStatus(environment).available;
+}
+
+function getNotificationSmsConfigurationStatus(environment = process.env) {
     const configuration = getSmsConfiguration(environment);
-    return environment.MOBILESASA_SMS_ENABLED === "true" &&
-        !configuration.conflict &&
-        Boolean(configuration.token.startsWith("mbs_") && configuration.senderId);
+    const missingVariables = [];
+    const invalidVariables = [];
+    if (configuration.conflict) {
+        if (environment.MOBILESASA_TOKEN && environment.MOBILE_SASA_SMS_API_TOKEN &&
+            environment.MOBILESASA_TOKEN !== environment.MOBILE_SASA_SMS_API_TOKEN) {
+            invalidVariables.push("MOBILESASA_TOKEN", "MOBILE_SASA_SMS_API_TOKEN");
+        }
+        if (environment.MOBILESASA_SENDER_ID && environment.MOBILE_SASA_SMS_SENDER_ID &&
+            environment.MOBILESASA_SENDER_ID !== environment.MOBILE_SASA_SMS_SENDER_ID) {
+            invalidVariables.push("MOBILESASA_SENDER_ID", "MOBILE_SASA_SMS_SENDER_ID");
+        }
+    }
+    if (!configuration.token.startsWith("mbs_")) {
+        const presentNames = ["MOBILESASA_TOKEN", "MOBILE_SASA_SMS_API_TOKEN"]
+            .filter((name) => typeof environment[name] === "string" && environment[name].trim());
+        if (presentNames.length) invalidVariables.push(...presentNames);
+        else missingVariables.push("MOBILESASA_TOKEN", "MOBILE_SASA_SMS_API_TOKEN");
+    }
+    if (!configuration.senderId) {
+        const presentNames = ["MOBILESASA_SENDER_ID", "MOBILE_SASA_SMS_SENDER_ID"]
+            .filter((name) => typeof environment[name] === "string" && environment[name].trim());
+        if (presentNames.length) invalidVariables.push(...presentNames);
+        else missingVariables.push("MOBILESASA_SENDER_ID", "MOBILE_SASA_SMS_SENDER_ID");
+    }
+    const uniqueMissing = [...new Set(missingVariables)];
+    const uniqueInvalid = [...new Set(invalidVariables)];
+    const available = uniqueMissing.length === 0 && uniqueInvalid.length === 0;
+    return {
+        available,
+        errorCode: available
+            ? null
+            : uniqueInvalid.length
+                ? "SMS_CONFIGURATION_INVALID"
+                : "SMS_CONFIGURATION_MISSING",
+        missingVariables: uniqueMissing,
+        invalidVariables: uniqueInvalid,
+    };
+}
+
+function getSmsConfigurationStatus(environment = process.env, { testOnly = false } = {}) {
+    const configuration = getSmsConfiguration(environment);
+    const missingVariables = [];
+    const invalidVariables = [];
+    const tokenNames = ["MOBILESASA_TOKEN", "MOBILE_SASA_SMS_API_TOKEN"];
+    const senderNames = ["MOBILESASA_SENDER_ID", "MOBILE_SASA_SMS_SENDER_ID"];
+    const isPresent = (value) => typeof value === "string" && Boolean(value.trim());
+
+    if (testOnly) {
+        if (environment.NODE_ENV !== "development") {
+            (isPresent(environment.NODE_ENV) ? invalidVariables : missingVariables).push("NODE_ENV");
+        }
+        if (environment.MOBILESASA_TEST_SMS_ENABLED !== "true") {
+            (isPresent(environment.MOBILESASA_TEST_SMS_ENABLED)
+                ? invalidVariables
+                : missingVariables).push("MOBILESASA_TEST_SMS_ENABLED");
+        }
+        if (environment.MOBILESASA_SMS_ENABLED === "true") {
+            invalidVariables.push("MOBILESASA_SMS_ENABLED");
+        }
+    } else if (environment.MOBILESASA_SMS_ENABLED !== "true") {
+        (isPresent(environment.MOBILESASA_SMS_ENABLED) ? invalidVariables : missingVariables)
+            .push("MOBILESASA_SMS_ENABLED");
+    }
+
+    if (configuration.conflict) {
+        if (environment.MOBILESASA_TOKEN && environment.MOBILE_SASA_SMS_API_TOKEN &&
+            environment.MOBILESASA_TOKEN !== environment.MOBILE_SASA_SMS_API_TOKEN) {
+            invalidVariables.push("MOBILESASA_TOKEN", "MOBILE_SASA_SMS_API_TOKEN");
+        }
+        if (environment.MOBILESASA_SENDER_ID && environment.MOBILE_SASA_SMS_SENDER_ID &&
+            environment.MOBILESASA_SENDER_ID !== environment.MOBILE_SASA_SMS_SENDER_ID) {
+            invalidVariables.push("MOBILESASA_SENDER_ID", "MOBILE_SASA_SMS_SENDER_ID");
+        }
+    }
+    if (!configuration.token.startsWith("mbs_")) {
+        const presentNames = tokenNames.filter((name) => isPresent(environment[name]));
+        if (presentNames.length) invalidVariables.push(...presentNames);
+        else missingVariables.push(...tokenNames);
+    }
+    if (!configuration.senderId) {
+        const presentNames = senderNames.filter((name) => isPresent(environment[name]));
+        if (presentNames.length) invalidVariables.push(...presentNames);
+        else missingVariables.push(...senderNames);
+    }
+
+    const uniqueMissing = [...new Set(missingVariables)];
+    const uniqueInvalid = [...new Set(invalidVariables)];
+    const testGateFailed = testOnly &&
+        (uniqueMissing.includes("NODE_ENV") ||
+            uniqueInvalid.includes("NODE_ENV") ||
+            uniqueMissing.includes("MOBILESASA_TEST_SMS_ENABLED") ||
+            uniqueInvalid.includes("MOBILESASA_TEST_SMS_ENABLED") ||
+            uniqueInvalid.includes("MOBILESASA_SMS_ENABLED"));
+    const available = uniqueMissing.length === 0 && uniqueInvalid.length === 0;
+    return {
+        available,
+        errorCode: available
+            ? null
+            : testGateFailed
+                ? "SMS_TEST_DISABLED"
+                : uniqueInvalid.length
+                    ? "SMS_CONFIGURATION_INVALID"
+                    : "SMS_CONFIGURATION_MISSING",
+        missingVariables: uniqueMissing,
+        invalidVariables: uniqueInvalid,
+    };
 }
 
 function isTestSmsConfigured(environment = process.env) {
-    const configuration = getSmsConfiguration(environment);
-    return environment.NODE_ENV === "development" &&
-        environment.MOBILESASA_TEST_SMS_ENABLED === "true" &&
-        environment.MOBILESASA_SMS_ENABLED !== "true" &&
-        !configuration.conflict &&
-        Boolean(configuration.token.startsWith("mbs_") && configuration.senderId);
+    return getSmsConfigurationStatus(environment, { testOnly: true }).available;
 }
 
 function isPhoneVerificationSmsConfigured(environment = process.env) {
     return environment.NODE_ENV === "development"
-        ? isTestSmsConfigured(environment)
+        ? getSmsConfigurationStatus(environment, { testOnly: true }).available
         : environment.NODE_ENV === "production" && isSmsConfigured(environment);
 }
 
 function isEmailConfigured(environment = process.env) {
-    return environment.MOBILESASA_EMAIL_ENABLED === "true" &&
-        hasConfiguration(environment, "MOBILE_SASA_EMAIL_API_TOKEN", "MOBILE_SASA_EMAIL_FROM") &&
-        (!environment.MOBILE_SASA_EMAIL_DOMAIN_UUID ||
-            DOMAIN_UUID_PATTERN.test(environment.MOBILE_SASA_EMAIL_DOMAIN_UUID.trim()));
+    return getEmailConfigurationStatus(environment).available;
+}
+
+function getEmailConfigurationStatus(environment = process.env) {
+    const missingVariables = [];
+    const invalidVariables = [];
+    if (environment.MOBILESASA_EMAIL_ENABLED !== "true") {
+        (typeof environment.MOBILESASA_EMAIL_ENABLED === "string" &&
+            environment.MOBILESASA_EMAIL_ENABLED.trim()
+            ? invalidVariables
+            : missingVariables).push("MOBILESASA_EMAIL_ENABLED");
+    }
+    const token = typeof environment.MOBILE_SASA_EMAIL_API_TOKEN === "string"
+        ? environment.MOBILE_SASA_EMAIL_API_TOKEN.trim()
+        : "";
+    if (!token) missingVariables.push("MOBILE_SASA_EMAIL_API_TOKEN");
+    else if (!token.startsWith("mbs_")) invalidVariables.push("MOBILE_SASA_EMAIL_API_TOKEN");
+    const sender = typeof environment.MOBILE_SASA_EMAIL_FROM === "string"
+        ? environment.MOBILE_SASA_EMAIL_FROM.trim()
+        : "";
+    if (!sender) missingVariables.push("MOBILE_SASA_EMAIL_FROM");
+    const domainUuid = typeof environment.MOBILE_SASA_EMAIL_DOMAIN_UUID === "string"
+        ? environment.MOBILE_SASA_EMAIL_DOMAIN_UUID.trim()
+        : "";
+    if (domainUuid && !DOMAIN_UUID_PATTERN.test(domainUuid)) {
+        invalidVariables.push("MOBILE_SASA_EMAIL_DOMAIN_UUID");
+    }
+    const available = missingVariables.length === 0 && invalidVariables.length === 0;
+    return {
+        available,
+        errorCode: available
+            ? null
+            : invalidVariables.length
+                ? "EMAIL_CONFIGURATION_INVALID"
+                : "EMAIL_CONFIGURATION_MISSING",
+        missingVariables: [...new Set(missingVariables)],
+        invalidVariables: [...new Set(invalidVariables)],
+    };
 }
 
 async function requestJson(url, body, {
@@ -259,15 +395,16 @@ async function requestJson(url, body, {
 async function sendSmsRequest(
     { to, message, trackingId },
     { environment, fetchImpl, timeoutMs },
-    { testOnly = false, diagnosticLogger } = {}
+    { testOnly = false, notificationDelivery = false, diagnosticLogger } = {}
 ) {
     const testModeAllowed = environment.NODE_ENV === "development" &&
         environment.MOBILESASA_TEST_SMS_ENABLED === "true" &&
         environment.MOBILESASA_SMS_ENABLED !== "true";
-    if (testOnly && !testModeAllowed) {
+    if (notificationDelivery &&
+        environment.MOBILESASA_NOTIFICATION_SMS_ENABLED !== "true") {
         throw smsFailure(
-            "SMS sending is disabled for this runtime.",
-            "SMS_TEST_DISABLED",
+            "Mobile Sasa notification SMS is disabled.",
+            "SMS_NOTIFICATION_DELIVERY_DISABLED",
             {
                 requestStarted: false,
                 httpResponseReceived: false,
@@ -294,13 +431,15 @@ async function sendSmsRequest(
             }
         );
     }
-    const smsConfiguration = getSmsConfiguration(environment);
-    if (smsConfiguration.conflict || (testOnly
-        ? !(smsConfiguration.token.startsWith("mbs_") && smsConfiguration.senderId)
-        : !isSmsConfigured(environment))) {
+    const configurationStatus = notificationDelivery
+        ? getNotificationSmsConfigurationStatus(environment)
+        : getSmsConfigurationStatus(environment, { testOnly });
+    if (!configurationStatus.available) {
         throw smsFailure(
-            "Mobile Sasa SMS configuration is missing or conflicting.",
-            "SMS_CONFIGURATION_MISSING",
+            testOnly && testModeAllowed
+                ? "Mobile Sasa test SMS configuration is incomplete or invalid."
+                : "Mobile Sasa SMS configuration is incomplete or invalid.",
+            configurationStatus.errorCode,
             {
                 requestStarted: false,
                 httpResponseReceived: false,
@@ -308,9 +447,12 @@ async function sendSmsRequest(
                 responseCode: null,
                 failureCategory: "configuration_failure",
                 deliveryOutcomeUnknown: false,
+                missingVariables: configurationStatus.missingVariables,
+                invalidVariables: configurationStatus.invalidVariables,
             }
         );
     }
+    const smsConfiguration = getSmsConfiguration(environment);
     const recipient = testOnly ? normalizeKenyanSmsRecipient(to) : to;
     if (typeof recipient !== "string" || !/^\+254[17]\d{8}$/.test(recipient) ||
         typeof message !== "string" || !message.trim() ||
@@ -434,12 +576,13 @@ async function sendSms(
         fetchImpl = global.fetch,
         timeoutMs = REQUEST_TIMEOUT_MS,
         logger = console,
+        notificationDelivery = false,
     } = {}
 ) {
     return sendSmsRequest(
         input,
         { environment, fetchImpl, timeoutMs },
-        { diagnosticLogger: logger }
+        { notificationDelivery, diagnosticLogger: logger }
     );
 }
 
@@ -491,8 +634,15 @@ async function sendEmail(
             "EMAIL_PRODUCTION_ONLY"
         );
     }
-    if (!isEmailConfigured(environment)) {
-        throw providerError("Mobile Sasa email configuration is missing.", "EMAIL_CONFIGURATION_MISSING");
+    const configurationStatus = getEmailConfigurationStatus(environment);
+    if (!configurationStatus.available) {
+        const error = providerError(
+            "Mobile Sasa email configuration is incomplete or invalid.",
+            configurationStatus.errorCode
+        );
+        error.missingVariables = configurationStatus.missingVariables;
+        error.invalidVariables = configurationStatus.invalidVariables;
+        throw error;
     }
     if (typeof to !== "string" || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to) ||
         typeof subject !== "string" || !subject.trim() ||
@@ -503,7 +653,7 @@ async function sendEmail(
 
     const domainUuid = environment.MOBILE_SASA_EMAIL_DOMAIN_UUID?.trim();
     if (domainUuid && !DOMAIN_UUID_PATTERN.test(domainUuid)) {
-        throw providerError("Mobile Sasa email domain configuration is invalid.", "EMAIL_CONFIGURATION_MISSING");
+        throw providerError("Mobile Sasa email domain configuration is invalid.", "EMAIL_CONFIGURATION_INVALID");
     }
     const { response, payload } = await requestJson(EMAIL_ENDPOINT, {
         to: [to],
@@ -565,6 +715,9 @@ async function sendEmail(
 }
 
 module.exports = {
+    getEmailConfigurationStatus,
+    getNotificationSmsConfigurationStatus,
+    getSmsConfigurationStatus,
     isEmailConfigured,
     isPhoneVerificationSmsConfigured,
     isSmsConfigured,

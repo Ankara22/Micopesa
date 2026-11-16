@@ -1,6 +1,6 @@
 # M-Pesa payment retry and recovery foundation
 
-The retry and recovery foundation keeps one contribution and transaction as the savings obligation, with distinct payment attempts linked to it. STK initiation remains disabled by the API's HTTP 503 gate; the orchestration service is not connected to that route.
+The retry and recovery foundation keeps one contribution and transaction as the savings obligation, with distinct payment attempts linked to it. The Daraja STK route is connected to the orchestration service, but returns HTTP 503 unless provider configuration and the environment-specific dispatch safeguards are satisfied. Sandbox dispatch requires explicit sandbox opt-ins; production dispatch additionally requires the live-payment opt-in. This documentation and its tests do not activate either mode.
 
 ## Attempt and obligation states
 

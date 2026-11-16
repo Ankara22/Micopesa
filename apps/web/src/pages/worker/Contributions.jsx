@@ -129,7 +129,7 @@ function Contributions() {
             <div className="section card">
                 <h2 className="card-title">{t("worker.contributions.makeContribution")}</h2>
                 <p className="page-subtitle" style={{ marginBottom: 14 }}>
-                    {t("worker.contributions.paymentUnavailable")}
+                    {t("worker.contributions.paymentInfo")}
                 </p>
                 <Button variant="primary" onClick={() => setContributionOpen(true)}>{t("worker.contributions.recordContribution")}</Button>
                 <Button variant="secondary" onClick={() => setDepositOpen(true)}>{t("worker.contributions.mpesaDeposit")}</Button>

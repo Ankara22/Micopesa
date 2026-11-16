@@ -22,12 +22,14 @@ const paymentStatuses = new Set([
     "FAILED",
     "CANCELLED",
     "TIMED_OUT",
+    "SETTLED",
 ]);
 const terminalStatuses = new Set([
     "FAILED",
     "CANCELLED",
     "TIMED_OUT",
 ]);
+const simulatorOutcomes = new Set(["SUCCESS", "PENDING", "FAILED", "UNKNOWN"]);
 
 function invalidResponse() {
     const error = new Error("Unexpected M-Pesa response.");
@@ -71,7 +73,14 @@ export async function initiateStkPush({
         typeof data.transaction_id !== "string" ||
         !data.transaction_id ||
         !transactionStatuses.has(data.transaction_status) ||
-        (data.payment_status !== undefined && !paymentStatuses.has(data.payment_status))
+        (data.payment_status !== undefined && !paymentStatuses.has(data.payment_status)) ||
+        (simulated && (
+            data.payment_provider !== "SIMULATED" ||
+            data.simulated !== true ||
+            data.no_real_money_transferred !== true ||
+            !simulatorOutcomes.has(data.payment_outcome)
+        )) ||
+        (!simulated && data.simulated === true)
     ) {
         throw invalidResponse();
     }
@@ -82,9 +91,23 @@ export async function getPaymentProvider() {
     const response = await api.get("/api/mpesa/provider");
     const data = getResponseData(response);
     if (
-        !["DARAJA", "SIMULATOR"].includes(data.provider) ||
-        typeof data.simulator_enabled !== "boolean" ||
-        (data.provider === "SIMULATOR" && data.simulator_enabled !== true)
+        !["DARAJA", "SIMULATOR", "UNAVAILABLE"].includes(data.provider) ||
+        !["sandbox", "production", "simulator", "unavailable"].includes(data.environment) ||
+        typeof data.payment_enabled !== "boolean" ||
+        ![
+            "MPESA_PAYMENTS_AVAILABLE",
+            "MPESA_PAYMENTS_DISABLED",
+            "MPESA_CONFIGURATION_INCOMPLETE",
+            "MPESA_CONFIGURATION_INVALID",
+            "MPESA_LEDGER_NOT_READY",
+        ].includes(data.message_key) ||
+        (data.provider === "DARAJA" &&
+            !["sandbox", "production"].includes(data.environment)) ||
+        (data.provider === "SIMULATOR" && data.environment !== "simulator") ||
+        (data.provider === "UNAVAILABLE" && data.environment !== "unavailable") ||
+        (data.environment === "simulator" && data.provider !== "SIMULATOR") ||
+        (data.provider === "UNAVAILABLE" && data.payment_enabled) ||
+        (data.payment_enabled !== (data.message_key === "MPESA_PAYMENTS_AVAILABLE"))
     ) {
         throw invalidResponse();
     }
@@ -120,6 +143,7 @@ function validatePaymentStatus(data) {
         !transactionStatuses.has(data.transaction_status) ||
         !contributionStatuses.has(data.contribution_status) ||
         typeof data.settlement_confirmed !== "boolean" ||
+        (data.attempt_status === "SETTLED" && !data.settlement_confirmed) ||
         (data.settlement_confirmed && (
             data.attempt_status === "FAILED" ||
             data.transaction_status !== "COMPLETED" ||
@@ -128,6 +152,12 @@ function validatePaymentStatus(data) {
         (data.settled_at !== null && typeof data.settled_at !== "string") ||
         (data.receipt_reference !== null &&
             (typeof data.receipt_reference !== "string" || data.receipt_reference.length > 25)) ||
+        (data.payment_provider !== undefined &&
+            !["DARAJA", "SIMULATED", "UNRESOLVED"].includes(data.payment_provider)) ||
+        (data.payment_provider === "SIMULATED" &&
+            data.payment_outcome !== null &&
+            data.payment_outcome !== undefined &&
+            !simulatorOutcomes.has(data.payment_outcome)) ||
         (terminalStatuses.has(data.attempt_status) && data.settlement_confirmed)
     ) {
         throw invalidResponse();

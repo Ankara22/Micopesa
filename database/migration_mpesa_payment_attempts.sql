@@ -21,7 +21,8 @@ CREATE TABLE mpesa_payment_attempts (
             'OUTCOME_UNKNOWN',
             'FAILED',
             'CANCELLED',
-            'TIMED_OUT'
+            'TIMED_OUT',
+            'SETTLED'
         )),
     checkout_request_id        VARCHAR(100),
     merchant_request_id        VARCHAR(100),

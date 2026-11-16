@@ -7,6 +7,8 @@ import i18n from "../../i18n";
 
 const serviceMocks = vi.hoisted(() => ({
     getMyPlan: vi.fn(),
+    getMyProfile: vi.fn(),
+    profileApiGet: vi.fn(),
     saveMyPlan: vi.fn(),
     useAuth: vi.fn(),
 }));
@@ -14,6 +16,9 @@ const serviceMocks = vi.hoisted(() => ({
 vi.mock("../../services/retirementService", () => ({
     getMyPlan: serviceMocks.getMyPlan,
     saveMyPlan: serviceMocks.saveMyPlan,
+}));
+vi.mock("../../services/api", () => ({
+    default: { get: serviceMocks.profileApiGet },
 }));
 vi.mock("../../context/AuthContext", () => ({
     useAuth: serviceMocks.useAuth,
@@ -49,6 +54,13 @@ const planResponse = {
     assumed_yearly_growth: 8,
 };
 
+function dateOfBirthForAge(age) {
+    const now = new Date();
+    return new Date(Date.UTC(now.getUTCFullYear() - age, now.getUTCMonth(), now.getUTCDate()))
+        .toISOString()
+        .slice(0, 10);
+}
+
 function renderPage() {
     return render(
         <ToastProvider>
@@ -69,6 +81,10 @@ describe("RetirementProjection", () => {
         vi.clearAllMocks();
         serviceMocks.useAuth.mockReturnValue({ loginSessionId: "projection-login-1" });
         serviceMocks.getMyPlan.mockResolvedValue(planResponse);
+        serviceMocks.getMyProfile.mockResolvedValue({ date_of_birth: dateOfBirthForAge(30) });
+        serviceMocks.profileApiGet.mockImplementation(async () => ({
+            data: { data: { user: await serviceMocks.getMyProfile() } },
+        }));
         serviceMocks.saveMyPlan.mockResolvedValue(planResponse);
     });
 
@@ -99,7 +115,7 @@ describe("RetirementProjection", () => {
         });
     });
 
-    it("allows a worker without a saved plan to enter assumptions and calculate", async () => {
+    it("allows a worker with a stored date of birth and no saved plan to calculate", async () => {
         serviceMocks.getMyPlan.mockResolvedValue({
             plan: null,
             projection: null,
@@ -110,10 +126,25 @@ describe("RetirementProjection", () => {
 
         expect(await screen.findByRole("heading", { name: "Calculate a retirement projection" })).toBeInTheDocument();
         expect(screen.getByLabelText("Your current age")).toBeInTheDocument();
+        expect(screen.getByLabelText("Your current age")).toHaveValue(30);
+        expect(screen.getByLabelText("Your current age")).toHaveAttribute("readonly");
+        expect(serviceMocks.profileApiGet).toHaveBeenCalledWith("/api/profile/me");
         expect(screen.getByLabelText("Target retirement age")).toBeInTheDocument();
         expect(screen.getByLabelText("Planned monthly contribution (KSh)")).toBeInTheDocument();
         expect(screen.getByRole("button", { name: "Calculate Projection" })).toBeInTheDocument();
         expect(screen.queryByTestId("projection-chart-data")).not.toBeInTheDocument();
+    });
+
+    it("blocks calculations and directs workers to their profile when date of birth is missing", async () => {
+        serviceMocks.getMyProfile.mockResolvedValue({ date_of_birth: null });
+        renderPage();
+
+        expect(await screen.findByRole("alert")).toHaveTextContent(
+            "Add a valid date of birth to your profile"
+        );
+        expect(screen.getByRole("link", { name: "Go to your profile" }))
+            .toHaveAttribute("href", "/worker/profile");
+        expect(screen.queryByRole("button", { name: "Calculate Projection" })).not.toBeInTheDocument();
     });
 
     it("explains when a saved projection predates yearly series data", async () => {
@@ -167,7 +198,6 @@ describe("RetirementProjection", () => {
 
         await waitFor(() => expect(serviceMocks.saveMyPlan).toHaveBeenCalledWith({
             target_amount: 1000000,
-            current_age: 30,
             target_retirement_age: 35,
             monthly_contribution_target: 300,
         }));
@@ -210,10 +240,11 @@ describe("RetirementProjection", () => {
         expect(await screen.findByRole("heading", { name: "Makadirio yako ya kustaafu" })).toBeInTheDocument();
         expect(screen.getByText(/Michango inayosubiri haijajumuishwa/)).toBeInTheDocument();
         const age = screen.getByLabelText("Umri wako wa sasa");
-        fireEvent.change(age, { target: { value: "31" } });
+        expect(age).toHaveAttribute("readonly");
+        const ageFromProfile = age.value;
 
         await i18n.changeLanguage("en");
         expect(screen.getByRole("heading", { name: "Your retirement projection" })).toBeInTheDocument();
-        expect(screen.getByLabelText("Your current age")).toHaveValue(31);
+        expect(screen.getByLabelText("Your current age")).toHaveValue(Number(ageFromProfile));
     });
 });

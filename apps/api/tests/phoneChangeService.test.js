@@ -7,6 +7,7 @@ const {
     verifyPhoneChange,
 } = require("../src/services/phoneChangeService");
 const { isSmsDispatcherEnabled } = require("../src/services/smsDeliveryDispatcher");
+const configuredSmsService = require("../src/services/smsService");
 
 const originalCompare = bcrypt.compare;
 
@@ -162,6 +163,11 @@ function createSmsService() {
     return {
         sent,
         isPhoneVerificationSmsConfigured: () => true,
+        getPhoneVerificationSmsConfiguration: () => ({
+            available: true,
+            mode: "injected",
+            provider: "MOCK_SMS",
+        }),
         async sendPhoneVerificationSms(request) {
             sent.push(request);
             return { accepted: true, status: "PROVIDER_ACCEPTED", messageId: "mock-1" };
@@ -173,11 +179,12 @@ async function requestCode(
     database,
     smsService,
     now = () => new Date("2026-11-05T12:00:00Z"),
-    newPhone = "0712 345 678"
+    newPhone = "0712 345 678",
+    currentPassword = "existing-password"
 ) {
     const result = await startPhoneChange({
         userId: "same-account",
-        currentPassword: "existing-password",
+        currentPassword,
         newPhone,
         confirmed: true,
     }, {
@@ -226,14 +233,65 @@ test("verified phone change preserves identity, role, account state, and passwor
     assert.ok(state.queries.every(({ sql }) => !/SET[^;]*password_hash\s*=/i.test(sql)));
 });
 
+test("phone verification uses the configured transactional provider after a temporary password change", async () => {
+    const { state, database } = createPhoneChangeDatabase();
+    const environment = {
+        NODE_ENV: "production",
+        TRANSACTIONAL_SMS_PROVIDER: "AFRICAS_TALKING",
+        AT_ENVIRONMENT: "production",
+        AT_USERNAME: "transactional-test",
+        AT_API_KEY: "test-key",
+        MOBILESASA_SMS_ENABLED: "false",
+    };
+    let requestBody;
+    bcrypt.compare = async (password) => password === "new-password-after-temporary-change";
+
+    await startPhoneChange({
+        userId: "same-account",
+        currentPassword: "new-password-after-temporary-change",
+        newPhone: "0712345678",
+        confirmed: true,
+    }, {
+        database,
+        smsService: configuredSmsService,
+        environment,
+        fetchImpl: async (_url, options) => {
+            requestBody = new URLSearchParams(options.body);
+            return {
+                ok: true,
+                status: 201,
+                async json() {
+                    return { SMSMessageData: { Recipients: [{ status: "Success" }] } };
+                },
+            };
+        },
+    });
+
+    const code = requestBody.get("message").match(/\b(\d{6})\b/)[1];
+    assert.equal(requestBody.get("to"), "+254712345678");
+    const verified = await verifyPhoneChange({
+        userId: "same-account",
+        code,
+    }, { database, now: () => new Date("2026-11-05T12:01:00Z") });
+
+    assert.deepEqual(verified, { phone: "+254712345678", phoneVerified: true });
+    assert.ok(state.account.phone_verified_at);
+});
+
 test("an unverified current phone can be verified without changing its stored value", async () => {
     const { state, database } = createPhoneChangeDatabase();
     const smsService = createSmsService();
     state.account.phone = "0700 000 001";
     state.account.phone_verified_at = null;
     bcrypt.compare = async (password, hash) =>
-        password === "existing-password" && hash === "unchanged-password-hash";
-    await requestCode(database, smsService, undefined, "0700 000 001");
+        password === "new-password-after-temporary-change" && hash === "unchanged-password-hash";
+    await requestCode(
+        database,
+        smsService,
+        undefined,
+        "0700 000 001",
+        "new-password-after-temporary-change"
+    );
     const code = smsService.sent[0].message.match(/\b(\d{6})\b/)[1];
 
     const result = await verifyPhoneChange({
@@ -314,6 +372,27 @@ test("expired verification codes cannot change the registered phone", async () =
     assert.equal(result.error.code, "PHONE_CHANGE_CODE_EXPIRED");
     assert.equal(state.challenge.pending_phone, null);
     assert.equal(state.account.phone, "254700000001");
+});
+
+test("a successfully used verification code cannot be reused", async () => {
+    const { state, database } = createPhoneChangeDatabase();
+    const smsService = createSmsService();
+    bcrypt.compare = async () => true;
+    await requestCode(database, smsService);
+    const code = smsService.sent[0].message.match(/\b(\d{6})\b/)[1];
+
+    const firstUse = await verifyPhoneChange({
+        userId: "same-account",
+        code,
+    }, { database, now: () => new Date("2026-11-05T12:01:00Z") });
+    const secondUse = await verifyPhoneChange({
+        userId: "same-account",
+        code,
+    }, { database, now: () => new Date("2026-11-05T12:02:00Z") });
+
+    assert.deepEqual(firstUse, { phone: "+254712345678", phoneVerified: true });
+    assert.equal(secondUse.error.code, "PHONE_CHANGE_CHALLENGE_NOT_FOUND");
+    assert.equal(state.account.phone, "+254712345678");
 });
 
 test("five failed verification attempts lock the challenge", async () => {
@@ -424,7 +503,7 @@ test("SMS configuration missing in development fails without enabling the genera
         smsService,
         environment: { NODE_ENV: "development", MOBILESASA_SMS_ENABLED: "false" },
     }), {
-        code: "PHONE_CHANGE_SMS_UNAVAILABLE",
+        code: "PHONE_CHANGE_SMS_CONFIGURATION_MISSING",
         statusCode: 503,
     });
     assert.equal(databaseConnections, 0);
@@ -461,6 +540,100 @@ test("development phone verification uses only its explicit SMS test switch", as
     assert.equal(smsService.sent[0].to, "+254712345678");
     assert.equal(isSmsDispatcherEnabled(environment), false);
     assert.equal(state.account.phone, "254700000001");
+});
+
+test("phone verification distinguishes provider rejection and unknown delivery outcomes", async (t) => {
+    for (const [providerErrorCode, expectedCode] of [
+        ["SMS_PROVIDER_REJECTED", "PHONE_CHANGE_SMS_PROVIDER_REJECTED"],
+        ["SMS_TIMEOUT", "PHONE_CHANGE_SMS_OUTCOME_UNKNOWN"],
+        ["SMS_CONFIGURATION_MISSING", "PHONE_CHANGE_SMS_CONFIGURATION_MISSING"],
+    ]) {
+        await t.test(providerErrorCode, async () => {
+            const { database } = createPhoneChangeDatabase();
+            const smsService = {
+                getPhoneVerificationSmsConfiguration: () => ({
+                    available: true,
+                    mode: "production-transactional",
+                    provider: "AFRICAS_TALKING",
+                }),
+                async sendPhoneVerificationSms() {
+                    throw Object.assign(new Error("private provider detail"), {
+                        code: providerErrorCode,
+                        diagnostics: {
+                            missingVariables: ["AT_API_KEY"],
+                            providerResponse: "private",
+                        },
+                    });
+                },
+            };
+            bcrypt.compare = async () => true;
+
+            await assert.rejects(startPhoneChange({
+                userId: "same-account",
+                currentPassword: "existing-password",
+                newPhone: "0712345678",
+                confirmed: true,
+            }, {
+                database,
+                smsService,
+                environment: testEnvironment(),
+            }), (error) => {
+                assert.equal(error.code, expectedCode);
+                assert.equal(error.diagnostics.providerErrorCode, providerErrorCode);
+                assert.doesNotMatch(JSON.stringify(error), /private provider detail|private/);
+                assert.deepEqual(error.diagnostics.missingVariables, ["AT_API_KEY"]);
+                return true;
+            });
+        });
+    }
+});
+
+test("phone verification supports production Mobile Sasa without sending a real SMS", async () => {
+    const { state, database } = createPhoneChangeDatabase();
+    const environment = {
+        NODE_ENV: "production",
+        TRANSACTIONAL_SMS_PROVIDER: "MOBILE_SASA",
+        MOBILESASA_SMS_ENABLED: "true",
+        MOBILE_SASA_SMS_API_TOKEN: "mbs_test-token",
+        MOBILE_SASA_SMS_SENDER_ID: "MicoPesa",
+    };
+    let request;
+    bcrypt.compare = async () => true;
+
+    await startPhoneChange({
+        userId: "same-account",
+        currentPassword: "existing-password",
+        newPhone: "0712345678",
+        confirmed: true,
+    }, {
+        database,
+        smsService: configuredSmsService,
+        environment,
+        fetchImpl: async (url, options) => {
+            request = { url, body: JSON.parse(options.body) };
+            return {
+                ok: true,
+                status: 200,
+                async json() {
+                    return {
+                        status: true,
+                        responseCode: "0200",
+                        messageId: "mock-mobile-sasa-id",
+                    };
+                },
+            };
+        },
+    });
+
+    assert.equal(request.url, "https://api.mobilesasa.com/v1/send/message");
+    assert.equal(request.body.phone, "+254712345678");
+    const code = request.body.message.match(/\b(\d{6})\b/)[1];
+    const result = await verifyPhoneChange({
+        userId: "same-account",
+        code,
+    }, { database, now: () => new Date("2026-11-05T12:01:00Z") });
+    assert.deepEqual(result, { phone: "+254712345678", phoneVerified: true });
+    assert.ok(state.account.phone_verified_at);
 });
 
 test("phone-code resend interval and three-per-hour limit are enforced", async () => {

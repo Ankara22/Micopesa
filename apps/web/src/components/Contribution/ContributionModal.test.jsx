@@ -53,6 +53,9 @@ describe("ContributionModal", () => {
         const onCreated = vi.fn().mockResolvedValue(true);
         renderModal({ onCreated });
 
+        expect(screen.getByRole("note")).toHaveTextContent(
+            "To pay with M-Pesa, use the separate M-Pesa deposit option.",
+        );
         expect(screen.getByLabelText(/Balanced/)).toBeInTheDocument();
         expect(screen.getByLabelText(/Growth/)).toBeInTheDocument();
         expect(screen.queryByLabelText(/Not available/)).not.toBeInTheDocument();

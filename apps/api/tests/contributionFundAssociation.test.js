@@ -84,8 +84,8 @@ function installDatabase(state) {
         }
         if (query.includes("FROM contributions c") && query.includes("fund_allocations")) {
             if (state.failContributionsHistory) {
-                const error = new Error('relation "mpesa_payment_attempts" does not exist');
-                error.code = "42P01";
+                const error = new Error('column a.provider_mode does not exist');
+                error.code = "42703";
                 throw error;
             }
             return {
@@ -100,7 +100,9 @@ function installDatabase(state) {
                             checkout_request_id: attempt?.checkout_request_id ?? null,
                             payment_provider: attempt?.provider_mode === "SIMULATOR"
                                 ? "SIMULATED"
-                                : attempt?.provider_mode === "DARAJA" ? "DARAJA" : "UNRESOLVED",
+                                : attempt?.provider_mode === "DARAJA"
+                                    ? "DARAJA"
+                                    : "UNRESOLVED",
                             fund_allocations: state.shares.filter(({ contribution_id }) =>
                                 contribution_id === contribution.contribution_id
                             ),
@@ -269,18 +271,21 @@ test("canonical schema defines payment attempts with their constraints and index
     assert.match(schemaSql, /CREATE TRIGGER trg_mpesa_payment_attempts_set_updated_at/);
 });
 
-test("contribution history reads simulated payment-attempt details", async () => {
+test("contribution history succeeds without unapplied provider classification metadata", async () => {
     const state = createState();
     state.contributions[0] = {
         ...state.contributions[0],
         contribution_id: CONTRIBUTION,
         transaction_id: TRANSACTION,
         account_id: ACCOUNT_A,
+        amount: "250.00",
+        channel: "MPESA",
+        contribution_status: "COMPLETED",
+        created_at: "2026-10-28T10:00:00.000Z",
     };
     state.paymentAttempts.push({
         transaction_id: TRANSACTION,
         checkout_request_id: `SIM${"A".repeat(22)}`,
-        provider_mode: "SIMULATOR",
     });
     const api = await createApi(state);
     try {
@@ -292,16 +297,65 @@ test("contribution history reads simulated payment-attempt details", async () =>
 
         assert.equal(response.status, 200);
         assert.match(historyQuery, /FROM mpesa_payment_attempts/);
-        assert.match(historyQuery, /a\.provider_mode/);
-        assert.doesNotMatch(historyQuery, /checkout_request_id LIKE 'SIM%'/);
+        assert.doesNotMatch(historyQuery, /provider_mode/);
+        assert.match(historyQuery, /ORDER BY c\.created_at DESC/);
         assert.equal(body.data[0].checkout_request_id, `SIM${"A".repeat(22)}`);
-        assert.equal(body.data[0].payment_provider, "SIMULATED");
+        assert.equal(body.data[0].payment_provider, "UNRESOLVED");
+        assert.equal(body.data[0].amount, "250.00");
+        assert.equal(body.data[0].contribution_status, "COMPLETED");
+        assert.equal(body.data[0].created_at, "2026-10-28T10:00:00.000Z");
     } finally {
         await api.close();
     }
 });
 
-test("contribution history safely reports a missing payment-attempt table", async () => {
+test("contribution history returns an empty list when the worker has no contributions", async () => {
+    const state = createState();
+    state.contributions = [];
+    const api = await createApi(state);
+    try {
+        const response = await api.request("/api/accounts/my-contributions", { method: "GET" });
+        const body = await response.json();
+
+        assert.equal(response.status, 200);
+        assert.deepEqual(body.data, []);
+    } finally {
+        await api.close();
+    }
+});
+
+test("contribution history works when optional payment metadata is absent", async () => {
+    const state = createState();
+    state.contributions = [{
+        contribution_id: CONTRIBUTION,
+        transaction_id: TRANSACTION,
+        account_id: ACCOUNT_A,
+        amount: "75.50",
+        channel: "BANK",
+        contribution_status: "PENDING",
+        created_at: "2026-10-28T10:00:00.000Z",
+    }];
+    const api = await createApi(state);
+    try {
+        const response = await api.request("/api/accounts/my-contributions", { method: "GET" });
+        const body = await response.json();
+        const historyQuery = state.poolQueries.find(({ query }) =>
+            query.includes("FROM contributions c")
+        )?.query;
+
+        assert.equal(response.status, 200);
+        assert.equal(body.data.length, 1);
+        assert.match(historyQuery, /LEFT JOIN LATERAL/);
+        assert.doesNotMatch(historyQuery, /provider_mode/);
+        assert.equal(body.data[0].checkout_request_id, null);
+        assert.equal(body.data[0].payment_provider, "UNRESOLVED");
+        assert.deepEqual(body.data[0].fund_allocations, []);
+    } finally {
+        await api.close();
+    }
+});
+
+test("contribution history reports database errors without exposing internal details", async () => {
     const state = createState();
     state.failContributionsHistory = true;
     const api = await createApi(state);
@@ -314,12 +368,10 @@ test("contribution history safely reports a missing payment-attempt table", asyn
 
         assert.equal(response.status, 500);
         assert.equal(body.message, "Failed to fetch contributions due to a server error");
+        assert.doesNotMatch(JSON.stringify(body), /provider_mode|column|SELECT|mpesa_payment_attempts/i);
         assert.equal(logs.length, 1);
         assert.equal(logs[0][0], "Failed to fetch contributions:");
-        assert.deepEqual(logs[0][1], {
-            code: "42P01",
-            message: 'relation "mpesa_payment_attempts" does not exist',
-        });
+        assert.deepEqual(logs[0][1], { code: "42703" });
     } finally {
         console.error = originalConsoleError;
         await api.close();

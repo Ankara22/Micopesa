@@ -704,6 +704,11 @@ async function verifyEmail(req, res) {
                 [userId]
             );
             await client.query(
+                `INSERT INTO notification_preferences (user_id, sms_enabled, email_enabled)
+                 VALUES ($1, FALSE, FALSE)`,
+                [userId]
+            );
+            await client.query(
                 `INSERT INTO kyc_records (user_id, national_id, date_of_birth, kyc_status)
                  VALUES ($1, $2, $3, 'PENDING')`,
                 [userId, pendingRegistration.national_id, pendingRegistration.date_of_birth]

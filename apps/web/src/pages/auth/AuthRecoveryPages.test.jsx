@@ -72,11 +72,13 @@ describe("email recovery pages", () => {
         await waitFor(() => expect(screen.getByRole("link", { name: "Sign in" })).toHaveAttribute("href", "/login"));
     });
 
-    it("validates a verification token and displays the server response", async () => {
+    it("waits for explicit confirmation before consuming an email-verification token", async () => {
         authEmailMocks.verifyEmail.mockResolvedValue({ message: "Email address verified successfully." });
         renderPage("/verify-email?token=email-token&flow=email-verification", <VerifyEmail />);
 
-        await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Email address verified successfully."));
+        expect(authEmailMocks.verifyEmail).not.toHaveBeenCalled();
+        fireEvent.click(screen.getByRole("button", { name: "Verify email address" }));
+        expect(await screen.findByRole("status")).toHaveTextContent("Email address verified successfully.");
         expect(authEmailMocks.verifyEmail).toHaveBeenCalledWith("email-token");
     });
 
@@ -97,10 +99,11 @@ describe("email recovery pages", () => {
         expect(authEmailMocks.resetPassword).not.toHaveBeenCalled();
     });
 
-    it("reports verification failures", () => {
+    it("reports verification failures after the user confirms the request", async () => {
         authEmailMocks.verifyEmail.mockRejectedValue(new Error("This verification link is invalid or expired."));
         renderPage("/verify-email?token=email-token&flow=email-verification", <VerifyEmail />);
-        expect(screen.getByRole("status")).toHaveTextContent("Verifying your email address");
+        expect(authEmailMocks.verifyEmail).not.toHaveBeenCalled();
+        fireEvent.click(screen.getByRole("button", { name: "Verify email address" }));
         return waitFor(() => {
             expect(screen.getByRole("alert")).toHaveTextContent("This verification link is invalid or expired.");
             expect(authEmailMocks.verifyEmail).toHaveBeenCalledWith("email-token");

@@ -4,11 +4,11 @@ const {
     validatePushEndpoint,
 } = require("../services/webPushService");
 const {
-    isEmailDispatcherEnabled,
+    getNotificationChannelAvailability,
+    getNotificationChannelAvailabilityMap,
     isSmsDispatcherEnabled,
 } = require("../services/smsDeliveryDispatcher");
 const mobileSasaService = require("../services/mobileSasaService");
-const { isDevelopmentDeliveryRuntime } = require("../services/communicationDeliveryPolicy");
 const { createNotificationEventService } = require("../services/notificationEventService");
 
 const SUBSCRIPTION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -56,24 +56,54 @@ function createNotificationController({
         return eventService;
     }
 
+    function withDeliveryDiagnostics(recipient, includeConfigurationDetails = false) {
+        const availability = getNotificationChannelAvailabilityMap(environment);
+        const diagnostics = {
+            sms_delivery_enabled: availability.sms.enabled,
+            email_delivery_enabled: availability.email.enabled,
+            push_delivery_enabled: availability.push.enabled,
+        };
+        if (includeConfigurationDetails) {
+            diagnostics.sms_delivery_diagnostic = availability.sms;
+            diagnostics.email_delivery_diagnostic = availability.email;
+            diagnostics.push_delivery_diagnostic = availability.push;
+        }
+        return {
+            ...recipient,
+            ...diagnostics,
+        };
+    }
+
+    function withPreferenceAvailability(preferences) {
+        const availability = getNotificationChannelAvailabilityMap(environment);
+        return {
+            ...preferences,
+            sms_delivery_enabled: availability.sms.enabled,
+            email_delivery_enabled: availability.email.enabled,
+            push_delivery_enabled: availability.push.enabled,
+        };
+    }
+
     return {
         async createNotification(req, res) {
-            if (isDevelopmentDeliveryRuntime(environment)) {
-                const channels = req.body?.channels;
-                if (Array.isArray(channels) &&
-                    channels.includes("SMS") && !isSmsDispatcherEnabled(environment)) {
+            const requestedChannels = req.body?.channels;
+            if (Array.isArray(requestedChannels)) {
+                for (const channel of requestedChannels) {
+                    if (!["SMS", "EMAIL", "PUSH"].includes(channel)) continue;
+                    const availability = getNotificationChannelAvailability(channel, environment);
+                    if (availability.enabled) continue;
+                    const code = availability.reason_code === "system_delivery_disabled"
+                        ? "NOTIFICATION_SYSTEM_DELIVERY_DISABLED"
+                        : availability.reason_code === "provider_configuration_invalid"
+                            ? "NOTIFICATION_PROVIDER_CONFIGURATION_INVALID"
+                            : availability.reason_code === "provider_configuration_missing"
+                                ? "NOTIFICATION_PROVIDER_CONFIGURATION_MISSING"
+                                : "NOTIFICATION_CHANNEL_UNAVAILABLE";
                     return res.status(503).json({
                         status: "error",
-                        code: "NOTIFICATION_SMS_UNAVAILABLE",
-                        message: "Development SMS delivery requires its explicit channel switch, Mobile Sasa configuration, and a non-empty allowlist.",
-                    });
-                }
-                if (Array.isArray(channels) &&
-                    channels.includes("EMAIL") && !isEmailDispatcherEnabled(environment)) {
-                    return res.status(503).json({
-                        status: "error",
-                        code: "NOTIFICATION_EMAIL_UNAVAILABLE",
-                        message: "Development email delivery requires its explicit channel switch, SMTP configuration, and a non-empty allowlist.",
+                        code,
+                        message: "The selected notification channel is unavailable.",
+                        data: { channel_availability: availability },
                     });
                 }
             }
@@ -348,7 +378,10 @@ function createNotificationController({
 
         async listRecipients(req, res) {
             try {
-                const data = await repository.listRecipients(req.query?.search || "");
+                const recipients = await repository.listRecipients(req.query?.search || "");
+                const data = recipients.map((recipient) =>
+                    withDeliveryDiagnostics(recipient, req.user?.role === "ADMIN")
+                );
                 return res.status(200).json({ status: "success", data });
             } catch (error) {
                 return sendError(res, error, "Could not retrieve notification recipients.");
@@ -357,11 +390,14 @@ function createNotificationController({
 
         async listRoleRecipients(req, res) {
             try {
-                const data = await repository.listRoleRecipients({
+                const recipients = await repository.listRoleRecipients({
                     senderId: req.user.userId,
                     senderRole: req.user.role,
                     search: req.query?.search || "",
                 });
+                const data = recipients.map((recipient) =>
+                    withDeliveryDiagnostics(recipient, req.user?.role === "ADMIN")
+                );
                 return res.status(200).json({ status: "success", data });
             } catch (error) {
                 return sendError(res, error, "Could not retrieve notification recipients.");
@@ -392,7 +428,10 @@ function createNotificationController({
         async getMyNotificationPreferences(req, res) {
             try {
                 const preferences = await getEventService().getPreferences(req.user.userId);
-                return res.status(200).json({ status: "success", data: preferences });
+                return res.status(200).json({
+                    status: "success",
+                    data: withPreferenceAvailability(preferences),
+                });
             } catch (error) {
                 return sendError(res, error, "Could not load notification preferences.");
             }
@@ -404,7 +443,10 @@ function createNotificationController({
                     req.user.userId,
                     req.body
                 );
-                return res.status(200).json({ status: "success", data: preferences });
+                return res.status(200).json({
+                    status: "success",
+                    data: withPreferenceAvailability(preferences),
+                });
             } catch (error) {
                 return sendError(res, error, "Could not update notification preferences.");
             }

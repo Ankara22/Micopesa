@@ -19,6 +19,8 @@ function createRolePool({
     scopeFundId = "fund-1",
     recipientRole = "WORKER",
     recipientIds = ["recipient-1"],
+    smsEnabled = true,
+    emailEnabled = true,
 } = {}) {
     const calls = [];
     const state = { notifications: [], audit: [] };
@@ -50,8 +52,11 @@ function createRolePool({
                         user_id: recipientId,
                         full_name: "Recipient One",
                         phone: "0712345678",
+                        phone_verified_at: new Date("2026-01-01T00:00:00.000Z"),
                         email: "worker@example.test",
                         email_verified: true,
+                        sms_enabled: smsEnabled,
+                        email_enabled: emailEnabled,
                         role: recipientRole,
                     }],
                 };
@@ -119,6 +124,8 @@ function createRolePool({
                                 phone_verified_at: new Date("2026-01-01T00:00:00.000Z"),
                                 email: "worker@example.test",
                                 email_verified: true,
+                                sms_enabled: smsEnabled,
+                                email_enabled: emailEnabled,
                                 has_push_subscription: false,
                             })).filter((recipient) => params[0].includes(recipient.user_id)),
                     };
@@ -128,6 +135,77 @@ function createRolePool({
         },
     };
 }
+
+test("optional notifications respect disabled channel preferences", async () => {
+    const { pool, state } = createRolePool({ smsEnabled: false, emailEnabled: false });
+    const repository = createNotificationRepository(pool);
+
+    await assert.rejects(() => repository.queueRoleNotifications({
+        senderId: "admin-1",
+        senderRole: "ADMIN",
+        userId: "recipient-1",
+        channels: ["SMS"],
+        message: "General announcement",
+        requestId: REQUEST_ID,
+        category: "ANNOUNCEMENT",
+    }), {
+        code: "NOTIFICATION_PREFERENCE_DISABLED",
+        statusCode: 422,
+    });
+
+    assert.equal(state.notifications.length, 0);
+});
+
+test("essential operational notifications bypass optional channel preferences for all sending roles", async () => {
+    const cases = [
+        {
+            senderId: "admin-1",
+            senderRole: "ADMIN",
+            category: "ACCOUNT_SERVICE",
+            recipientRole: "WORKER",
+        },
+        {
+            senderId: "manager-1",
+            senderRole: "FUND_MANAGER",
+            category: "CONTRIBUTION_REMINDER",
+            recipientRole: "WORKER",
+            fundId: "fund-1",
+        },
+        {
+            senderId: "regulator-1",
+            senderRole: "REGULATOR",
+            category: "REGULATORY_ADVISORY",
+            recipientRole: "FUND_MANAGER",
+            fundId: "fund-1",
+        },
+    ];
+
+    for (const notificationCase of cases) {
+        const { pool, state } = createRolePool({
+            recipientRole: notificationCase.recipientRole,
+            smsEnabled: false,
+            emailEnabled: false,
+        });
+        const repository = createNotificationRepository(pool);
+        const result = await repository.queueRoleNotifications({
+            senderId: notificationCase.senderId,
+            senderRole: notificationCase.senderRole,
+            userId: "recipient-1",
+            channels: ["EMAIL", "SMS"],
+            message: "Official operational notice",
+            subject: "MicoPesa service notice",
+            requestId: `${REQUEST_ID.slice(0, -1)}${cases.indexOf(notificationCase) + 2}`,
+            category: notificationCase.category,
+            fundId: notificationCase.fundId || null,
+        });
+
+        assert.equal(result.length, 2);
+        assert.deepEqual(
+            state.notifications.map(({ notification_type }) => notification_type).sort(),
+            ["EMAIL", "SMS"]
+        );
+    }
+});
 
 test("Fund Manager notifications require an active assigned-fund worker and record the scoped sender", async () => {
     const { pool, state, calls } = createRolePool();
@@ -151,6 +229,38 @@ test("Fund Manager notifications require an active assigned-fund worker and reco
     ]);
     assert.deepEqual(JSON.parse(state.audit[0].params[7]), ["notification-1"]);
     assert.match(calls.find(([sql]) => sql.includes("JOIN fund_allocations"))[0], /f\.managed_by = \$2/);
+});
+
+test("single-recipient SMS requires the registered phone to be verified", async () => {
+    const { pool, state } = createRolePool();
+    const userQuery = pool.connect;
+    pool.connect = async () => {
+        const client = await userQuery();
+        const originalQuery = client.query;
+        client.query = async (sql, params = []) => {
+            if (sql.includes("FROM users") && sql.includes("FOR SHARE")) {
+                const result = await originalQuery(sql, params);
+                result.rows[0].phone_verified_at = null;
+                return result;
+            }
+            return originalQuery(sql, params);
+        };
+        return client;
+    };
+    const repository = createNotificationRepository(pool);
+
+    await assert.rejects(() => repository.queueRoleNotifications({
+        senderId: "admin-1",
+        senderRole: "ADMIN",
+        userId: "recipient-1",
+        category: "ACCOUNT_SERVICE",
+        channels: ["SMS"],
+        message: "Synthetic account notice.",
+        requestId: REQUEST_ID,
+    }), {
+        code: "NOTIFICATION_CONTACT_UNAVAILABLE",
+    });
+    assert.equal(state.notifications.length, 0);
 });
 
 test("Fund Manager cannot target a worker outside managed funds", async () => {
@@ -238,7 +348,7 @@ test("recipient search and audit views are scoped and never return unmasked cont
 
     const recipientQuery = queries[0][0];
     assert.match(recipientQuery, /f\.managed_by = \$1/);
-    assert.doesNotMatch(recipientQuery, /u\.phone\s*,|u\.email\s*,/);
+    assert.doesNotMatch(recipientQuery, /SELECT[^\n]*u\.(?:phone|email)\s*,/i);
     assert.match(queries[1][0], /f\.managed_by = \$1/);
     assert.match(queries[1][0], /recipient_email_masked/);
     assert.match(queries[1][0], /recipient_phone_masked/);

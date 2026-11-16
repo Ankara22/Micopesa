@@ -272,6 +272,47 @@ test("verification email links use the configured frontend origin without sendin
     assert.equal([...verificationUrl.searchParams.keys()].join(","), "token,flow");
 });
 
+test("resending verification replaces prior active email tokens", async () => {
+    const statements = [];
+    const sentMessages = [];
+    pool.query = async (query, values) => {
+        statements.push({ query, values });
+        return { rows: [] };
+    };
+    nodemailer.createTransport = () => ({
+        sendMail: async (message) => {
+            sentMessages.push(message);
+            return { accepted: ["worker@example.test"], rejected: [], messageId: "mock-message-id" };
+        },
+    });
+    console.info = () => {};
+
+    await authEmailService.issueEmailToken({
+        userId: "mock-user",
+        email: "worker@example.test",
+        purpose: "EMAIL_VERIFICATION",
+    });
+    await authEmailService.issueEmailToken({
+        userId: "mock-user",
+        email: "worker@example.test",
+        purpose: "EMAIL_VERIFICATION",
+    });
+
+    const verificationUpdates = statements.filter(({ query, values }) =>
+        query.includes("UPDATE auth_tokens SET consumed_at = now()") &&
+        values[0] === "mock-user" &&
+        values[1] === "EMAIL_VERIFICATION"
+    );
+    const tokenInserts = statements.filter(({ query }) => query.includes("INSERT INTO auth_tokens"));
+    assert.equal(verificationUpdates.length, 2);
+    assert.equal(tokenInserts.length, 2);
+    assert.equal(sentMessages.length, 2);
+    assert.notEqual(
+        new URL(sentMessages[0].text.match(/https?:\/\/\S+/)[0]).searchParams.get("token"),
+        new URL(sentMessages[1].text.match(/https?:\/\/\S+/)[0]).searchParams.get("token"),
+    );
+});
+
 test("pending registration email uses one field-neutral verification message", async () => {
     process.env.EMAIL_PROVIDER = "GMAIL";
     process.env.FRONTEND_BASE_URL = "http://localhost:4178";

@@ -43,7 +43,7 @@ test("public STK initiation remains unavailable without provider or database acc
     await controller.startStkPush({}, res);
 
     assert.equal(res.statusCode, 503);
-    assert.match(res.body.message, /temporarily unavailable/i);
+    assert.equal(res.body.message_key, "MPESA_PAYMENTS_DISABLED");
     assert.equal(databaseCalls, 0);
 });
 

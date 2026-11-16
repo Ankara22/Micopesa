@@ -56,7 +56,7 @@ function createDeliveryError(channel, code, message) {
     return error;
 }
 
-function assertDevelopmentRecipientAllowed(channel, value, environment = process.env) {
+function assertDevelopmentDeliveryEnabled(channel, environment = process.env) {
     if (environment.NODE_ENV === "production") return;
     if (!isDevelopmentDeliveryRuntime(environment)) {
         throw createDeliveryError(
@@ -72,7 +72,11 @@ function assertDevelopmentRecipientAllowed(channel, value, environment = process
             `${channel} development delivery is not enabled.`
         );
     }
+}
 
+function assertDevelopmentRecipientAllowed(channel, value, environment = process.env) {
+    if (environment.NODE_ENV === "production") return;
+    assertDevelopmentDeliveryEnabled(channel, environment);
     const allowlist = parseAllowlist(channel, environment);
     if (!allowlist.length) {
         throw createDeliveryError(
@@ -81,10 +85,13 @@ function assertDevelopmentRecipientAllowed(channel, value, environment = process
             `${channel} development delivery has no valid allowlisted recipients.`
         );
     }
-
     const recipient = normalizeRecipient(channel, value);
     if (!recipient) {
-        throw createDeliveryError(channel, "INVALID_RECIPIENT", `A valid ${channel} recipient is required.`);
+        throw createDeliveryError(
+            channel,
+            "INVALID_RECIPIENT",
+            `A valid ${channel} recipient is required.`
+        );
     }
     if (!allowlist.includes(recipient)) {
         throw createDeliveryError(
@@ -96,6 +103,7 @@ function assertDevelopmentRecipientAllowed(channel, value, environment = process
 }
 
 module.exports = {
+    assertDevelopmentDeliveryEnabled,
     assertDevelopmentRecipientAllowed,
     developmentChannelEnabled,
     isDevelopmentDeliveryRuntime,
