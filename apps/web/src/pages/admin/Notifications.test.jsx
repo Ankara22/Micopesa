@@ -6,22 +6,16 @@ import Notifications from "./Notifications";
 
 const mocks = vi.hoisted(() => ({
     createNotification: vi.fn(),
-    getExternalSmsAvailability: vi.fn(),
     listNotificationRecipients: vi.fn(),
     listNotifications: vi.fn(),
-    sendExternalRecipientSms: vi.fn(),
-    sendAdminTestSms: vi.fn(),
     getMyNotificationPreferences: vi.fn(),
     updateMyNotificationPreferences: vi.fn(),
 }));
 
 vi.mock("../../services/adminService", () => ({
     createNotification: mocks.createNotification,
-    getExternalSmsAvailability: mocks.getExternalSmsAvailability,
     listNotificationRecipients: mocks.listNotificationRecipients,
     listNotifications: mocks.listNotifications,
-    sendExternalRecipientSms: mocks.sendExternalRecipientSms,
-    sendAdminTestSms: mocks.sendAdminTestSms,
 }));
 vi.mock("../../context/AuthContext", () => ({
     useAuth: () => ({ user: { user_id: "admin-1" } }),
@@ -33,6 +27,13 @@ vi.mock("../../services/notificationService", () => ({
 
 function renderPage() {
     return render(<ToastProvider><Notifications /></ToastProvider>);
+}
+
+async function selectRecipient(label) {
+    fireEvent.click(await screen.findByRole("button", {
+        name: "Search and select registered users",
+    }));
+    fireEvent.click(await screen.findByLabelText(label));
 }
 
 describe("admin unified notifications", () => {
@@ -50,38 +51,44 @@ describe("admin unified notifications", () => {
             value: { randomUUID: () => "4c3b9f30-7cb7-4b2f-83d1-1f24c9b2b1d5" },
         });
         mocks.listNotifications.mockResolvedValue([]);
-        mocks.getExternalSmsAvailability.mockResolvedValue({ enabled: false });
         mocks.listNotificationRecipients.mockResolvedValue([{
             user_id: "worker-1",
             full_name: "Akinyi Worker",
             role: "WORKER",
-            phone: "0712345678",
-            email: "worker@example.test",
+            phone_registered: true,
+            phone_verified: true,
+            phone_available: true,
+            sms_enabled: true,
+            sms_delivery_enabled: true,
+            email_registered: true,
+            email_verified: true,
+            email_available: true,
+            email_enabled: true,
+            email_delivery_enabled: true,
             push_subscription_count: 1,
+            push_delivery_enabled: true,
         }, {
             user_id: "worker-2",
             full_name: "Binti Worker",
             role: "WORKER",
-            phone: "",
-            email: "binti@example.test",
+            phone_registered: false,
+            phone_verified: false,
+            phone_available: false,
+            sms_enabled: true,
+            sms_delivery_enabled: true,
+            email_registered: true,
+            email_verified: true,
+            email_available: true,
+            email_enabled: true,
+            email_delivery_enabled: true,
             push_subscription_count: 0,
+            push_delivery_enabled: false,
         }]);
         mocks.createNotification.mockResolvedValue([
             { notification_id: "sms-1", notification_type: "SMS", delivery_status: "PENDING" },
             { notification_id: "email-1", notification_type: "EMAIL", delivery_status: "PENDING" },
             { notification_id: "push-1", notification_type: "PUSH", delivery_status: "PENDING" },
         ]);
-        mocks.sendAdminTestSms.mockResolvedValue([{
-            notification_id: "test-sms-1",
-            notification_type: "SMS",
-            delivery_status: "PENDING",
-        }]);
-        mocks.sendExternalRecipientSms.mockResolvedValue({
-            notification_id: "external-sms-1",
-            notification_type: "SMS",
-            recipient_phone: "+254712345678",
-            delivery_status: "PROVIDER_ACCEPTED",
-        });
     });
 
     afterEach(() => {
@@ -126,13 +133,14 @@ describe("admin unified notifications", () => {
         });
         renderPage();
 
-        fireEvent.click(await screen.findByLabelText("Akinyi Worker (Worker)"));
-        fireEvent.change(screen.getByLabelText("Search by name, email, phone, or account ID"), {
-            target: { value: "worker@example.test" },
+        await selectRecipient("Akinyi Worker (Worker)");
+        fireEvent.click(screen.getByRole("button", { name: "Search and select registered users" }));
+        fireEvent.change(screen.getByLabelText("Search by name or account ID"), {
+            target: { value: "Akinyi" },
         });
 
         await waitFor(() => {
-            expect(mocks.listNotificationRecipients).toHaveBeenLastCalledWith("worker@example.test");
+            expect(mocks.listNotificationRecipients).toHaveBeenLastCalledWith("Akinyi");
         });
         fireEvent.click(screen.getByLabelText("SMS"));
         fireEvent.click(screen.getByLabelText("Email"));
@@ -153,14 +161,15 @@ describe("admin unified notifications", () => {
         fireEvent.click(screen.getByRole("button", { name: "Preview" }));
         const dialog = await screen.findByRole("dialog", { name: "Review before queueing" });
         expect(dialog).toHaveTextContent("Akinyi Worker");
-        expect(dialog).toHaveTextContent("worker@example.test");
+        expect(dialog).toHaveTextContent("verified email on file");
+        expect(dialog).toHaveTextContent("verified phone on file");
+        expect(dialog).not.toHaveTextContent("worker@example.test");
+        expect(dialog).not.toHaveTextContent("0712345678");
         expect(dialog).toHaveTextContent("Your contribution was recorded.");
         expect(dialog).toHaveTextContent("Hello member");
         expect(dialog).not.toHaveTextContent("alert(1)");
         expect(dialog).toHaveTextContent("Preview only: nothing is queued or sent");
         expect(mocks.createNotification).not.toHaveBeenCalled();
-        expect(mocks.sendAdminTestSms).not.toHaveBeenCalled();
-        expect(mocks.sendExternalRecipientSms).not.toHaveBeenCalled();
 
         const confirm = screen.getByRole("button", { name: "Confirm and queue" });
         fireEvent.click(confirm);
@@ -238,44 +247,51 @@ describe("admin unified notifications", () => {
         expect(acceptedStatus).toHaveTextContent("Sent");
     });
 
-    it("previews the complete external message and requires consent before one send", async () => {
-        mocks.getExternalSmsAvailability.mockResolvedValue({ enabled: true });
+    it("shows user eligibility separately from exact system and provider configuration blockers", async () => {
+        mocks.listNotificationRecipients.mockResolvedValue([{
+            user_id: "worker-1",
+            full_name: "Akinyi Worker",
+            role: "WORKER",
+            phone_registered: true,
+            phone_verified: false,
+            sms_enabled: false,
+            sms_delivery_enabled: false,
+            sms_delivery_diagnostic: {
+                reason_code: "system_delivery_disabled",
+                missing_variables: ["MOBILESASA_NOTIFICATION_SMS_ENABLED"],
+                disabled_variables: [],
+                invalid_variables: [],
+            },
+            email_registered: true,
+            email_verified: true,
+            email_enabled: true,
+            email_delivery_enabled: false,
+            email_delivery_diagnostic: {
+                reason_code: "system_delivery_disabled",
+                missing_variables: [],
+                disabled_variables: ["COMMUNICATIONS_DEV_EMAIL_ENABLED"],
+                invalid_variables: [],
+            },
+            push_subscription_count: 0,
+            push_delivery_enabled: false,
+            push_delivery_diagnostic: {
+                reason_code: "environment_unsupported",
+                missing_variables: [],
+                invalid_variables: ["NODE_ENV"],
+            },
+        }]);
         renderPage();
 
-        const recipient = await screen.findByLabelText("Recipient phone number (E.164)");
-        fireEvent.change(recipient, { target: { value: "+254712345678" } });
-        fireEvent.change(screen.getByLabelText("Demonstration message"), {
-            target: { value: "Hello assessor,\nthis is a demonstration." },
-        });
-        const consent = screen.getByRole("checkbox", {
-            name: "I confirm that this recipient agreed to receive this one-time SMS.",
-        });
-        expect(screen.getByRole("button", { name: "Preview SMS" })).toBeDisabled();
-        fireEvent.click(consent);
-        fireEvent.click(screen.getByRole("button", { name: "Preview SMS" }));
-
-        const dialog = await screen.findByRole("dialog", { name: "Review external SMS" });
-        expect(dialog).toHaveTextContent("+254712345678");
-        expect(dialog).toHaveTextContent("Hello assessor,");
-        expect(dialog).toHaveTextContent("this is a demonstration.");
-        expect(mocks.sendExternalRecipientSms).not.toHaveBeenCalled();
-
-        const confirm = screen.getByRole("button", { name: "Confirm and send one SMS" });
-        fireEvent.click(confirm);
-        fireEvent.click(confirm);
-        await waitFor(() => expect(mocks.sendExternalRecipientSms).toHaveBeenCalledTimes(1));
-        expect(mocks.sendExternalRecipientSms).toHaveBeenCalledWith({
-            recipient_phone: "+254712345678",
-            message: "Hello assessor,\nthis is a demonstration.",
-            recipient_consented: true,
-            confirmed: true,
-            request_id: "4c3b9f30-7cb7-4b2f-83d1-1f24c9b2b1d5",
-        });
-        await waitFor(() => {
-            expect(screen.getAllByText(
-                "Mobile Sasa accepted the SMS. Delivery is not yet confirmed."
-            ).length).toBeGreaterThan(0);
-        });
+        await selectRecipient("Akinyi Worker (Worker)");
+        const diagnostics = screen.getByLabelText("Selected recipient channel availability");
+        expect(diagnostics).toHaveTextContent("Registered phone number is not verified");
+        expect(diagnostics).toHaveTextContent(
+            "System-level delivery for this channel is disabled"
+        );
+        expect(diagnostics).toHaveTextContent("MOBILESASA_NOTIFICATION_SMS_ENABLED");
+        expect(diagnostics).toHaveTextContent("System-level delivery for this channel is disabled");
+        expect(diagnostics).toHaveTextContent("No registered push subscription");
+        expect(diagnostics).toHaveTextContent("This channel is not supported in the current environment");
     });
 
     it("updates a queued email with SMTP acceptance without claiming inbox delivery", async () => {
@@ -293,7 +309,7 @@ describe("admin unified notifications", () => {
             }];
         });
         renderPage();
-        fireEvent.click(await screen.findByLabelText("Akinyi Worker (Worker)"));
+        await selectRecipient("Akinyi Worker (Worker)");
         fireEvent.click(screen.getByLabelText("Email"));
         fireEvent.change(screen.getByLabelText("Email subject"), {
             target: { value: "Account update" },
@@ -313,18 +329,9 @@ describe("admin unified notifications", () => {
         )).toBeInTheDocument();
     });
 
-    it("keeps the external recipient form unavailable when the feature flag is off", async () => {
-        renderPage();
-        expect(await screen.findByText(
-            "External-recipient SMS is disabled. Mobile Sasa approval and the required production settings must be in place before it can be used."
-        )).toBeInTheDocument();
-        expect(screen.queryByLabelText("Recipient phone number (E.164)")).not.toBeInTheDocument();
-        expect(mocks.sendExternalRecipientSms).not.toHaveBeenCalled();
-    });
-
     it("keeps composed values when the interface language changes", async () => {
         renderPage();
-        fireEvent.click(await screen.findByLabelText("Akinyi Worker (Worker)"));
+        await selectRecipient("Akinyi Worker (Worker)");
         fireEvent.click(screen.getByLabelText("SMS"));
         fireEvent.change(screen.getByLabelText("Message"), {
             target: { value: "Keep this message" },
@@ -334,8 +341,64 @@ describe("admin unified notifications", () => {
 
         expect(screen.getByLabelText("Ujumbe")).toHaveValue("Keep this message");
         expect(screen.getByRole("checkbox", { name: "SMS" })).toBeChecked();
-        expect(screen.getByRole("checkbox", { name: "Akinyi Worker (Mfanyakazi)" })).toBeChecked();
+        expect(screen.getByRole("button", { name: "Ondoa Akinyi Worker" })).toBeInTheDocument();
     });
+
+    it("searches, selects, removes, and limits registered recipients in the dropdown", async () => {
+        const recipients = Array.from({ length: 101 }, (_, index) => ({
+            user_id: `worker-${index + 1}`,
+            full_name: `Worker ${index + 1}`,
+            role: "WORKER",
+            phone_registered: true,
+            phone_verified: true,
+            phone_available: true,
+            sms_enabled: true,
+            sms_delivery_enabled: true,
+            email_registered: true,
+            email_verified: true,
+            email_available: true,
+            email_enabled: true,
+            email_delivery_enabled: true,
+            push_subscription_count: 0,
+            push_delivery_enabled: false,
+        }));
+        mocks.listNotificationRecipients.mockResolvedValue(recipients);
+        renderPage();
+
+        expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+        fireEvent.click(await screen.findByRole("button", {
+            name: "Search and select registered users",
+        }));
+        expect(screen.getByRole("listbox")).toBeInTheDocument();
+        fireEvent.change(screen.getByLabelText("Search by name or account ID"), {
+            target: { value: "Worker 1" },
+        });
+        await waitFor(() => {
+            expect(mocks.listNotificationRecipients).toHaveBeenLastCalledWith("Worker 1");
+        });
+        fireEvent.change(screen.getByLabelText("Search by name or account ID"), {
+            target: { value: "" },
+        });
+        await waitFor(() => {
+            expect(mocks.listNotificationRecipients).toHaveBeenLastCalledWith("");
+        });
+        fireEvent.click(screen.getByRole("button", { name: "Search and select registered users" }));
+        await selectRecipient("Worker 1 (Worker)");
+        await selectRecipient("Worker 2 (Worker)");
+
+        expect(screen.getByText("2 recipient(s) selected (maximum 100).")).toBeInTheDocument();
+        fireEvent.click(screen.getByRole("button", { name: "Remove Worker 1" }));
+        expect(screen.getByText("1 recipient(s) selected (maximum 100).")).toBeInTheDocument();
+
+        for (let index = 3; index <= 101; index += 1) {
+            await selectRecipient(`Worker ${index} (Worker)`);
+        }
+        expect(screen.getByText("100 recipient(s) selected (maximum 100).")).toBeInTheDocument();
+        await selectRecipient("Worker 1 (Worker)");
+        expect(screen.getByRole("alert")).toHaveTextContent(
+            "You can select up to 100 recipients per announcement."
+        );
+    }, 15000);
 
     it("shows persisted provider and delivery evidence in both languages", async () => {
         mocks.listNotifications.mockResolvedValue([{
@@ -364,10 +427,222 @@ describe("admin unified notifications", () => {
         expect(within(details).getByText("Muda wa kuthibitishwa kufika:")).toBeInTheDocument();
     });
 
+    it("explains why channels are unavailable for a newly registered unverified user", async () => {
+        mocks.listNotificationRecipients.mockResolvedValue([{
+            user_id: "new-worker",
+            full_name: "New Worker",
+            role: "WORKER",
+            phone_registered: true,
+            phone_verified: false,
+            phone_available: false,
+            sms_enabled: true,
+            sms_delivery_enabled: true,
+            email_registered: true,
+            email_verified: false,
+            email_available: false,
+            email_enabled: true,
+            email_delivery_enabled: true,
+            push_subscription_count: 0,
+        }]);
+        renderPage();
+
+        await selectRecipient("New Worker (Worker)");
+
+        expect(screen.getByLabelText("SMS")).toBeDisabled();
+        expect(screen.getByLabelText("Email")).toBeDisabled();
+        expect(screen.getByText(/Registered phone number is not verified/)).toBeInTheDocument();
+        expect(screen.getByText(/Registered email address is not verified/)).toBeInTheDocument();
+    });
+
+    it("allows Admin to send optional notifications to verified contacts despite opt-out", async () => {
+        mocks.listNotificationRecipients.mockResolvedValue([{
+            user_id: "opted-out-worker",
+            full_name: "Opted Out Worker",
+            role: "WORKER",
+            phone_registered: true,
+            phone_verified: true,
+            phone_available: true,
+            sms_enabled: false,
+            sms_delivery_enabled: true,
+            email_registered: true,
+            email_verified: true,
+            email_available: true,
+            email_enabled: false,
+            email_delivery_enabled: true,
+            push_subscription_count: 0,
+        }]);
+        renderPage();
+
+        await selectRecipient("Opted Out Worker (Worker)");
+
+        expect(screen.getByLabelText("SMS")).toBeEnabled();
+        expect(screen.getByLabelText("Email")).toBeEnabled();
+        expect(screen.queryByText(/notification preferences/)).not.toBeInTheDocument();
+    });
+
+    it("allows verified contacts for essential operational notifications despite optional opt-out", async () => {
+        mocks.listNotificationRecipients.mockResolvedValue([{
+            user_id: "essential-worker",
+            full_name: "Essential Worker",
+            role: "WORKER",
+            phone_registered: true,
+            phone_verified: true,
+            phone_available: true,
+            sms_enabled: false,
+            sms_delivery_enabled: true,
+            email_registered: true,
+            email_verified: true,
+            email_available: true,
+            email_enabled: false,
+            email_delivery_enabled: true,
+            push_subscription_count: 0,
+        }]);
+        renderPage();
+
+        await selectRecipient("Essential Worker (Worker)");
+        fireEvent.change(screen.getByLabelText("Notification category"), {
+            target: { value: "ACCOUNT_SERVICE" },
+        });
+
+        expect(screen.getByLabelText("SMS")).toBeEnabled();
+        expect(screen.getByLabelText("Email")).toBeEnabled();
+        expect(screen.getByText(/SMS — verified phone on file/)).toBeInTheDocument();
+        expect(screen.getByText(/Email — verified email on file/)).toBeInTheDocument();
+        expect(screen.queryByText(/notification preferences/)).not.toBeInTheDocument();
+    });
+
+    it("explains when verified and opted-in channels are disabled by system configuration", async () => {
+        mocks.listNotificationRecipients.mockResolvedValue([{
+            user_id: "worker-with-disabled-providers",
+            full_name: "Worker With Disabled Providers",
+            role: "WORKER",
+            phone_registered: true,
+            phone_verified: true,
+            phone_available: true,
+            sms_enabled: true,
+            sms_delivery_enabled: false,
+            email_registered: true,
+            email_verified: true,
+            email_available: true,
+            email_enabled: true,
+            email_delivery_enabled: false,
+            push_subscription_count: 0,
+        }]);
+        renderPage();
+
+        await selectRecipient("Worker With Disabled Providers (Worker)");
+
+        expect(screen.getByLabelText("SMS")).toBeDisabled();
+        expect(screen.getByLabelText("Email")).toBeDisabled();
+        expect(screen.getByText(/SMS delivery is disabled by system configuration/)).toBeInTheDocument();
+        expect(screen.getByText(/Email delivery is disabled by system configuration/)).toBeInTheDocument();
+    });
+
+    it("refreshes recipient diagnostics and replaces stale channel availability", async () => {
+        const refreshedRecipient = {
+            user_id: "worker-1",
+            full_name: "Akinyi Worker",
+            role: "WORKER",
+            phone_registered: true,
+            phone_verified: true,
+            phone_available: true,
+            sms_enabled: true,
+            sms_delivery_enabled: true,
+            email_registered: true,
+            email_verified: true,
+            email_available: true,
+            email_enabled: true,
+            email_delivery_enabled: false,
+            email_delivery_diagnostic: {
+                reason_code: "system_delivery_disabled",
+                missing_variables: [],
+                disabled_variables: ["COMMUNICATIONS_DEV_EMAIL_ENABLED"],
+                invalid_variables: [],
+            },
+            push_subscription_count: 1,
+            push_delivery_enabled: true,
+        };
+        mocks.listNotificationRecipients
+            .mockResolvedValueOnce([{
+                ...refreshedRecipient,
+                email_delivery_enabled: true,
+                email_delivery_diagnostic: { reason_code: null },
+            }])
+            .mockResolvedValueOnce([refreshedRecipient]);
+        renderPage();
+
+        await selectRecipient("Akinyi Worker (Worker)");
+        expect(screen.getByLabelText("Email")).toBeEnabled();
+
+        fireEvent.click(screen.getByRole("button", { name: "Refresh recipient diagnostics" }));
+
+        await waitFor(() => {
+            expect(mocks.listNotificationRecipients).toHaveBeenCalledTimes(2);
+            expect(screen.getByLabelText("Email")).toBeDisabled();
+            expect(screen.getByLabelText("Selected recipient channel availability"))
+                .toHaveTextContent("System-level delivery for this channel is disabled");
+        });
+    });
+
+    it("fails closed when refreshed recipient diagnostics return an API error", async () => {
+        mocks.listNotificationRecipients
+            .mockResolvedValueOnce([{
+                user_id: "worker-1",
+                full_name: "Akinyi Worker",
+                role: "WORKER",
+                phone_registered: true,
+                phone_verified: true,
+                phone_available: true,
+                sms_enabled: true,
+                sms_delivery_enabled: true,
+                email_registered: true,
+                email_verified: true,
+                email_available: true,
+                email_enabled: true,
+                email_delivery_enabled: true,
+                push_subscription_count: 1,
+                push_delivery_enabled: true,
+            }])
+            .mockRejectedValueOnce({ message: "Request failed" });
+        renderPage();
+
+        await selectRecipient("Akinyi Worker (Worker)");
+        fireEvent.click(screen.getByRole("button", { name: "Refresh recipient diagnostics" }));
+
+        await waitFor(() => {
+            expect(screen.getByLabelText("Email")).toBeDisabled();
+            expect(screen.getByLabelText("Selected recipient channel availability"))
+                .toHaveTextContent("Recipient delivery diagnostics are unavailable or stale");
+        });
+        expect(screen.getByRole("alert"))
+            .toHaveTextContent("Recipient delivery diagnostics are unavailable or stale");
+    });
+
+    it("maps normalized API errors to the exact system-disabled reason", async () => {
+        mocks.createNotification.mockRejectedValue({
+            data: { code: "NOTIFICATION_SYSTEM_DELIVERY_DISABLED" },
+        });
+        renderPage();
+
+        await selectRecipient("Akinyi Worker (Worker)");
+        fireEvent.click(screen.getByLabelText("Email"));
+        fireEvent.change(screen.getByLabelText("Email subject"), {
+            target: { value: "Account update" },
+        });
+        fireEvent.change(screen.getByLabelText("Message"), {
+            target: { value: "Your account has an update." },
+        });
+        fireEvent.click(screen.getByRole("button", { name: "Preview" }));
+        fireEvent.click(await screen.findByRole("button", { name: "Confirm and queue" }));
+
+        expect(await screen.findByText("System-level delivery for this channel is disabled"))
+            .toBeInTheDocument();
+    });
+
     it("previews and queues one announcement for multiple selected users", async () => {
         renderPage();
-        fireEvent.click(await screen.findByLabelText("Akinyi Worker (Worker)"));
-        fireEvent.click(screen.getByLabelText("Binti Worker (Worker)"));
+        await selectRecipient("Akinyi Worker (Worker)");
+        await selectRecipient("Binti Worker (Worker)");
         fireEvent.click(screen.getByLabelText("SMS"));
         fireEvent.change(screen.getByLabelText("Message"), {
             target: { value: "Service update" },
@@ -397,7 +672,7 @@ describe("admin unified notifications", () => {
             last_error_code: "NOTIFICATION_PHONE_UNVERIFIED",
         }]);
         renderPage();
-        fireEvent.click(await screen.findByLabelText("Akinyi Worker (Worker)"));
+        await selectRecipient("Akinyi Worker (Worker)");
         fireEvent.click(screen.getByLabelText("SMS"));
         fireEvent.change(screen.getByLabelText("Message"), {
             target: { value: "Service update" },
@@ -412,6 +687,30 @@ describe("admin unified notifications", () => {
         )).toBeInTheDocument();
     });
 
+    it("shows transactional event policy separately from optional admin notifications", async () => {
+        mocks.listNotifications.mockResolvedValue([{
+            notification_id: "transactional-notification-1",
+            user_id: "worker-1",
+            recipient_name: "Worker One",
+            notification_category: "ACCOUNT_SERVICE",
+            notification_event_type: "CONTRIBUTION_CONFIRMED",
+            notification_type: "IN_APP",
+            message: "Your contribution has been confirmed.",
+            delivery_status: "PENDING",
+            created_at: "2026-01-01T00:00:00.000Z",
+        }]);
+        renderPage();
+
+        const card = (await screen.findByText("Your contribution has been confirmed."))
+            .closest(".notification-message-card");
+        fireEvent.click(within(card).getByRole("button", { name: "View" }));
+
+        const dialog = await screen.findByRole("dialog", { name: "Notification details" });
+        expect(dialog).toHaveTextContent(
+            "Essential transactional event (CONTRIBUTION_CONFIRMED); active account and verified contact required."
+        );
+    });
+
     it("lets administrators opt in to push on their own authenticated device", async () => {
         renderPage();
 
@@ -419,73 +718,4 @@ describe("admin unified notifications", () => {
         expect(screen.getByRole("button", { name: "Enable browser notifications" })).toBeInTheDocument();
     });
 
-    it("previews the fixed self-test message and only queues after explicit confirmation", async () => {
-        renderPage();
-
-        fireEvent.click(await screen.findByRole("button", { name: "Preview test SMS" }));
-        const dialog = await screen.findByRole("dialog", { name: "Review your test SMS" });
-        expect(dialog).toHaveTextContent("Your registered administrator phone number");
-        expect(dialog).toHaveTextContent(
-            "MicoPesa test notification: Your SMS notification service is working. This is a test message. No payment has been made."
-        );
-        expect(mocks.sendAdminTestSms).not.toHaveBeenCalled();
-
-        fireEvent.click(screen.getByRole("button", { name: "Confirm test SMS" }));
-        await waitFor(() => {
-            expect(mocks.sendAdminTestSms).toHaveBeenCalledWith(
-                "4c3b9f30-7cb7-4b2f-83d1-1f24c9b2b1d5"
-            );
-        });
-        expect(await screen.findByText("Pending", { selector: ".badge" })).toBeInTheDocument();
-        expect(await screen.findByText(/Queued and waiting for the dispatcher/)).toBeInTheDocument();
-
-        mocks.listNotifications.mockResolvedValue([{
-            notification_id: "test-sms-1",
-            notification_type: "SMS",
-            delivery_status: "PROVIDER_ACCEPTED",
-            delivery_result: { provider: "MOBILE_SASA" },
-        }]);
-        fireEvent.click(screen.getByRole("button", { name: "Refresh delivery statuses" }));
-        expect(await screen.findByText(/Accepted by Mobile Sasa; final delivery has not been confirmed/))
-            .toBeInTheDocument();
-
-        mocks.listNotifications.mockResolvedValue([{
-            notification_id: "test-sms-1",
-            notification_type: "SMS",
-            delivery_status: "DELIVERED",
-            delivery_result: { provider: "MOBILE_SASA" },
-        }]);
-        fireEvent.click(screen.getByRole("button", { name: "Refresh delivery statuses" }));
-        expect(await screen.findByText("Delivery was confirmed by the provider.")).toBeInTheDocument();
-    });
-
-    it("labels failed and unknown outcomes distinctly instead of reporting success", async () => {
-        mocks.sendAdminTestSms.mockResolvedValueOnce([{
-            notification_id: "test-sms-failed",
-            notification_type: "SMS",
-            delivery_status: "FAILED",
-        }]);
-        renderPage();
-        fireEvent.click(await screen.findByRole("button", { name: "Preview test SMS" }));
-        fireEvent.click(await screen.findByRole("button", { name: "Confirm test SMS" }));
-
-        expect(await screen.findByText("Failed", { selector: ".badge" })).toBeInTheDocument();
-        expect(await screen.findByRole("alert")).toHaveTextContent("The test SMS failed.");
-
-        cleanup();
-        mocks.listNotifications.mockResolvedValue([]);
-        mocks.sendAdminTestSms.mockResolvedValueOnce([{
-            notification_id: "test-sms-unknown",
-            notification_type: "SMS",
-            delivery_status: "UNKNOWN",
-        }]);
-        renderPage();
-        fireEvent.click(await screen.findByRole("button", { name: "Preview test SMS" }));
-        fireEvent.click(await screen.findByRole("button", { name: "Confirm test SMS" }));
-
-        expect(await screen.findByText("Unknown", { selector: ".badge" })).toBeInTheDocument();
-        expect(await screen.findByText(
-            "The provider outcome is unknown. The test SMS will not be resent automatically."
-        )).toBeInTheDocument();
-    });
 });
