@@ -1,6 +1,8 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import PlanForm from "./PlanForm";
+
+afterEach(cleanup);
 
 const toastMock = vi.hoisted(() => ({
     success: vi.fn(),
@@ -20,6 +22,25 @@ function deferred() {
 }
 
 describe("retirement plan form loading", () => {
+    it("uses and locks an asynchronously loaded profile age", async () => {
+        const onSaved = vi.fn().mockResolvedValue({ plan: { plan_id: "plan-1" } });
+        const { container, rerender } = render(<PlanForm onSaved={onSaved} />);
+        const age = screen.getByLabelText("Your current age");
+
+        expect(age).toHaveValue(null);
+        expect(age).toHaveAttribute("readonly");
+
+        rerender(<PlanForm profileAge={36} onSaved={onSaved} />);
+        expect(age).toHaveValue(36);
+        expect(age).toHaveAttribute("readonly");
+
+        fireEvent.submit(container.querySelector("form"));
+        await waitFor(() => {
+            expect(onSaved).toHaveBeenCalledTimes(1);
+        });
+        expect(onSaved.mock.calls[0][0]).not.toHaveProperty("current_age");
+    });
+
     it("shows a pending state and ignores duplicate submissions until save finishes", async () => {
         const request = deferred();
         const onSaved = vi.fn(() => request.promise);

@@ -127,6 +127,32 @@ test("server identity must exactly match the configured validation endpoint", as
     }
 });
 
+test("migration-validation identity guard continues to reject the primary Micopesa database", async () => {
+    assert.throws(
+        () => getValidationDatabaseConfig({
+            ...validEnvironment,
+            MICOPESA_VALIDATION_DB_NAME: "Micopesa",
+        }),
+        /Wrong database name/
+    );
+
+    const config = getValidationDatabaseConfig(validEnvironment);
+    const client = {
+        async query() {
+            return {
+                rows: [{
+                    database_name: "Micopesa",
+                    server_address: "127.0.0.1",
+                    server_port: 5433,
+                }],
+            };
+        },
+    };
+    await assert.rejects(verifyValidationDatabaseIdentity(client, config), {
+        message: PREFLIGHT_DIAGNOSTICS.wrongDatabaseName,
+    });
+});
+
 test("preflight diagnostics classify connection and identity failures without error details", () => {
     const cases = [
         [{ code: "ECONNREFUSED" }, PREFLIGHT_DIAGNOSTICS.connectionRefused],

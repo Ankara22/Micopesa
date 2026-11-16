@@ -28,6 +28,7 @@ function UserManagement() {
     const [staffForm, setStaffForm] = useState({
         full_name: "",
         phone: "",
+        email: "",
         role: "FUND_MANAGER",
     });
     const [staffSubmitting, setStaffSubmitting] = useState(false);
@@ -51,7 +52,7 @@ function UserManagement() {
             } else {
                 toast.error(result.message);
             }
-            setStaffForm({ full_name: "", phone: "", role: "FUND_MANAGER" });
+            setStaffForm({ full_name: "", phone: "", email: "", role: "FUND_MANAGER" });
             await usersApi.refetch();
         } catch (err) {
             toast.error(err.message || "Failed to create staff account.");
@@ -179,7 +180,7 @@ function UserManagement() {
             <div className="admin-stack">
                 <AdminCard
                     title="Create a staff account"
-                    description="A temporary password is sent through the configured SMS gateway. The staff member must change it at first sign-in."
+                    description="A temporary password is sent through the configured SMS gateway. The staff member must change it at first sign-in and verify their phone and email before using them for notifications."
                 >
                     <form className="admin-form-grid" onSubmit={handleStaffSubmit}>
                         <FormField
@@ -200,6 +201,16 @@ function UserManagement() {
                             onChange={(event) => setStaffForm((form) => ({ ...form, phone: event.target.value }))}
                             disabled={staffSubmitting}
                             autoComplete="tel"
+                            required
+                        />
+                        <FormField
+                            id="staff-email"
+                            label="Email address"
+                            type="email"
+                            value={staffForm.email}
+                            onChange={(event) => setStaffForm((form) => ({ ...form, email: event.target.value }))}
+                            disabled={staffSubmitting}
+                            autoComplete="email"
                             required
                         />
                         <div className="admin-span-all">

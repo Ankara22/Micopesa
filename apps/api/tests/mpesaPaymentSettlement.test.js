@@ -1,9 +1,6 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const {
-    createSmsDeliveryDispatcher,
-} = require("../src/services/smsDeliveryDispatcher");
-const {
     createMpesaPaymentAttemptRepository,
 } = require("../src/services/mpesaPaymentAttemptRepository");
 
@@ -19,6 +16,9 @@ function createSettlementPool({
     account = {},
     otherTransactions = [],
     failOn = null,
+    forceReceiptConstraintViolation = false,
+    ledgerStatus = "ACTIVE",
+    ledgerReadinessError = null,
 } = {}) {
     const state = {
         attempt: {
@@ -92,6 +92,12 @@ function createSettlementPool({
             verification_id: 1,
             callback_fingerprint: "a".repeat(64),
             callback_status: "VERIFIED",
+            checkout_request_id: "checkout_001",
+            merchant_request_id: "merchant_001",
+            callback_result_code: "0",
+            callback_amount: "2500.00",
+            callback_phone: "254712345678",
+            callback_receipt: "QAB123XYZ",
         },
         fundSnapshots: [
             { contribution_id: "contribution_001", fund_id: "fund_001", allocated_amount: "1750.00" },
@@ -100,6 +106,8 @@ function createSettlementPool({
         queries: [],
         rollbackCount: 0,
         failOn,
+        ledgerStatus,
+        ledgerReadinessError,
         snapshot: null,
     };
 
@@ -147,6 +155,15 @@ function createSettlementPool({
             state.snapshot = null;
             return { rows: [] };
         }
+        if (statement === "SELECT pg_advisory_xact_lock_shared(1296917328, 1280265540)") {
+            return { rows: [] };
+        }
+        if (statement === "SELECT status FROM pension_ledger WHERE singleton_key IS TRUE") {
+            if (state.ledgerReadinessError) throw state.ledgerReadinessError;
+            return {
+                rows: state.ledgerStatus === null ? [] : [{ status: state.ledgerStatus }],
+            };
+        }
         if (statement === "SAVEPOINT contribution_sms_notification" ||
             statement === "RELEASE SAVEPOINT contribution_sms_notification" ||
             statement === "ROLLBACK TO SAVEPOINT contribution_sms_notification") {
@@ -172,8 +189,18 @@ function createSettlementPool({
                 callback.callback_fingerprint === params[0] &&
                 callback.attempt_id === params[1] &&
                 String(callback.verification_id) === String(params[2]) &&
-                callback.callback_status === "VERIFIED";
-            return { rows: matches ? [{ callback_id: callback.callback_id }] : [] };
+                callback.callback_status === "VERIFIED" &&
+                callback.checkout_request_id === params[3] &&
+                callback.merchant_request_id === params[4] &&
+                callback.callback_result_code === "0" &&
+                Number(callback.callback_amount) === Number(params[5]) &&
+                callback.callback_phone === params[6] &&
+                callback.callback_receipt === params[7];
+            return {
+                rows: matches
+                    ? [{ callback_id: callback.callback_id, callback_receipt: callback.callback_receipt }]
+                    : [],
+            };
         }
         if (statement.includes("FROM simulator_payment_confirmations")) {
             const confirmation = state.simulatorConfirmation;
@@ -250,6 +277,12 @@ function createSettlementPool({
             if (statement.includes("transaction_status = 'COMPLETED'")) {
                 const [receipt, checkoutId, phone, description, transactionId] = params;
                 if (transactionId !== state.transaction.transaction_id) return { rows: [] };
+                if (forceReceiptConstraintViolation && receipt !== null) {
+                    const error = new Error("Unique constraint violation");
+                    error.code = "23505";
+                    error.constraint = "uq_transactions_mpesa_receipt";
+                    throw error;
+                }
                 state.transaction = {
                     ...state.transaction,
                     transaction_status: "COMPLETED",
@@ -330,6 +363,14 @@ function createSettlementPool({
                 : [] };
         }
         if (statement.startsWith("UPDATE mpesa_payment_attempts")) {
+            if (statement.includes("SET attempt_status = 'SETTLED'")) {
+                if (!["PROMPT_ACCEPTED", "OUTCOME_UNKNOWN"].includes(state.attempt.attempt_status) ||
+                    params[0] !== state.attempt.attempt_id) {
+                    return { rows: [] };
+                }
+                state.attempt.attempt_status = "SETTLED";
+                return { rows: [{ attempt_id: state.attempt.attempt_id }] };
+            }
             state.attempt.attempt_status = params[0];
             return { rows: [{ attempt_id: state.attempt.attempt_id }] };
         }
@@ -359,10 +400,15 @@ function createSettlementPool({
 }
 
 function setup(options = {}) {
-    const database = createSettlementPool(options);
+    const { ledgerEnforcementEnabled = false, ...poolOptions } = options;
+    const database = createSettlementPool(poolOptions);
     return {
         ...database,
-        repository: createMpesaPaymentAttemptRepository(database.pool),
+        repository: createMpesaPaymentAttemptRepository(database.pool, {
+            environmentProvider: () => ({
+                MPESA_LEDGER_ENFORCEMENT_ENABLED: ledgerEnforcementEnabled ? "true" : "false",
+            }),
+        }),
     };
 }
 
@@ -370,8 +416,8 @@ function settlementRequest(overrides = {}) {
     return { attemptId: "attempt_001", verificationId: 1, ...overrides };
 }
 
-test("atomically completes transaction and contribution and credits balance exactly once", async () => {
-    const { repository, state } = setup();
+test("atomically settles callback-verified payment with its durable M-Pesa receipt", async () => {
+    const { repository, state } = setup({ ledgerEnforcementEnabled: true });
     const result = await repository.settleVerifiedPayment(settlementRequest());
 
     assert.equal(result.alreadySettled, false);
@@ -384,24 +430,40 @@ test("atomically completes transaction and contribution and credits balance exac
     assert.equal(state.movements.length, 1);
     assert.equal(state.movements[0].movement_type, "CONTRIBUTION_SETTLEMENT");
     assert.equal(state.movements[0].provider_mode, "DARAJA");
-    assert.equal(state.attempt.attempt_status, "PROMPT_ACCEPTED");
-    assert.equal(state.notifications.length, 1);
-    assert.equal(state.notifications[0].recipient_phone, "0712345678");
-    assert.equal(state.notifications[0].deduplication_key, "mpesa-contribution:attempt_001");
-    assert.equal(state.notifications[0].message, "MicoPesa: We received your contribution of KES 2500.00. Ref: QAB123XYZ.");
+    assert.equal(state.attempt.attempt_status, "SETTLED");
+    assert.equal(state.notifications.length, 0);
     assert.deepEqual(state.fundSnapshots, [
         { contribution_id: "contribution_001", fund_id: "fund_001", allocated_amount: "1750.00" },
         { contribution_id: "contribution_001", fund_id: "fund_002", allocated_amount: "750.00" },
     ]);
     assert.ok(state.queries.some((sql) => sql.includes("FOR UPDATE OF t, c, u")));
     assert.equal(state.queries.filter((sql) => sql.startsWith("UPDATE pension_accounts")).length, 0);
-    assert.ok(
-        state.queries.findIndex((sql) => sql.startsWith("INSERT INTO notifications")) <
-        state.queries.indexOf("COMMIT")
+    assert.equal(
+        state.queries.some((sql) => sql.startsWith("INSERT INTO notifications")),
+        false
     );
-    assert.match(
-        state.queries.find((sql) => sql.startsWith("INSERT INTO notifications")),
-        /ON CONFLICT \(deduplication_key\)/
+    assert.ok(state.queries.includes("SELECT status FROM pension_ledger WHERE singleton_key IS TRUE"));
+});
+
+test("ledger enforcement rolls back a verified settlement before financial writes", async () => {
+    const { repository, state } = setup({
+        ledgerEnforcementEnabled: true,
+        ledgerStatus: "PREPARING",
+    });
+
+    await assert.rejects(repository.settleVerifiedPayment(settlementRequest()), {
+        code: "PENSION_LEDGER_NOT_ACTIVE",
+        statusCode: 503,
+    });
+
+    assert.equal(state.transaction.transaction_status, "PENDING");
+    assert.equal(state.contribution.contribution_status, "PENDING");
+    assert.equal(state.account.current_balance, "1000.00");
+    assert.equal(state.movements.length, 0);
+    assert.equal(state.rollbackCount, 1);
+    assert.equal(
+        state.queries.some((sql) => sql.startsWith("UPDATE transactions")),
+        false
     );
 });
 
@@ -424,7 +486,7 @@ test("query-only verified success settles without inventing a receipt", async ()
     assert.equal(state.transaction.transaction_phone, "254712345678");
     assert.equal(state.account.current_balance, "3500.00");
     assert.equal(state.queries.filter((sql) => sql.startsWith("UPDATE pension_accounts")).length, 0);
-    assert.equal(state.notifications.length, 1);
+    assert.equal(state.notifications.length, 0);
 });
 
 test("simulated query success uses its synthetic reference and never queues an SMS", async () => {
@@ -508,7 +570,7 @@ test("simulated verified failure does not complete the contribution or credit it
     assert.equal(state.notifications.length, 0);
 });
 
-test("late matching callback attaches receipt to a query-only settlement without a second credit", async () => {
+test("late callback receipt does not alter an already-settled query-only transaction", async () => {
     const { repository, state } = setup({
         verification: {
             verification_source: "RECONCILIATION",
@@ -535,15 +597,22 @@ test("late matching callback attaches receipt to a query-only settlement without
         verification_id: 2,
         callback_fingerprint: "a".repeat(64),
         callback_status: "VERIFIED",
+        checkout_request_id: "checkout_001",
+        merchant_request_id: "merchant_001",
+        callback_result_code: "0",
+        callback_amount: "2500.00",
+        callback_phone: "254712345678",
+        callback_receipt: "LATE123RECEIPT",
     };
 
     const result = await repository.settleVerifiedPayment(settlementRequest({ verificationId: 2 }));
 
     assert.equal(result.alreadySettled, true);
-    assert.equal(state.transaction.mpesa_receipt, "LATE123RECEIPT");
+    assert.equal(state.transaction.mpesa_receipt, null);
     assert.equal(state.account.current_balance, "3500.00");
     assert.equal(state.queries.filter((sql) => sql.startsWith("UPDATE pension_accounts")).length, 0);
-    assert.equal(state.notifications.length, 1);
+    assert.equal(state.notifications.length, 0);
+    assert.equal(state.queries.some((sql) => /SET mpesa_receipt/.test(sql)), false);
 });
 
 test("conflicting late callback receipt cannot replace an already-settled receipt", async () => {
@@ -565,8 +634,8 @@ test("conflicting late callback receipt cannot replace an already-settled receip
     assert.equal(state.account.current_balance, "1000.00");
 });
 
-test("notification insertion and settlement roll back atomically on persistence failure", async () => {
-    const { repository, state } = setup({ failOn: "INSERT INTO notifications" });
+test("ledger persistence failure rolls back settlement atomically", async () => {
+    const { repository, state } = setup({ failOn: "INSERT INTO pension_account_movements" });
     await assert.rejects(repository.settleVerifiedPayment(settlementRequest()));
 
     assert.equal(state.transaction.transaction_status, "PENDING");
@@ -576,61 +645,43 @@ test("notification insertion and settlement roll back atomically on persistence 
     assert.equal(state.rollbackCount, 1);
 });
 
-test("duplicate settlement returns already-settled without a second balance credit", async () => {
+test("repeated callback settlement cannot create duplicate ledger movements", async () => {
     const { repository, state } = setup({ attempt: { attempt_status: "OUTCOME_UNKNOWN" } });
     await repository.settleVerifiedPayment(settlementRequest());
     const repeated = await repository.settleVerifiedPayment(settlementRequest());
 
     assert.equal(repeated.alreadySettled, true);
+    assert.equal(state.transaction.mpesa_receipt, "QAB123XYZ");
     assert.equal(state.account.current_balance, "3500.00");
-    assert.equal(state.attempt.attempt_status, "OUTCOME_UNKNOWN");
+    assert.equal(state.attempt.attempt_status, "SETTLED");
     assert.equal(state.movements.length, 1);
-    assert.equal(state.notifications.length, 1);
+    assert.equal(state.notifications.length, 0);
 });
 
-test("SMS delivery failure cannot reverse a committed contribution or balance credit", async () => {
+test("already-settled callback replay remains idempotent when readiness later becomes unavailable", async () => {
+    const { repository, state } = setup({ ledgerEnforcementEnabled: true });
+    await repository.settleVerifiedPayment(settlementRequest());
+    state.ledgerStatus = null;
+    const readinessChecksBeforeReplay = state.queries.filter(
+        (sql) => sql === "SELECT status FROM pension_ledger WHERE singleton_key IS TRUE"
+    ).length;
+
+    const repeated = await repository.settleVerifiedPayment(settlementRequest());
+
+    assert.equal(repeated.alreadySettled, true);
+    assert.equal(state.movements.length, 1);
+    assert.equal(
+        state.queries.filter(
+            (sql) => sql === "SELECT status FROM pension_ledger WHERE singleton_key IS TRUE"
+        ).length,
+        readinessChecksBeforeReplay
+    );
+});
+
+test("payment settlement does not create its own SMS notification", async () => {
     const { repository, state } = setup();
     await repository.settleVerifiedPayment(settlementRequest());
-    const notification = state.notifications[0];
-    const dispatcher = createSmsDeliveryDispatcher({
-        environment: {
-            NODE_ENV: "production",
-            AT_ENVIRONMENT: "production",
-            SMS_DISPATCHER_ENABLED: "true",
-            AT_USERNAME: "production-user",
-            AT_API_KEY: "mock-key",
-        },
-        logger: { error() {} },
-        repository: {
-            async claimBatch() {
-                notification.delivery_status = "PROCESSING";
-                notification.attempt_count += 1;
-                notification.claim_token = "claim-001";
-                return [{
-                    notification_id: notification.notification_id,
-                    recipient_phone: notification.recipient_phone,
-                    message: notification.message,
-                    attempt_count: notification.attempt_count,
-                    claim_token: notification.claim_token,
-                }];
-            },
-            async markFailed() {
-                notification.delivery_status = "FAILED";
-            },
-            async markProviderAccepted() {},
-            async markUnknown() {},
-            async retryRejected() {},
-        },
-        async sendSms() {
-            const error = new Error("Provider rejected the message");
-            error.code = "SMS_PROVIDER_REJECTED";
-            throw error;
-        },
-    });
-
-    await dispatcher.runOnce();
-
-    assert.equal(notification.delivery_status, "FAILED");
+    assert.equal(state.notifications.length, 0);
     assert.equal(state.transaction.transaction_status, "COMPLETED");
     assert.equal(state.contribution.contribution_status, "COMPLETED");
     assert.equal(state.account.current_balance, "3500.00");
@@ -646,7 +697,7 @@ test("concurrent identical settlements serialize and credit the balance once", a
     assert.equal(results.filter((result) => result.alreadySettled).length, 1);
     assert.equal(state.account.current_balance, "3500.00");
     assert.equal(state.movements.length, 1);
-    assert.equal(state.notifications.length, 1);
+    assert.equal(state.notifications.length, 0);
 });
 
 test("duplicate provider receipt is rejected without changing financial records", async () => {
@@ -660,6 +711,41 @@ test("duplicate provider receipt is rejected without changing financial records"
     assert.equal(state.transaction.transaction_status, "PENDING");
     assert.equal(state.contribution.contribution_status, "PENDING");
     assert.equal(state.account.current_balance, "1000.00");
+    assert.equal(state.movements.length, 0);
+    assert.equal(state.rollbackCount, 1);
+});
+
+test("database receipt uniqueness violation rolls back settlement safely", async () => {
+    const { repository, state } = setup({ forceReceiptConstraintViolation: true });
+
+    await assert.rejects(repository.settleVerifiedPayment(settlementRequest()), {
+        code: "DUPLICATE_MPESA_RECEIPT",
+        statusCode: 409,
+    });
+
+    assert.equal(state.transaction.transaction_status, "PENDING");
+    assert.equal(state.contribution.contribution_status, "PENDING");
+    assert.equal(state.transaction.mpesa_receipt, null);
+    assert.equal(state.account.current_balance, "1000.00");
+    assert.equal(state.movements.length, 0);
+    assert.equal(state.rollbackCount, 1);
+});
+
+test("callback verification cannot settle unless the durable inbox receipt matches", async () => {
+    const { repository, state } = setup();
+    state.callbackEvidence.callback_receipt = "DIFFERENT123";
+
+    await assert.rejects(repository.settleVerifiedPayment(settlementRequest()), {
+        code: "PAYMENT_NOT_VERIFIED",
+        statusCode: 409,
+    });
+
+    assert.equal(state.transaction.transaction_status, "PENDING");
+    assert.equal(state.contribution.contribution_status, "PENDING");
+    assert.equal(state.transaction.mpesa_receipt, null);
+    assert.equal(state.account.current_balance, "1000.00");
+    assert.equal(state.movements.length, 0);
+    assert.equal(state.rollbackCount, 1);
 });
 
 test("mismatched transaction amount, account ownership, and worker role are rejected", async () => {
@@ -680,7 +766,6 @@ test("unverified evidence cannot settle and ambiguous evidence remains pending",
         { verification_status: "PROCESSING" },
         { verification_status: "VERIFIED_SUCCESS", callback_phone_matches: false },
         { verification_status: "VERIFIED_SUCCESS", callback_amount_matches: false },
-        { verification_status: "VERIFIED_SUCCESS", callback_receipt: null },
         { verification_status: "VERIFIED_SUCCESS", provider_result_code: "1032" },
         { verification_status: "VERIFIED_SUCCESS", merchant_request_id: "merchant_forged" },
     ]) {

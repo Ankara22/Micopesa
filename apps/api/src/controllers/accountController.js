@@ -77,16 +77,12 @@ async function getMyContributions(req, res) {
                     t.transaction_status, t.mpesa_receipt, t.mpesa_result_code,
                     t.mpesa_result_description, t.completed_at,
                     a.checkout_request_id,
-                    CASE a.provider_mode
-                         WHEN 'SIMULATOR' THEN 'SIMULATED'
-                         WHEN 'DARAJA' THEN 'DARAJA'
-                         ELSE 'UNRESOLVED'
-                    END AS payment_provider,
+                    'UNRESOLVED' AS payment_provider,
                     COALESCE(fund_shares.fund_allocations, '[]'::jsonb) AS fund_allocations
                  FROM contributions c
                  JOIN transactions t ON t.transaction_id = c.transaction_id
                  LEFT JOIN LATERAL (
-                     SELECT checkout_request_id, provider_mode
+                     SELECT checkout_request_id
                      FROM mpesa_payment_attempts
                      WHERE transaction_id = c.transaction_id
                      ORDER BY created_at DESC, attempt_id DESC
@@ -117,7 +113,6 @@ async function getMyContributions(req, res) {
     } catch (error) {
         console.error("Failed to fetch contributions:", {
             code: typeof error?.code === "string" ? error.code : "CONTRIBUTIONS_LOOKUP_ERROR",
-            message: typeof error?.message === "string" ? error.message : "Unknown contributions lookup error",
         });
         return res.status(500).json({
             status: "error",

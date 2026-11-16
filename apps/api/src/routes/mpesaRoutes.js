@@ -1,6 +1,7 @@
 const express = require("express");
 const { requireAuth, requireRole, requireVerifiedKyc } = require("../middleware/authMiddleware");
 const { createMpesaCallbackIngress } = require("../middleware/mpesaCallbackIngress");
+const { requireDarajaPaymentEnabled } = require("../controllers/mpesaDarajaController");
 const {
     startStkPush,
     getStkPushStatus,
@@ -17,7 +18,14 @@ const {
 
 const router = express.Router();
 
-router.post("/stkpush", requireAuth, requireRole("WORKER"), startStkPush);
+router.post(
+    "/stkpush",
+    requireAuth,
+    requireRole("WORKER"),
+    requireDarajaPaymentEnabled,
+    requireVerifiedKyc,
+    startStkPush
+);
 router.get("/provider", requireAuth, requireRole("WORKER"), requireVerifiedKyc, getPaymentProvider);
 router.post("/payments", requireAuth, requireRole("WORKER"), requireVerifiedKyc, initiateSimulatedPayment);
 router.post(

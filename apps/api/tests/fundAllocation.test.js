@@ -450,7 +450,7 @@ test("Fund Managers can view allocation records only for funds they manage", asy
     });
 });
 
-test("inactive or missing funds and workers without active accounts cannot write allocations", async () => {
+test("inactive or missing funds and workers without active accounts cannot write allocations", async (t) => {
     await withApi(async ({ api, state }) => {
         for (const fundId of ["fund-inactive", "fund-closed", "missing-fund"]) {
             const response = await api.request("/my-allocations", {
@@ -478,7 +478,7 @@ test("inactive or missing funds and workers without active accounts cannot write
         assert.deepEqual(state.audit, []);
     });
 
-    test("a fund that becomes ineligible before the save transaction is rejected without changing history", async () => {
+    await t.test("a fund that becomes ineligible before the save transaction is rejected without changing history", async () => {
         await withApi(async ({ api, state }) => {
             const historical = {
                 allocation_id: "historical-before-fund-suspension",

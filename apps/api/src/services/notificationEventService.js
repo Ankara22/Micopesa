@@ -1,5 +1,11 @@
 const { createHash } = require("node:crypto");
 const { normalizeKenyanPhone } = require("../utils/kenyanPhone");
+const { normalizeRecipient } = require("./communicationDeliveryPolicy");
+const {
+    ESSENTIAL_TRANSACTIONAL_EVENT_TYPES,
+    NOTIFICATION_EVENT_POLICIES,
+    isEssentialTransactionalNotification,
+} = require("./notificationEventPolicy");
 
 const USER_ID_PATTERN = /^[A-Za-z0-9_-]{1,25}$/;
 const REFERENCE_PATTERN = /^[A-Za-z0-9_.:-]{1,100}$/;
@@ -32,8 +38,16 @@ function escapeHtml(value) {
     })[character]);
 }
 
-function renderTransactionalTemplate(eventType) {
-    const template = EVENT_MESSAGES[eventType];
+function renderTransactionalTemplate(eventType, { simulated = false } = {}) {
+    if (simulated && eventType !== "CONTRIBUTION_CONFIRMED") {
+        throw new TypeError("Only contribution confirmations can be marked simulated.");
+    }
+    const template = simulated
+        ? {
+            subject: "Simulated contribution confirmed",
+            message: "Your simulated contribution has been confirmed and added to your account. No real money was transferred.",
+        }
+        : EVENT_MESSAGES[eventType];
     if (!template) throw new TypeError("A supported notification event is required.");
     const subject = escapeHtml(template.subject);
     const message = escapeHtml(template.message);
@@ -67,15 +81,38 @@ function createNotificationEventService(pool) {
         }
     }
 
-    async function getPreferences(userId) {
-        validateUserId(userId);
-        const result = await pool.query(
-            `SELECT sms_enabled, email_enabled
-             FROM notification_preferences
-             WHERE user_id = $1`,
+    async function readPreferences(userId, queryable = pool) {
+        const result = await queryable.query(
+            `SELECT COALESCE(np.sms_enabled, FALSE) AS sms_enabled,
+                    COALESCE(np.email_enabled, FALSE) AS email_enabled,
+                    (u.phone IS NOT NULL AND btrim(u.phone) <> '') AS phone_registered,
+                    (u.phone_verified_at IS NOT NULL) AS phone_verified,
+                    (COALESCE(NULLIF(btrim(u.email), ''), NULLIF(btrim(u.pending_email), ''))
+                        IS NOT NULL) AS email_registered,
+                    (u.email IS NOT NULL AND btrim(u.email) <> ''
+                        AND u.email_verified IS TRUE) AS email_verified,
+                    EXISTS (
+                        SELECT 1 FROM push_subscriptions ps WHERE ps.user_id = u.user_id
+                    ) AS push_enabled
+             FROM users u
+             LEFT JOIN notification_preferences np ON np.user_id = u.user_id
+             WHERE u.user_id = $1`,
             [userId]
         );
-        return result.rows[0] || { sms_enabled: false, email_enabled: false };
+        return result.rows[0] || {
+            sms_enabled: false,
+            email_enabled: false,
+            phone_registered: false,
+            phone_verified: false,
+            email_registered: false,
+            email_verified: false,
+            push_enabled: false,
+        };
+    }
+
+    async function getPreferences(userId) {
+        validateUserId(userId);
+        return readPreferences(userId);
     }
 
     async function updatePreferences(userId, input) {
@@ -103,7 +140,7 @@ function createNotificationEventService(pool) {
         try {
             await client.query("BEGIN");
             transactionStarted = true;
-            const result = await client.query(
+            await client.query(
                 `INSERT INTO notification_preferences (user_id, sms_enabled, email_enabled)
                  VALUES ($1, COALESCE($2::boolean, FALSE), COALESCE($3::boolean, FALSE))
                  ON CONFLICT (user_id) DO UPDATE
@@ -124,13 +161,18 @@ function createNotificationEventService(pool) {
                          last_error_code = 'NOTIFICATION_PREFERENCE_DISABLED'
                      WHERE user_id = $1
                        AND notification_type = ANY($2::varchar[])
-                       AND delivery_status = 'PENDING'`,
-                    [userId, disabledChannels]
+                       AND delivery_status = 'PENDING'
+                       AND (
+                           notification_event_type IS NULL
+                           OR NOT (notification_event_type = ANY($3::varchar[]))
+                       )`,
+                    [userId, disabledChannels, ESSENTIAL_TRANSACTIONAL_EVENT_TYPES]
                 );
             }
+            const preferences = await readPreferences(userId, client);
             await client.query("COMMIT");
             transactionStarted = false;
-            return result.rows[0];
+            return preferences;
         } catch (error) {
             if (transactionStarted) await client.query("ROLLBACK").catch(() => {});
             throw error;
@@ -139,10 +181,20 @@ function createNotificationEventService(pool) {
         }
     }
 
-    async function enqueueEvent({ userId, eventType, referenceId } = {}) {
+    async function enqueueEvent({
+        userId,
+        eventType,
+        referenceId,
+        suppressExternalDelivery = false,
+        simulated = false,
+    } = {}) {
         validateUserId(userId);
         if (!Object.prototype.hasOwnProperty.call(EVENT_MESSAGES, eventType) ||
-            typeof referenceId !== "string" || !REFERENCE_PATTERN.test(referenceId)) {
+            !Object.prototype.hasOwnProperty.call(NOTIFICATION_EVENT_POLICIES, eventType) ||
+            typeof referenceId !== "string" || !REFERENCE_PATTERN.test(referenceId) ||
+            typeof suppressExternalDelivery !== "boolean" ||
+            typeof simulated !== "boolean" ||
+            (simulated && eventType !== "CONTRIBUTION_CONFIRMED")) {
             throw new TypeError("A supported event and reference are required.");
         }
 
@@ -158,7 +210,7 @@ function createNotificationEventService(pool) {
         const recipient = recipientResult.rows[0];
         if (!recipient) return { queued: 0 };
 
-        const template = renderTransactionalTemplate(eventType);
+        const template = renderTransactionalTemplate(eventType, { simulated });
         const key = createHash("sha256")
             .update(`${userId}\0${eventType}\0${referenceId}`)
             .digest("hex");
@@ -166,10 +218,15 @@ function createNotificationEventService(pool) {
         const verifiedPhone = recipient.phone_verified_at
             ? normalizeKenyanPhone(recipient.phone)
             : null;
-        if (recipient.sms_enabled && verifiedPhone) {
+        const verifiedEmail = recipient.email_verified
+            ? normalizeRecipient("EMAIL", recipient.email)
+            : null;
+        const essential = isEssentialTransactionalNotification(eventType);
+        if (!simulated && !suppressExternalDelivery && verifiedPhone &&
+            (essential || recipient.sms_enabled)) {
             channels.push("SMS");
         }
-        if (recipient.email_enabled && recipient.email_verified && recipient.email) {
+        if (!suppressExternalDelivery && verifiedEmail && (essential || recipient.email_enabled)) {
             channels.push("EMAIL");
         }
 
@@ -181,20 +238,31 @@ function createNotificationEventService(pool) {
             transactionStarted = true;
             for (const channel of channels) {
                 const phone = channel === "SMS" ? verifiedPhone : null;
-                const email = channel === "EMAIL" ? recipient.email : null;
+                const email = channel === "EMAIL" ? verifiedEmail : null;
                 const subject = channel === "EMAIL" ? template.subject : null;
                 const html = channel === "EMAIL" ? template.html : null;
                 const result = await client.query(
                     `INSERT INTO notifications (
                         user_id, notification_type, message, recipient_phone, recipient_email,
-                        email_subject, email_html_body, notification_category, deduplication_key
+                        email_subject, email_html_body, notification_category, deduplication_key,
+                        notification_event_type
                      )
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, 'ACCOUNT_SERVICE', $8)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, 'ACCOUNT_SERVICE', $8, $9)
                      ON CONFLICT (user_id, notification_type, deduplication_key)
                      WHERE deduplication_key IS NOT NULL
                      DO NOTHING
                      RETURNING notification_id`,
-                    [userId, channel, template.text, phone, email, subject, html, key]
+                    [
+                        userId,
+                        channel,
+                        template.text,
+                        phone,
+                        channel === "EMAIL" ? verifiedEmail : null,
+                        subject,
+                        html,
+                        key,
+                        eventType,
+                    ]
                 );
                 queued += result.rowCount === 1 ? 1 : 0;
             }
@@ -257,6 +325,7 @@ function createBusinessNotificationEnqueuer(serviceProvider, logger = console) {
 module.exports = {
     createBusinessNotificationEnqueuer,
     createNotificationEventService,
+    EVENT_MESSAGES,
     escapeHtml,
     enqueueBusinessNotification,
     renderTransactionalTemplate,

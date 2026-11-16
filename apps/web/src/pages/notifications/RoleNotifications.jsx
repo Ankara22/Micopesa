@@ -106,9 +106,45 @@ function RoleNotifications() {
 
     function channelAvailable(channel) {
         if (!recipient) return false;
-        if (channel === "SMS") return recipient.phone_available;
-        if (channel === "EMAIL") return recipient.email_available;
+        if (channel === "SMS") {
+            return recipient.phone_available &&
+                recipient.sms_enabled === true &&
+                recipient.sms_delivery_enabled === true;
+        }
+        if (channel === "EMAIL") {
+            return recipient.email_available &&
+                recipient.email_enabled === true &&
+                recipient.email_delivery_enabled === true;
+        }
         return Number(recipient.push_subscription_count) > 0;
+    }
+
+    function channelStatus(channel) {
+        if (!recipient) return "";
+        if (channel === "SMS") {
+            const reasons = [];
+            if (!recipient.phone_registered) reasons.push(t("adminNotifications.phoneUnavailable"));
+            else if (!recipient.phone_verified) reasons.push(t("adminNotifications.phoneUnverified"));
+            if (recipient.sms_enabled !== true) reasons.push(t("adminNotifications.smsPreferenceDisabled"));
+            if (recipient.sms_delivery_enabled !== true) reasons.push(t("adminNotifications.smsProviderDisabled"));
+            return reasons.length
+                ? reasons.join("; ")
+                : t("adminNotifications.verifiedPhoneAvailable");
+        }
+        if (channel === "EMAIL") {
+            const reasons = [];
+            if (!recipient.email_registered) reasons.push(t("adminNotifications.emailUnavailable"));
+            else if (recipient.email_verified !== true) reasons.push(t("adminNotifications.emailUnverified"));
+            if (recipient.email_enabled !== true) reasons.push(t("adminNotifications.emailPreferenceDisabled"));
+            if (recipient.email_delivery_enabled !== true) reasons.push(t("adminNotifications.emailProviderDisabled"));
+            return reasons.length
+                ? reasons.join("; ")
+                : t("adminNotifications.verifiedEmailAvailable");
+        }
+        const count = Number(recipient.push_subscription_count);
+        return count > 0
+            ? t("adminNotifications.pushDeviceCount", { count })
+            : t("adminNotifications.pushUnavailable");
     }
 
     async function confirmNotification() {
@@ -139,8 +175,18 @@ function RoleNotifications() {
             });
             await auditApi.refetch();
             toast.success(t("roleNotifications.queued"));
-        } catch {
-            toast.error(t("roleNotifications.queueError"));
+        } catch (error) {
+            const code = error?.response?.data?.code;
+            const messageKey = code === "NOTIFICATION_PREFERENCE_DISABLED"
+                ? "adminNotifications.preferenceChanged"
+                : code === "NOTIFICATION_CONTACT_UNAVAILABLE"
+                    ? "adminNotifications.contactChanged"
+                    : code === "NOTIFICATION_SMS_UNAVAILABLE"
+                        ? "adminNotifications.smsProviderDisabled"
+                        : code === "NOTIFICATION_EMAIL_UNAVAILABLE"
+                            ? "adminNotifications.emailProviderDisabled"
+                            : "roleNotifications.queueError";
+            toast.error(t(messageKey));
         } finally {
             submissionInProgress.current = false;
             setSubmitting(false);
@@ -226,6 +272,15 @@ function RoleNotifications() {
                                 {t(`roleNotifications.channelNames.${channel}`)}
                             </label>
                         ))}
+                        {recipient && (
+                            <ul aria-label={t("adminNotifications.channelAvailability")}>
+                                {CHANNELS.map((channel) => (
+                                    <li key={channel}>
+                                        {t(`roleNotifications.channelNames.${channel}`)} — {channelStatus(channel)}
+                                    </li>
+                                ))}
+                            </ul>
+                        )}
                     </fieldset>
                     {form.channels.includes("EMAIL") && (
                         <label className="form-field">

@@ -86,6 +86,8 @@ describe("M-Pesa API response handling", () => {
             transaction_status: "COMPLETED",
             payment_provider: "SIMULATED",
             simulated: true,
+            no_real_money_transferred: true,
+            payment_outcome: "SUCCESS",
         };
         api.post.mockResolvedValue({ data: { status: "success", data: attempt } });
 
@@ -107,14 +109,90 @@ describe("M-Pesa API response handling", () => {
         api.get.mockResolvedValue({
             data: {
                 status: "success",
-                data: { provider: "SIMULATOR", simulator_enabled: true },
+                data: {
+                    provider: "DARAJA",
+                    environment: "sandbox",
+                    payment_enabled: false,
+                    message_key: "MPESA_PAYMENTS_DISABLED",
+                },
+            },
+        });
+        await expect(getPaymentProvider()).resolves.toEqual({
+            provider: "DARAJA",
+            environment: "sandbox",
+            payment_enabled: false,
+            message_key: "MPESA_PAYMENTS_DISABLED",
+        });
+        expect(api.get).toHaveBeenCalledWith("/api/mpesa/provider");
+    });
+
+    it("fails closed when the provider status omits explicit payment enablement", async () => {
+        api.get.mockResolvedValue({
+            data: {
+                status: "success",
+                data: {
+                    provider: "DARAJA",
+                    environment: "sandbox",
+                    message_key: "MPESA_PAYMENTS_DISABLED",
+                },
+            },
+        });
+        await expect(getPaymentProvider())
+            .rejects.toMatchObject({ code: "INVALID_MPESA_RESPONSE" });
+    });
+
+    it("accepts a server-enabled simulator status in its own environment", async () => {
+        api.get.mockResolvedValue({
+            data: {
+                status: "success",
+                data: {
+                    provider: "SIMULATOR",
+                    environment: "simulator",
+                    payment_enabled: true,
+                    message_key: "MPESA_PAYMENTS_AVAILABLE",
+                },
             },
         });
         await expect(getPaymentProvider()).resolves.toEqual({
             provider: "SIMULATOR",
-            simulator_enabled: true,
+            environment: "simulator",
+            payment_enabled: true,
+            message_key: "MPESA_PAYMENTS_AVAILABLE",
         });
-        expect(api.get).toHaveBeenCalledWith("/api/mpesa/provider");
+    });
+
+    it("rejects a simulator marked enabled without simulator environment identity", async () => {
+        api.get.mockResolvedValue({
+            data: {
+                status: "success",
+                data: {
+                    provider: "SIMULATOR",
+                    environment: "development",
+                    payment_enabled: true,
+                    message_key: "MPESA_PAYMENTS_AVAILABLE",
+                },
+            },
+        });
+        await expect(getPaymentProvider())
+            .rejects.toMatchObject({ code: "INVALID_MPESA_RESPONSE" });
+    });
+
+    it("accepts a fail-closed ledger readiness status", async () => {
+        api.get.mockResolvedValue({
+            data: {
+                status: "success",
+                data: {
+                    provider: "SIMULATOR",
+                    environment: "simulator",
+                    payment_enabled: false,
+                    message_key: "MPESA_LEDGER_NOT_READY",
+                },
+            },
+        });
+        await expect(getPaymentProvider()).resolves.toMatchObject({
+            payment_enabled: false,
+            message_key: "MPESA_LEDGER_NOT_READY",
+        });
     });
 
     it("sends no client-supplied outcome when retrying simulator confirmation", async () => {
@@ -202,5 +280,30 @@ describe("M-Pesa API response handling", () => {
         expect(api.get).toHaveBeenCalledWith(
             "/api/mpesa/status/idempotency/key%2Fwith%20slash"
         );
+    });
+
+    it("accepts a settled terminal attempt only with completed settlement evidence", async () => {
+        const status = {
+            attempt_id: "attempt-settled",
+            transaction_id: "transaction-settled",
+            attempt_status: "SETTLED",
+            transaction_status: "COMPLETED",
+            contribution_status: "COMPLETED",
+            settlement_confirmed: true,
+            receipt_reference: null,
+            settled_at: "2026-11-15T18:39:30.000Z",
+        };
+        api.get.mockResolvedValue({ data: { status: "success", data: status } });
+
+        await expect(getStkPushStatus("attempt-settled")).resolves.toEqual(status);
+
+        api.get.mockResolvedValue({
+            data: {
+                status: "success",
+                data: { ...status, settlement_confirmed: false },
+            },
+        });
+        await expect(getStkPushStatus("attempt-settled"))
+            .rejects.toMatchObject({ code: "INVALID_MPESA_RESPONSE" });
     });
 });

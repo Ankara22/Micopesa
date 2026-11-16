@@ -13,6 +13,10 @@ const ERROR_KEYS = {
     PHONE_CHANGE_CODE_EXPIRED: "codeExpired",
     PHONE_CHANGE_CHALLENGE_NOT_FOUND: "challengeNotFound",
     PHONE_CHANGE_SMS_UNAVAILABLE: "smsUnavailable",
+    PHONE_CHANGE_SMS_CONFIGURATION_MISSING: "smsConfiguration",
+    PHONE_CHANGE_SMS_PROVIDER_REJECTED: "smsProviderRejected",
+    PHONE_CHANGE_SMS_OUTCOME_UNKNOWN: "smsOutcomeUnknown",
+    PHONE_CHANGE_SMS_DELIVERY_FAILED: "smsUnavailable",
 };
 
 function PhoneNumberChange({ currentPhone, currentPhoneVerified = false, onVerified }) {

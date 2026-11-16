@@ -2,11 +2,11 @@ const RETRY_BASE_DELAY_MS = 30000;
 const RETRY_MAX_DELAY_MS = 15 * 60 * 1000;
 const BATCH_SIZE = 10;
 const POLL_INTERVAL_MS = 5000;
-const mobileSasaService = require("./mobileSasaService");
 const {
-    isDevelopmentChannelConfigured,
-    isDevelopmentDeliveryRuntime,
-} = require("./communicationDeliveryPolicy");
+    getNotificationChannelAvailability,
+    getNotificationChannelAvailabilityMap,
+    getNotificationSmsProvider,
+} = require("./notificationChannelConfiguration");
 const SAFE_ERROR_CODES = new Set([
     "EMAIL_SMTP_DELIVERY_FAILED",
     "EMAIL_SMTP_CONFIGURATION_MISSING",
@@ -17,17 +17,26 @@ const SAFE_ERROR_CODES = new Set([
     "EMAIL_SMTP_NETWORK_ERROR",
     "EMAIL_SMTP_UNKNOWN_OUTCOME",
     "EMAIL_CONFIGURATION_MISSING",
+    "EMAIL_CONFIGURATION_INVALID",
+    "EMAIL_PROVIDER_UNSUPPORTED",
     "EMAIL_INVALID_INPUT",
     "EMAIL_PRODUCTION_ONLY",
     "EMAIL_DEVELOPMENT_DELIVERY_DISABLED",
     "EMAIL_DEVELOPMENT_ALLOWLIST_EMPTY",
     "EMAIL_DEVELOPMENT_RECIPIENT_NOT_ALLOWED",
     "EMAIL_PROVIDER_REJECTED",
+    "EMAIL_PROVIDER_TIMEOUT",
+    "EMAIL_NETWORK_ERROR",
+    "EMAIL_PROVIDER_AUTH_FAILED",
+    "EMAIL_TIMEOUT",
     "EMAIL_SUPPRESSED",
     "EMAIL_INVALID_RESPONSE",
     "EMAIL_UNKNOWN_OUTCOME",
     "EMAIL_SMTP_RECIPIENT_REJECTED",
     "SMS_CONFIGURATION_MISSING",
+    "SMS_NOTIFICATION_DELIVERY_DISABLED",
+    "SMS_CONFIGURATION_INVALID",
+    "SMS_PROVIDER_UNSUPPORTED",
     "SMS_ENVIRONMENT_MISMATCH",
     "SMS_INVALID_RECIPIENT",
     "SMS_INVALID_INPUT",
@@ -35,8 +44,6 @@ const SAFE_ERROR_CODES = new Set([
     "SMS_NETWORK_ERROR",
     "SMS_PRODUCTION_ONLY",
     "SMS_DEVELOPMENT_DELIVERY_DISABLED",
-    "SMS_DEVELOPMENT_ALLOWLIST_EMPTY",
-    "SMS_DEVELOPMENT_RECIPIENT_NOT_ALLOWED",
     "SMS_PROVIDER_REJECTED",
     "SMS_PROVIDER_AUTH_FAILED",
     "SMS_RETRYABLE_REJECTION",
@@ -51,6 +58,7 @@ const SAFE_ERROR_CODES = new Set([
     "PUSH_PROVIDER_REJECTED",
     "PUSH_RETRYABLE_REJECTION",
     "PUSH_UNKNOWN_OUTCOME",
+    "NOTIFICATION_SCHEMA_MISMATCH",
 ]);
 const SAFE_SMTP_CODES = new Set([
     "EAUTH",
@@ -80,40 +88,52 @@ function classifyEmailFailure(error) {
 
     if (error?.code === "EMAIL_SMTP_DELIVERY_FAILED") {
         if (smtpCode === "EAUTH" || [534, 535].includes(responseCode)) {
-            code = "EMAIL_SMTP_AUTH_FAILED";
+            code = "EMAIL_PROVIDER_AUTH_FAILED";
             failureCategory = "authentication_failure";
         } else if (responseCode !== null) {
-            code = "EMAIL_SMTP_PROVIDER_REJECTED";
+            code = "EMAIL_PROVIDER_REJECTED";
             failureCategory = "smtp_rejection";
         } else if (smtpCode === "ETIMEDOUT" || error?.name === "TimeoutError") {
-            code = "EMAIL_SMTP_TIMEOUT";
+            code = "EMAIL_PROVIDER_TIMEOUT";
             failureCategory = "timeout";
         } else if ([
             "ECONNECTION", "ECONNREFUSED", "ECONNRESET", "EHOSTUNREACH",
             "ENETUNREACH", "ENOTFOUND", "EAI_AGAIN", "EPIPE", "ESOCKET", "ETLS",
         ].includes(smtpCode)) {
-            code = "EMAIL_SMTP_NETWORK_ERROR";
+            code = "EMAIL_NETWORK_ERROR";
             failureCategory = "network_failure";
         } else {
-            code = "EMAIL_SMTP_UNKNOWN_OUTCOME";
+            code = "EMAIL_UNKNOWN_OUTCOME";
         }
+    } else if (code === "EMAIL_TIMEOUT") {
+        code = "EMAIL_PROVIDER_TIMEOUT";
+        failureCategory = "timeout";
+    } else if (code === "EMAIL_NETWORK_ERROR") {
+        failureCategory = "network_failure";
+    } else if (code === "EMAIL_PROVIDER_AUTH_FAILED") {
+        failureCategory = "authentication_failure";
+    } else if (code === "EMAIL_INVALID_RESPONSE") {
+        code = "EMAIL_UNKNOWN_OUTCOME";
+        failureCategory = "unknown_outcome";
     } else if (
         code === "EMAIL_SMTP_RECIPIENT_REJECTED" ||
         code === "EMAIL_PROVIDER_REJECTED" ||
         code === "EMAIL_SMTP_PROVIDER_REJECTED"
     ) {
+        code = "EMAIL_PROVIDER_REJECTED";
         failureCategory = "provider_rejection";
     } else if (
         code.includes("CONFIGURATION") ||
         code.includes("DEVELOPMENT_") ||
+        code === "EMAIL_PROVIDER_UNSUPPORTED" ||
         code === "EMAIL_INVALID_INPUT"
     ) {
         failureCategory = "configuration_or_policy_failure";
-    } else if (code === "EMAIL_SMTP_TIMEOUT") {
+    } else if (code === "EMAIL_PROVIDER_TIMEOUT") {
         failureCategory = "timeout";
-    } else if (code === "EMAIL_SMTP_NETWORK_ERROR") {
+    } else if (code === "EMAIL_NETWORK_ERROR") {
         failureCategory = "network_failure";
-    } else if (code === "EMAIL_SMTP_AUTH_FAILED") {
+    } else if (code === "EMAIL_PROVIDER_AUTH_FAILED") {
         failureCategory = "authentication_failure";
     }
 
@@ -130,11 +150,12 @@ function classifyEmailFailure(error) {
         ...(smtpCode ? { smtpCode } : {}),
         ...(responseCode !== null ? { responseCode } : {}),
         deliveryOutcomeUnknown: ![
-            "EMAIL_SMTP_RECIPIENT_REJECTED",
             "EMAIL_PROVIDER_REJECTED",
-            "EMAIL_SMTP_AUTH_FAILED",
-            "EMAIL_SMTP_PROVIDER_REJECTED",
+            "EMAIL_PROVIDER_REJECTED",
+            "EMAIL_PROVIDER_AUTH_FAILED",
             "EMAIL_CONFIGURATION_MISSING",
+            "EMAIL_CONFIGURATION_INVALID",
+            "EMAIL_PROVIDER_UNSUPPORTED",
             "EMAIL_SMTP_CONFIGURATION_MISSING",
             "EMAIL_SMTP_CONFIGURATION_INVALID",
             "EMAIL_PRODUCTION_ONLY",
@@ -147,57 +168,15 @@ function classifyEmailFailure(error) {
 }
 
 function isSmsDispatcherEnabled(environment = process.env) {
-    if (isDevelopmentDeliveryRuntime(environment)) {
-        const provider = getNotificationSmsProvider(environment);
-        return isDevelopmentChannelConfigured("SMS", environment) &&
-            provider === "MOBILE_SASA" &&
-            mobileSasaService.isSmsConfigured(environment);
-    }
-    if (environment.NODE_ENV !== "production" || environment.SMS_DISPATCHER_ENABLED !== "true") {
-        return false;
-    }
-    const provider = getNotificationSmsProvider(environment);
-    if (provider === "MOBILE_SASA") return mobileSasaService.isSmsConfigured(environment);
-    return provider === "AFRICAS_TALKING" &&
-        environment.AT_ENVIRONMENT?.trim().toLowerCase() === "production" &&
-        Boolean(environment.AT_USERNAME?.trim()) &&
-        environment.AT_USERNAME.trim().toLowerCase() !== "sandbox" &&
-        Boolean(environment.AT_API_KEY?.trim());
-}
-
-function getNotificationSmsProvider(environment = process.env) {
-    return environment.NOTIFICATION_SMS_PROVIDER?.trim().toUpperCase() ||
-        environment.TRANSACTIONAL_SMS_PROVIDER?.trim().toUpperCase() ||
-        "AFRICAS_TALKING";
+    return getNotificationChannelAvailability("SMS", environment).enabled;
 }
 
 function isEmailDispatcherEnabled(environment = process.env) {
-    if (isDevelopmentDeliveryRuntime(environment)) {
-        const provider = environment.EMAIL_PROVIDER?.trim().toUpperCase() || "GMAIL";
-        return isDevelopmentChannelConfigured("EMAIL", environment) &&
-            provider === "GMAIL" &&
-            Boolean(environment.GMAIL_USER?.trim()) &&
-            Boolean(environment.GMAIL_APP_PASSWORD?.trim());
-    }
-    if (environment.NODE_ENV !== "production" ||
-        environment.NOTIFICATION_DISPATCHER_ENABLED !== "true" ||
-        environment.EMAIL_NOTIFICATIONS_ENABLED !== "true") {
-        return false;
-    }
-    const provider = environment.EMAIL_PROVIDER?.trim().toUpperCase() || "GMAIL";
-    if (provider === "MOBILE_SASA") return mobileSasaService.isEmailConfigured(environment);
-    return provider === "GMAIL" &&
-        Boolean(environment.GMAIL_USER?.trim()) &&
-        Boolean(environment.GMAIL_APP_PASSWORD?.trim());
+    return getNotificationChannelAvailability("EMAIL", environment).enabled;
 }
 
 function isPushDispatcherEnabled(environment = process.env) {
-    return environment.NODE_ENV === "production" &&
-        environment.NOTIFICATION_DISPATCHER_ENABLED === "true" &&
-        environment.WEB_PUSH_ENABLED === "true" &&
-        Boolean(environment.WEB_PUSH_PUBLIC_KEY?.trim()) &&
-        Boolean(environment.WEB_PUSH_PRIVATE_KEY?.trim()) &&
-        Boolean(environment.WEB_PUSH_SUBJECT?.trim());
+    return getNotificationChannelAvailability("PUSH", environment).enabled;
 }
 
 function enabledChannels(environment = process.env) {
@@ -240,11 +219,34 @@ function createSmsDeliveryDispatcher({
     let timer = null;
     let activeRun = null;
     let stopping = false;
+    let fatalPollingError = null;
 
     function logError(message, error) {
         logger.error(message, {
             code: SAFE_ERROR_CODES.has(error?.code) ? error.code : "SMS_DISPATCH_ERROR",
+            ...(typeof error?.databaseCode === "string" &&
+                /^\d{5}$/.test(error.databaseCode)
+                ? { databaseCode: error.databaseCode }
+                : {}),
+            ...(error?.schemaObject === "notifications.notification_event_type" ||
+                error?.schemaObject === "notification delivery schema"
+                ? { schemaObject: error.schemaObject }
+                : {}),
         });
+    }
+
+    function handlePollingError(message, error) {
+        if (error?.code === "NOTIFICATION_SCHEMA_MISMATCH") {
+            if (fatalPollingError) return;
+            fatalPollingError = error;
+            if (timer) {
+                clearIntervalImpl(timer);
+                timer = null;
+            }
+            logError("Notification dispatcher stopped because the database schema is incompatible.", error);
+            return;
+        }
+        logError(message, error);
     }
 
     async function dispatchOne(notification) {
@@ -333,20 +335,23 @@ function createSmsDeliveryDispatcher({
                     "SMS_PROVIDER_REJECTED",
                     "SMS_PROVIDER_AUTH_FAILED",
                     "SMS_CONFIGURATION_MISSING",
+                    "SMS_CONFIGURATION_INVALID",
+                    "SMS_PROVIDER_UNSUPPORTED",
                     "SMS_ENVIRONMENT_MISMATCH",
                     "SMS_PRODUCTION_ONLY",
                     "SMS_DEVELOPMENT_DELIVERY_DISABLED",
-                    "SMS_DEVELOPMENT_ALLOWLIST_EMPTY",
-                    "SMS_DEVELOPMENT_RECIPIENT_NOT_ALLOWED",
                     "SMS_SANDBOX_CREDENTIALS",
                     "EMAIL_SMTP_RECIPIENT_REJECTED",
                     "EMAIL_SMTP_AUTH_FAILED",
                     "EMAIL_SMTP_PROVIDER_REJECTED",
+                    "EMAIL_PROVIDER_AUTH_FAILED",
                     "EMAIL_SMTP_CONFIGURATION_MISSING",
                     "EMAIL_SMTP_CONFIGURATION_INVALID",
                     "EMAIL_PROVIDER_REJECTED",
                     "EMAIL_SUPPRESSED",
                     "EMAIL_CONFIGURATION_MISSING",
+                    "EMAIL_CONFIGURATION_INVALID",
+                    "EMAIL_PROVIDER_UNSUPPORTED",
                     "EMAIL_INVALID_INPUT",
                     "EMAIL_PRODUCTION_ONLY",
                     "EMAIL_DEVELOPMENT_DELIVERY_DISABLED",
@@ -373,6 +378,7 @@ function createSmsDeliveryDispatcher({
     }
 
     async function runOnce() {
+        if (fatalPollingError) throw fatalPollingError;
         if (!enabled || stopping) return 0;
         if (activeRun) return activeRun;
 
@@ -389,13 +395,17 @@ function createSmsDeliveryDispatcher({
     }
 
     function start() {
-        if (!enabled || timer) return false;
+        if (!enabled || timer || fatalPollingError) return false;
         stopping = false;
         timer = setIntervalImpl(() => {
-            runOnce().catch((error) => logError("SMS dispatcher poll failed.", error));
+            runOnce().catch((error) =>
+                handlePollingError("Notification dispatcher poll failed.", error)
+            );
         }, pollIntervalMs);
         timer.unref?.();
-        runOnce().catch((error) => logError("SMS dispatcher startup poll failed.", error));
+        runOnce().catch((error) =>
+            handlePollingError("Notification dispatcher startup poll failed.", error)
+        );
         return true;
     }
 
@@ -415,6 +425,8 @@ module.exports = {
     classifyEmailFailure,
     createSmsDeliveryDispatcher,
     enabledChannels,
+    getNotificationChannelAvailability,
+    getNotificationChannelAvailabilityMap,
     isEmailDispatcherEnabled,
     isPushDispatcherEnabled,
     isSmsDispatcherEnabled,

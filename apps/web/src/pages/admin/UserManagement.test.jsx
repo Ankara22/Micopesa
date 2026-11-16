@@ -58,6 +58,7 @@ describe("UserManagement deletion confirmation", () => {
 
         fireEvent.change(screen.getByLabelText("Full name"), { target: { value: "New Staff" } });
         fireEvent.change(screen.getByLabelText("Phone number"), { target: { value: "+254 712 345 678" } });
+        fireEvent.change(screen.getByLabelText("Email address"), { target: { value: "staff@example.test" } });
         fireEvent.click(screen.getByRole("button", { name: "Regulator" }));
         fireEvent.click(screen.getByRole("button", { name: "Create account" }));
 
@@ -65,6 +66,7 @@ describe("UserManagement deletion confirmation", () => {
             expect(mocks.createStaffAccount).toHaveBeenCalledWith({
                 full_name: "New Staff",
                 phone: "+254 712 345 678",
+                email: "staff@example.test",
                 role: "REGULATOR",
             });
             expect(mocks.refetch).toHaveBeenCalledOnce();

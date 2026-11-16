@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import AuthLayout from "./AuthLayout";
 import { verifyEmail } from "../../services/authEmailApi";
@@ -16,7 +16,6 @@ function VerifyEmail() {
     const isExistingVerification = flow === "email-verification";
     const hasValidFlow = isRegistration || isExistingVerification;
     const [state, setState] = useState(() => ({
-        loading: Boolean(token && isExistingVerification),
         submitting: false,
         success: false,
         error: !token || !hasValidFlow,
@@ -26,28 +25,27 @@ function VerifyEmail() {
     const [confirmPassword, setConfirmPassword] = useState("");
     const [formError, setFormError] = useState("");
 
-    useEffect(() => {
-        let current = true;
-        if (!token || !isExistingVerification) return () => { current = false; };
-        verifyEmail(token).then(() => {
-            if (current) setState({
-                loading: false,
+    async function handleEmailVerification(event) {
+        event.preventDefault();
+        if (state.submitting) return;
+        setState((current) => ({ ...current, submitting: true }));
+        try {
+            await verifyEmail(token);
+            setState({
                 submitting: false,
                 success: true,
                 error: false,
                 registrationUnavailable: false,
             });
-        }).catch(() => {
-            if (current) setState({
-                loading: false,
+        } catch {
+            setState({
                 submitting: false,
                 success: false,
                 error: true,
                 registrationUnavailable: false,
             });
-        });
-        return () => { current = false; };
-    }, [token, isExistingVerification]);
+        }
+    }
 
     async function handleRegistrationVerification(event) {
         event.preventDefault();
@@ -67,7 +65,6 @@ function VerifyEmail() {
             setPassword("");
             setConfirmPassword("");
             setState({
-                loading: false,
                 submitting: false,
                 success: true,
                 error: false,
@@ -76,7 +73,6 @@ function VerifyEmail() {
         } catch (error) {
             if (error.response?.data?.code === "REGISTRATION_COMPLETION_UNAVAILABLE") {
                 setState({
-                    loading: false,
                     submitting: false,
                     success: false,
                     error: false,
@@ -85,7 +81,6 @@ function VerifyEmail() {
                 return;
             }
             setState({
-                loading: false,
                 submitting: false,
                 success: false,
                 error: true,
@@ -99,7 +94,6 @@ function VerifyEmail() {
             <div className="auth-card">
                 <p className="auth-eyebrow auth-card-eyebrow">{t("auth.verify.eyebrow")}</p>
                 <h1>{t("auth.verify.title")}</h1>
-                {state.loading && <p className="auth-subtitle" role="status">{t("auth.verify.loading")}</p>}
                 {state.error && (
                     <div className="auth-error" role="alert">
                         {hasValidFlow ? t("auth.verify.invalidLink") : t("auth.verify.invalidFlow")}
@@ -109,6 +103,14 @@ function VerifyEmail() {
                     <div className="auth-error" role="alert">{t("auth.verify.registrationUnavailable")}</div>
                 )}
                 {state.success && <div className="auth-success" role="status">{t("auth.verify.success")}</div>}
+                {isExistingVerification && token && !state.success && !state.error && (
+                    <form className="auth-form" onSubmit={handleEmailVerification} noValidate aria-busy={state.submitting}>
+                        <p className="auth-subtitle">{t("auth.verify.emailVerificationDescription")}</p>
+                        <button type="submit" className="auth-submit" disabled={state.submitting}>
+                            {state.submitting ? t("auth.verify.verifying") : t("auth.verify.verifyEmail")}
+                        </button>
+                    </form>
+                )}
                 {isRegistration && !state.success && !state.error && !state.registrationUnavailable && (
                     <form className="auth-form" onSubmit={handleRegistrationVerification} noValidate aria-busy={state.submitting}>
                         <p className="auth-subtitle">{t("auth.verify.registrationDescription")}</p>

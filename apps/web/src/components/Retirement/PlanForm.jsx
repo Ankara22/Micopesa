@@ -6,11 +6,10 @@ import Button from "../ui/Button";
 import { useToast } from "../ui/ToastContext";
 import "./retirement.css";
 
-function PlanForm({ plan, projection, onSaved }) {
+function PlanForm({ plan, projection, profileAge = null, onSaved }) {
     const { t } = useTranslation();
     const toast = useToast();
     const [form, setForm] = useState(() => ({
-        current_age: projection?.current_age ?? "",
         target_retirement_age: plan?.target_age ?? "",
         target_amount: plan?.target_amount ?? "",
         monthly_contribution_target: projection?.assumed_contribution ?? "",
@@ -31,7 +30,6 @@ function PlanForm({ plan, projection, onSaved }) {
 
         try {
             const result = await onSaved({
-                current_age: Number(form.current_age),
                 target_retirement_age: Number(form.target_retirement_age),
                 target_amount: Number(form.target_amount),
                 monthly_contribution_target: Number(form.monthly_contribution_target),
@@ -63,11 +61,11 @@ function PlanForm({ plan, projection, onSaved }) {
                         label={t("worker.retirement.currentAge")}
                         type="number"
                         min="1"
-                        max="99"
+                        max="100"
                         step="1"
                         required
-                        value={form.current_age}
-                        onChange={handleChange}
+                        value={Number.isInteger(profileAge) ? profileAge : ""}
+                        readOnly
                         disabled={submitting}
                     />
                     <FormField

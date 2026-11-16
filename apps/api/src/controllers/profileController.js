@@ -26,7 +26,7 @@ const PROFILE_USER_FIELDS = [
 
 const PROFILE_FIELDS = [
     ...PROFILE_USER_FIELDS,
-    "kyc.date_of_birth",
+    "kyc.date_of_birth::text AS date_of_birth",
     "right(kyc.national_id, 4) AS national_id_last_four",
     "kyc.kyc_status",
 ];

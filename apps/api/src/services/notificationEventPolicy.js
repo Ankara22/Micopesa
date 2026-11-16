@@ -1,0 +1,39 @@
+const NOTIFICATION_EVENT_POLICIES = Object.freeze({
+    CONTRIBUTION_CONFIRMED: "ESSENTIAL_TRANSACTIONAL",
+    KYC_VERIFIED: "ESSENTIAL_TRANSACTIONAL",
+    KYC_REJECTED: "ESSENTIAL_TRANSACTIONAL",
+    RETIREMENT_PLAN_SAVED: "ESSENTIAL_TRANSACTIONAL",
+});
+
+const ESSENTIAL_TRANSACTIONAL_EVENT_TYPES = Object.freeze(
+    Object.keys(NOTIFICATION_EVENT_POLICIES).filter((eventType) =>
+        NOTIFICATION_EVENT_POLICIES[eventType] === "ESSENTIAL_TRANSACTIONAL"
+    )
+);
+const ESSENTIAL_TRANSACTIONAL_EVENT_TYPE_SET = new Set(ESSENTIAL_TRANSACTIONAL_EVENT_TYPES);
+const ESSENTIAL_ROLE_NOTIFICATION_CATEGORIES = Object.freeze([
+    "ACCOUNT_SERVICE",
+    "CONTRIBUTION_REMINDER",
+    "SCHEME_UPDATE",
+    "REGULATORY_ADVISORY",
+    "COMPLIANCE_NOTICE",
+    "DEADLINE_REMINDER",
+]);
+const ESSENTIAL_ROLE_NOTIFICATION_CATEGORY_SET = new Set(ESSENTIAL_ROLE_NOTIFICATION_CATEGORIES);
+
+function isEssentialTransactionalNotification(eventType) {
+    return ESSENTIAL_TRANSACTIONAL_EVENT_TYPE_SET.has(eventType);
+}
+
+function isEssentialNotification({ eventType, notificationCategory } = {}) {
+    return isEssentialTransactionalNotification(eventType) ||
+        ESSENTIAL_ROLE_NOTIFICATION_CATEGORY_SET.has(notificationCategory);
+}
+
+module.exports = {
+    ESSENTIAL_ROLE_NOTIFICATION_CATEGORIES,
+    ESSENTIAL_TRANSACTIONAL_EVENT_TYPES,
+    NOTIFICATION_EVENT_POLICIES,
+    isEssentialNotification,
+    isEssentialTransactionalNotification,
+};

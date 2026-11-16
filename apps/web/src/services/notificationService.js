@@ -11,10 +11,23 @@ function validatePreferences(data) {
         error.code = "INVALID_NOTIFICATION_PREFERENCES";
         throw error;
     }
-    return {
+    const preferences = {
         sms_enabled: data.sms_enabled,
         email_enabled: data.email_enabled,
     };
+    for (const key of [
+        "phone_registered",
+        "phone_verified",
+        "email_registered",
+        "email_verified",
+        "push_enabled",
+        "sms_delivery_enabled",
+        "email_delivery_enabled",
+        "push_delivery_enabled",
+    ]) {
+        if (typeof data[key] === "boolean") preferences[key] = data[key];
+    }
+    return preferences;
 }
 
 export async function getMyNotificationPreferences() {

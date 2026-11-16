@@ -8,16 +8,13 @@ const {
 const {
     createMpesaPaymentSettlementService,
 } = require("../services/mpesaPaymentSettlementService");
+const {
+    createMpesaDarajaController,
+    startStkPush,
+} = require("./mpesaDarajaController");
 
 function callbackResponse(res) {
     return res.status(200).json({ ResultCode: 0, ResultDesc: "Notification received; payment outcome not verified" });
-}
-
-async function startStkPush(_req, res) {
-    return res.status(503).json({
-        status: "error",
-        message: "M-Pesa deposits are temporarily unavailable while payment verification is being secured.",
-    });
 }
 
 function createMpesaVerificationController(verificationService) {
@@ -155,7 +152,6 @@ function createMpesaStatusController(repository) {
                 if (statusCode !== 400) {
                     console.error("Failed to retrieve M-Pesa payment by idempotency key.", {
                         code: typeof error?.code === "string" ? error.code : "STATUS_LOOKUP_ERROR",
-                        message: typeof error?.message === "string" ? error.message : "Unknown status lookup error",
                     });
                 }
                 return res.status(statusCode).json({
@@ -176,6 +172,7 @@ module.exports = {
     createMpesaVerificationController,
     ...statusController,
     createMpesaStatusController,
+    createMpesaDarajaController,
     startStkPush,
     verificationService,
 };

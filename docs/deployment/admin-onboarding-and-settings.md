@@ -1,5 +1,29 @@
 # Admin onboarding and operational settings
 
+## Development-only SMS and email delivery
+
+General notification delivery in development is disabled by default. It
+requires `NODE_ENV` to be unset or `development`,
+`COMMUNICATIONS_DEV_DELIVERY_ENABLED=true`, the relevant channel switch
+(`COMMUNICATIONS_DEV_SMS_ENABLED=true` or
+`COMMUNICATIONS_DEV_EMAIL_ENABLED=true`), and the corresponding provider
+configuration. Development SMS additionally requires
+`MOBILESASA_NOTIFICATION_SMS_ENABLED=true`. Keep
+`MOBILESASA_SMS_ENABLED=false` in development so the separate phone-verification
+test-SMS path remains available. Recipients are selected from active registered user profiles;
+SMS requires a verified phone and email requires a verified email address.
+Notification preferences and role-based recipient scopes continue to apply.
+
+Development SMS uses the configured Mobile Sasa adapter; development email
+uses the configured SMTP transport. These switches do not start the production
+notification dispatcher. Keep all development switches false unless an
+operator has explicitly approved delivery. When enabled, a queued notification
+can reach its selected registered recipient through the configured provider;
+automated tests must use mocked transports and never send real messages.
+Development SMS uses the live Mobile Sasa send endpoint, not a provider
+sandbox. Do not enable it for real user profiles unless each delivery is
+explicitly authorized; use mocked transports for local validation.
+
 The admin onboarding and settings API requires the additive migration
 `database/migration_admin_panel_settings.sql`. Apply it after the finalized
 database schema has created `users`, `audit_logs`, and `system_settings`, and
@@ -115,6 +139,29 @@ routes. Do not apply it to a fresh database created from the updated canonical
 `push_subscriptions` table. This migration has not been applied by this code
 change.
 
+SMS and email notification preferences are explicit opt-ins and default to
+false, including for accounts created by staff onboarding. Users can change
+their own choices from their notification settings; SMS and email delivery
+still require verified contacts. Browser push consent is represented by a
+subscription registered by the signed-in user and can be removed per device.
+The settings screen reports verification and subscription state without
+displaying the contact values.
+
+Business events currently emitted by the application are classified centrally
+as essential transactional notifications: `CONTRIBUTION_CONFIRMED`,
+`KYC_VERIFIED`, `KYC_REJECTED`, and `RETIREMENT_PLAN_SAVED`. These events do not
+depend on optional SMS/email preferences, but still require an active account
+and a current, valid, verified destination at enqueue and immediately before
+dispatch. Role-composed operational categories
+(`ACCOUNT_SERVICE`, `CONTRIBUTION_REMINDER`, `SCHEME_UPDATE`,
+`REGULATORY_ADVISORY`, `COMPLIANCE_NOTICE`, and `DEADLINE_REMINDER`) follow the
+same preference-independent rule while retaining contact verification and
+role/fund scope checks. General announcements and worker education remain
+optional and require per-user opt-in. Simulated contribution settlement queues
+only an in-app confirmation and never queues external email or SMS.
+Failed-contribution and withdrawal event types are not currently emitted and
+are not inferred by this policy.
+
 The email channel defaults to the existing Gmail SMTP service. It requires
 `NODE_ENV=production`, `NOTIFICATION_DISPATCHER_ENABLED=true`,
 `EMAIL_NOTIFICATIONS_ENABLED=true`, `GMAIL_USER`, and `GMAIL_APP_PASSWORD`.
@@ -177,6 +224,7 @@ pre-persistent notifications
   -> migration_unified_notifications
        -> migration_transactional_notifications
        -> migration_role_notifications_and_reporting
+            -> migration_notification_event_classification
        -> migration_external_recipient_sms (optional)
        -> migration_mobilesasa_sms_delivery_reports (optional; also needs persistent SMS fields)
 ```
@@ -191,11 +239,14 @@ request/contact columns. The MobileSasa delivery-report migration requires
 `delivery_result` from the unified migration and persistent delivery columns.
 
 `notificationEventService.js` inserts `notification_category` and
-`deduplication_key` and reads `notification_preferences`; therefore the
+`deduplication_key` and `notification_event_type`, and reads
+`notification_preferences`; therefore the
 application service requires the persistent, unified, transactional, and
-role/reporting migrations, not merely the migration that creates preferences.
+role/reporting migrations, followed by the event-classification migration,
+not merely the migration that creates preferences.
 `smsNotificationRepository.js` also uses persistent delivery fields,
-unified channel snapshots, and transactional preferences. A safe recommended
+unified channel snapshots, transactional preferences, and the event
+classification column. A safe recommended
 application/API rollout is:
 
 1. `database/migration_sms_persistent_delivery.sql` — delivery state and
@@ -218,12 +269,16 @@ application/API rollout is:
    event idempotency index, and opt-in preferences. It requires persistent
    delivery's `deduplication_key`; the documented position also ensures the
    role category exists before deploying `notificationEventService.js`.
-5. `database/migration_external_recipient_sms.sql` only if that feature is
+5. `database/migration_notification_event_classification.sql` — nullable
+   event classification for supported transactional notifications. It is
+   additive, leaves existing rows unclassified and optional, and must be
+   applied before deploying code that inserts or queries the column.
+6. `database/migration_external_recipient_sms.sql` only if that feature is
    authorized and the target schema has the unified-notification channel
    snapshot constraint. Its preflight rejects absent prerequisites and
    already-present external-recipient objects rather than silently accepting
    an incompatible partial schema.
-6. `database/migration_mobilesasa_sms_delivery_reports.sql` only if the
+7. `database/migration_mobilesasa_sms_delivery_reports.sql` only if the
    callback inbox feature is authorized; it requires both persistent
    delivery fields and the unified migration's `delivery_result` column.
 

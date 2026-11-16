@@ -60,14 +60,15 @@ function parseCallbackMetadata(callbackResultCode, callbackMetadata) {
         !Number.isSafeInteger(amount) ||
         amount <= 0 ||
         !/^254[17]\d{8}$/.test(phone) ||
-        typeof receiptValue !== "string" ||
-        receiptValue.length < 1 ||
-        receiptValue.length > 25 ||
-        !/^[A-Za-z0-9]+$/.test(receiptValue)
+        (receiptValue !== undefined &&
+            (typeof receiptValue !== "string" ||
+                receiptValue.length < 1 ||
+                receiptValue.length > 25 ||
+                !/^[A-Za-z0-9]+$/.test(receiptValue)))
     ) {
         throw verificationInputError("Callback payment metadata is incomplete or invalid.");
     }
-    return { amount, phone, receipt: receiptValue };
+    return { amount, phone, receipt: receiptValue ?? null };
 }
 
 function parseCallback(body) {

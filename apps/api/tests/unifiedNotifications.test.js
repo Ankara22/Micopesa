@@ -34,12 +34,18 @@ function createResponse() {
     };
 }
 
-function createQueuePool() {
+function createQueuePool({ smsEnabled = true, emailEnabled = true } = {}) {
     const state = { records: [], auditEvents: 0 };
     const client = {
         async query(sql, params = []) {
             if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
                 return { rows: [], rowCount: null };
+            }
+            if (sql.includes("SELECT pg_advisory_xact_lock")) {
+                return { rows: [], rowCount: null };
+            }
+            if (sql.includes("count(DISTINCT request_id)::integer AS request_count")) {
+                return { rows: [{ request_count: 0 }] };
             }
             if (sql.includes("FROM users")) {
                 return {
@@ -47,8 +53,11 @@ function createQueuePool() {
                         user_id: "worker-1",
                         full_name: "Worker One",
                         phone: "0712345678",
+                        phone_verified_at: new Date("2026-01-01T00:00:00.000Z"),
                         email: "worker@example.test",
                         email_verified: true,
+                        sms_enabled: smsEnabled,
+                        email_enabled: emailEnabled,
                         account_status: "ACTIVE",
                     }],
                 };
@@ -65,6 +74,7 @@ function createQueuePool() {
                     html,
                     title,
                     requestId,
+                    category,
                 ] = params;
                 const duplicate = state.records.some((row) =>
                     row.admin_request_key === requestId && row.notification_type === type
@@ -82,11 +92,17 @@ function createQueuePool() {
                         email_html_body: html,
                         push_title: title,
                         admin_request_key: requestId,
+                        notification_category: category,
+                        scope_fund_id: null,
                         delivery_status: "PENDING",
                     });
                     return { rows: [], rowCount: 1 };
                 }
                 return { rows: [], rowCount: 0 };
+            }
+            if (sql.includes("INSERT INTO notification_audit_events")) {
+                state.auditEvents += 1;
+                return { rows: [], rowCount: 1 };
             }
             if (sql.includes("SELECT notification_id, user_id, created_by")) {
                 return {
@@ -140,8 +156,11 @@ function createTestSmsPool({ recentTests = () => 0 } = {}) {
                         user_id: "admin-1",
                         full_name: "Admin One",
                         phone: "0712345678",
+                        phone_verified_at: new Date("2026-01-01T00:00:00.000Z"),
                         role: "ADMIN",
                         account_status: "ACTIVE",
+                        sms_enabled: true,
+                        email_enabled: true,
                     }],
                 };
             }
@@ -226,6 +245,47 @@ test("admin multi-channel notifications queue independently and exact retries do
     assert.equal(state.records[1].email_html_body, "<p>Formatted update</p>");
 });
 
+test("legacy single-recipient admin queue rejects opt-out without inserting notifications", async () => {
+    const { pool, state } = createQueuePool({ smsEnabled: false, emailEnabled: false });
+    const repository = createNotificationRepository(pool);
+
+    await assert.rejects(() => repository.queueAdminNotifications({
+        adminId: "admin-1",
+        userId: "worker-1",
+        channels: ["SMS"],
+        message: "Your savings update",
+        requestId: "4c3b9f30-7cb7-4b2f-83d1-1f24c9b2b1d5",
+    }), {
+        code: "NOTIFICATION_PREFERENCE_DISABLED",
+        statusCode: 422,
+    });
+
+    assert.equal(state.records.length, 0);
+});
+
+test("admin role notification queue can override optional preferences for verified contacts", async () => {
+    const { pool, state } = createQueuePool({ smsEnabled: false, emailEnabled: false });
+    const repository = createNotificationRepository(pool);
+
+    const results = await repository.queueRoleNotifications({
+        senderId: "admin-1",
+        senderRole: "ADMIN",
+        userId: "worker-1",
+        channels: ["SMS", "EMAIL"],
+        message: "Platform announcement",
+        subject: "MicoPesa update",
+        requestId: "4c3b9f30-7cb7-4b2f-83d1-1f24c9b2b1d5",
+        category: "ANNOUNCEMENT",
+    });
+
+    assert.deepEqual(results.map(({ notification_type, delivery_status }) =>
+        [notification_type, delivery_status]), [
+        ["SMS", "PENDING"],
+        ["EMAIL", "PENDING"],
+    ]);
+    assert.equal(state.records.length, 2);
+});
+
 test("admin multi-recipient queue reports invalid and unverified contacts as skipped", async () => {
     const auditRows = [];
     const recipients = [
@@ -236,6 +296,8 @@ test("admin multi-recipient queue reports invalid and unverified contacts as ski
             phone_verified_at: null,
             email: "worker1@example.test",
             email_verified: false,
+            sms_enabled: true,
+            email_enabled: true,
             has_push_subscription: false,
         },
         {
@@ -245,6 +307,19 @@ test("admin multi-recipient queue reports invalid and unverified contacts as ski
             phone_verified_at: null,
             email: null,
             email_verified: false,
+            sms_enabled: true,
+            email_enabled: true,
+            has_push_subscription: false,
+        },
+        {
+            user_id: "worker-3",
+            full_name: "Worker Three",
+            phone: "+254712345679",
+            phone_verified_at: null,
+            email: "worker3@example.test",
+            email_verified: false,
+            sms_enabled: false,
+            email_enabled: false,
             has_push_subscription: false,
         },
     ];
@@ -286,7 +361,7 @@ test("admin multi-recipient queue reports invalid and unverified contacts as ski
     const request = {
         senderId: "admin-1",
         senderRole: "ADMIN",
-        userIds: ["worker-1", "worker-2"],
+        userIds: ["worker-1", "worker-2", "worker-3"],
         channels: ["SMS", "EMAIL"],
         message: "Account update",
         subject: "MicoPesa update",
@@ -303,10 +378,12 @@ test("admin multi-recipient queue reports invalid and unverified contacts as ski
         ["SKIPPED", "EMAIL", "NOTIFICATION_EMAIL_UNAVAILABLE"],
         ["SKIPPED", "SMS", "NOTIFICATION_PHONE_UNVERIFIED"],
         ["SKIPPED", "EMAIL", "NOTIFICATION_EMAIL_UNAVAILABLE"],
+        ["SKIPPED", "SMS", "NOTIFICATION_PHONE_UNVERIFIED"],
+        ["SKIPPED", "EMAIL", "NOTIFICATION_EMAIL_UNAVAILABLE"],
     ]);
     assert.deepEqual(replay.map(({ notification_id }) => notification_id),
         first.map(({ notification_id }) => notification_id));
-    assert.equal(auditRows.length, 2);
+    assert.equal(auditRows.length, 3);
 });
 
 test("admin test SMS is fixed to the authenticated admin, rate-limited, and idempotent", async () => {
@@ -369,6 +446,8 @@ test("development test SMS claim targets only its confirmed record and never cla
     assert.match(query[0], /admin_request_key = \$3/);
     assert.match(query[0], /delivery_status = 'PENDING'/);
     assert.match(query[0], /notification_category = 'ACCOUNT_SERVICE'/);
+    assert.match(query[0], /np\.sms_enabled IS TRUE/);
+    assert.match(query[0], /u\.phone_verified_at IS NOT NULL/);
     assert.deepEqual(query[1].slice(1), [
         "admin-1",
         "4c3b9f30-7cb7-4b2f-83d1-1f24c9b2b1d5",
@@ -382,7 +461,8 @@ test("admin test SMS controller keeps the existing production queue path", async
         NODE_ENV: "production",
         SMS_DISPATCHER_ENABLED: "true",
         NOTIFICATION_SMS_PROVIDER: "MOBILE_SASA",
-        MOBILESASA_SMS_ENABLED: "true",
+        MOBILESASA_NOTIFICATION_SMS_ENABLED: "true",
+        MOBILESASA_SMS_ENABLED: "false",
         MOBILE_SASA_SMS_API_TOKEN: "mbs_test-token",
         MOBILE_SASA_SMS_SENDER_ID: "MICO",
     };
@@ -562,7 +642,7 @@ test("development self-test rejects missing or unsafe Mobile Sasa configuration 
     assert.equal(sends, 0);
 });
 
-test("development admin notification queue stays closed when its allowlist is empty", async () => {
+test("development admin notification queue needs provider switches, not a recipient allowlist", async () => {
     let queued = 0;
     const controller = createNotificationController({
         repository: {
@@ -576,9 +656,10 @@ test("development admin notification queue stays closed when its allowlist is em
             NODE_ENV: "development",
             COMMUNICATIONS_DEV_DELIVERY_ENABLED: "true",
             COMMUNICATIONS_DEV_SMS_ENABLED: "true",
-            COMMUNICATIONS_DEV_ALLOWED_PHONES: "",
             TRANSACTIONAL_SMS_PROVIDER: "MOBILE_SASA",
-            MOBILESASA_SMS_ENABLED: "true",
+            MOBILESASA_NOTIFICATION_SMS_ENABLED: "true",
+            MOBILESASA_SMS_ENABLED: "false",
+            MOBILESASA_TEST_SMS_ENABLED: "true",
             MOBILE_SASA_SMS_API_TOKEN: "mbs_test-token",
             MOBILE_SASA_SMS_SENDER_ID: "MicoPesa",
         },
@@ -590,8 +671,45 @@ test("development admin notification queue stays closed when its allowlist is em
         body: { channels: ["SMS"] },
     }, response);
 
+    assert.equal(response.statusCode, 202);
+    assert.equal(response.body.status, "success");
+    assert.equal(queued, 1);
+});
+
+test("admin notification queue reports provider configuration blockers before persistence", async () => {
+    let queued = 0;
+    const controller = createNotificationController({
+        repository: {
+            async queueRoleNotifications() {
+                queued += 1;
+                return [];
+            },
+        },
+        webPushService: { getPublicKey: () => "public-key" },
+        environment: {
+            NODE_ENV: "development",
+            COMMUNICATIONS_DEV_DELIVERY_ENABLED: "true",
+            COMMUNICATIONS_DEV_SMS_ENABLED: "true",
+            TRANSACTIONAL_SMS_PROVIDER: "MOBILE_SASA",
+            MOBILESASA_NOTIFICATION_SMS_ENABLED: "true",
+            MOBILESASA_SMS_ENABLED: "false",
+            MOBILESASA_TEST_SMS_ENABLED: "true",
+            MOBILE_SASA_SMS_SENDER_ID: "MicoPesa",
+        },
+    });
+    const response = createResponse();
+
+    await controller.createNotification({
+        user: { userId: "admin-1", role: "ADMIN" },
+        body: { channels: ["SMS"] },
+    }, response);
+
     assert.equal(response.statusCode, 503);
-    assert.equal(response.body.code, "NOTIFICATION_SMS_UNAVAILABLE");
+    assert.equal(response.body.code, "NOTIFICATION_PROVIDER_CONFIGURATION_MISSING");
+    assert.deepEqual(response.body.data.channel_availability.missing_variables, [
+        "MOBILESASA_TOKEN",
+        "MOBILE_SASA_SMS_API_TOKEN",
+    ]);
     assert.equal(queued, 0);
 });
 
@@ -746,12 +864,18 @@ test("ambiguous development provider outcome is stored as UNKNOWN and never rese
     assert.equal(state.sends, 1);
 });
 
-test("recipient search is parameterized, bounded, and returns all active account roles", async () => {
+test("recipient search returns contact availability, not personal contact values", async () => {
     let query;
     const repository = createNotificationRepository({
         async query(...args) {
             query = args;
-            return { rows: [{ user_id: "manager-1", role: "FUND_MANAGER" }] };
+            return { rows: [{
+                user_id: "manager-1",
+                role: "FUND_MANAGER",
+                phone_available: true,
+                email_available: true,
+                push_subscription_count: 0,
+            }] };
         },
         async connect() { throw new Error("Not expected"); },
     });
@@ -760,6 +884,11 @@ test("recipient search is parameterized, bounded, and returns all active account
     assert.equal(recipients[0].role, "FUND_MANAGER");
     assert.deepEqual(query[1], ["%A\\_\\%%"]);
     assert.match(query[0], /LIMIT 100/);
+    assert.match(query[0], /phone_verified_at IS NOT NULL/);
+    assert.doesNotMatch(query[0], /SELECT u\.(phone|email)\s*,/);
+    assert.doesNotMatch(query[0], /u\.(phone|email) ILIKE/);
+    assert.equal(Object.hasOwn(recipients[0], "phone"), false);
+    assert.equal(Object.hasOwn(recipients[0], "email"), false);
     await assert.rejects(() => repository.listRecipients("x".repeat(101)), {
         code: "INVALID_NOTIFICATION_INPUT",
     });
@@ -893,13 +1022,13 @@ test("email service reports only SMTP acceptance and rejects malformed addresses
         },
     });
 
-    test("development admin email requires the email opt-in and allowlists exact normalized recipients", async () => {
+    test("development admin email accepts allowlisted recipients when the channel is enabled", async () => {
         const sent = [];
         const environment = {
             NODE_ENV: "development",
             COMMUNICATIONS_DEV_DELIVERY_ENABLED: "true",
             COMMUNICATIONS_DEV_EMAIL_ENABLED: "true",
-            COMMUNICATIONS_DEV_ALLOWED_EMAILS: "Admin.Test@Example.Test",
+            COMMUNICATIONS_DEV_ALLOWED_EMAILS: "admin.test@example.test,other@example.test",
             EMAIL_PROVIDER: "GMAIL",
         };
         const emailService = {
@@ -918,13 +1047,13 @@ test("email service reports only SMTP acceptance and rejects malformed addresses
         assert.equal(sent[0].to, "admin.test@example.test");
         assert.equal(sent[0].subject, "Subject");
         assert.equal(sent[0].text, "Notification content");
-        await assert.rejects(() => sendAdminEmail({
+        const secondResult = await sendAdminEmail({
             to: "other@example.test",
             subject: "Subject",
             text: "Content",
-        }, { environment, emailService }), {
-            code: "EMAIL_DEVELOPMENT_RECIPIENT_NOT_ALLOWED",
-        });
+        }, { environment, emailService });
+        assert.equal(secondResult.status, "PROVIDER_ACCEPTED");
+        assert.equal(sent[1].to, "other@example.test");
         await assert.rejects(() => sendAdminEmail({
             to: "admin.test@example.test",
             subject: "Subject",
@@ -933,15 +1062,7 @@ test("email service reports only SMTP acceptance and rejects malformed addresses
             environment: { ...environment, COMMUNICATIONS_DEV_EMAIL_ENABLED: "false" },
             emailService,
         }), { code: "EMAIL_DEVELOPMENT_DELIVERY_DISABLED" });
-        await assert.rejects(() => sendAdminEmail({
-            to: "admin.test@example.test",
-            subject: "Subject",
-            text: "Content",
-        }, {
-            environment: { ...environment, COMMUNICATIONS_DEV_ALLOWED_EMAILS: "" },
-            emailService,
-        }), { code: "EMAIL_DEVELOPMENT_ALLOWLIST_EMPTY" });
-        assert.equal(sent.length, 1);
+        assert.equal(sent.length, 2);
     });
 
     test("admin notification email reaches the configured SMTP transport", async () => {
@@ -1131,13 +1252,15 @@ test("email service reports only SMTP acceptance and rejects malformed addresses
             COMMUNICATIONS_DEV_ALLOWED_PHONES: "+254712345678",
             COMMUNICATIONS_DEV_ALLOWED_EMAILS: "worker@example.test",
             TRANSACTIONAL_SMS_PROVIDER: "MOBILE_SASA",
-            MOBILESASA_SMS_ENABLED: "true",
+            MOBILESASA_NOTIFICATION_SMS_ENABLED: "true",
+            MOBILESASA_SMS_ENABLED: "false",
+            MOBILESASA_TEST_SMS_ENABLED: "true",
             MOBILE_SASA_SMS_API_TOKEN: "mbs_test-token",
             MOBILE_SASA_SMS_SENDER_ID: "MicoPesa",
             EMAIL_NOTIFICATIONS_ENABLED: "true",
             EMAIL_PROVIDER: "GMAIL",
             GMAIL_USER: "sender@example.test",
-            GMAIL_APP_PASSWORD: "mock-smtp-password",
+            GMAIL_APP_PASSWORD: "abcdefghijklmnop",
         };
         const rows = [
             {
@@ -1178,6 +1301,7 @@ test("email service reports only SMTP acceptance and rejects malformed addresses
             sendSms: (input) => smsService.sendSms(input, {
                 environment,
                 provider: getNotificationSmsProvider(environment),
+                notificationDelivery: true,
                 fetchImpl: async (url, options) => {
                     sentSms.push({ url, body: JSON.parse(options.body) });
                     return {
@@ -1374,7 +1498,7 @@ test("email and push failures do not prevent another channel from succeeding", a
         NOTIFICATION_DISPATCHER_ENABLED: "true",
         EMAIL_NOTIFICATIONS_ENABLED: "true",
         GMAIL_USER: "sender@example.test",
-        GMAIL_APP_PASSWORD: "mock",
+        GMAIL_APP_PASSWORD: "abcdefghijklmnop",
         WEB_PUSH_ENABLED: "true",
         WEB_PUSH_PUBLIC_KEY: "public",
         WEB_PUSH_PRIVATE_KEY: "private",
@@ -1395,7 +1519,7 @@ test("email and push failures do not prevent another channel from succeeding", a
 
     assert.equal(await dispatcher.runOnce(), 3);
     assert.deepEqual(updates.sort((left, right) => left[0].localeCompare(right[0])), [
-        ["email-1", "FAILED", "EMAIL_SMTP_RECIPIENT_REJECTED"],
+        ["email-1", "FAILED", "EMAIL_PROVIDER_REJECTED"],
         ["push-1", "PROVIDER_ACCEPTED"],
         ["sms-1", "PROVIDER_ACCEPTED"],
     ]);
@@ -1445,7 +1569,7 @@ test("SMTP timeouts remain UNKNOWN with sanitized diagnostics while other channe
             NOTIFICATION_DISPATCHER_ENABLED: "true",
             EMAIL_NOTIFICATIONS_ENABLED: "true",
             GMAIL_USER: "sender@example.test",
-            GMAIL_APP_PASSWORD: "mock",
+            GMAIL_APP_PASSWORD: "abcdefghijklmnop",
             WEB_PUSH_ENABLED: "true",
             WEB_PUSH_PUBLIC_KEY: "public",
             WEB_PUSH_PRIVATE_KEY: "private",
@@ -1464,13 +1588,13 @@ test("SMTP timeouts remain UNKNOWN with sanitized diagnostics while other channe
 
     assert.equal(await dispatcher.runOnce(), 2);
     assert.deepEqual(updates.sort((left, right) => left[0].localeCompare(right[0])), [
-        ["email-unknown", "UNKNOWN", "EMAIL_SMTP_TIMEOUT"],
+        ["email-unknown", "UNKNOWN", "EMAIL_PROVIDER_TIMEOUT"],
         ["push-accepted", "PROVIDER_ACCEPTED"],
     ]);
     assert.deepEqual(logged, [[
         "Admin notification email delivery attempt failed.",
         {
-            errorCode: "EMAIL_SMTP_TIMEOUT",
+            errorCode: "EMAIL_PROVIDER_TIMEOUT",
             errorClass: "Error",
             failureCategory: "timeout",
             deliveryOutcomeUnknown: true,
@@ -1517,7 +1641,7 @@ test("SMTP authentication and explicit rejection failures are definitive and san
             NOTIFICATION_DISPATCHER_ENABLED: "true",
             EMAIL_NOTIFICATIONS_ENABLED: "true",
             GMAIL_USER: "sender@example.test",
-            GMAIL_APP_PASSWORD: "mock",
+            GMAIL_APP_PASSWORD: "abcdefghijklmnop",
         },
         sendSms: async () => ({ accepted: true, status: "PROVIDER_ACCEPTED" }),
         async sendEmail() { throw errors.shift(); },
@@ -1527,8 +1651,8 @@ test("SMTP authentication and explicit rejection failures are definitive and san
 
     assert.equal(await dispatcher.runOnce(), 2);
     assert.deepEqual(updates.sort((left, right) => left[0].localeCompare(right[0])), [
-        ["email-0", "FAILED", "EMAIL_SMTP_AUTH_FAILED"],
-        ["email-1", "FAILED", "EMAIL_SMTP_PROVIDER_REJECTED"],
+        ["email-0", "FAILED", "EMAIL_PROVIDER_AUTH_FAILED"],
+        ["email-1", "FAILED", "EMAIL_PROVIDER_REJECTED"],
     ]);
     const serializedLogs = JSON.stringify(logs);
     assert.match(serializedLogs, /authentication_failure/);
@@ -1547,13 +1671,14 @@ test("email-only and SMS-only queue batches dispatch independently", async () =>
                 NOTIFICATION_DISPATCHER_ENABLED: "true",
                 EMAIL_NOTIFICATIONS_ENABLED: "true",
                 GMAIL_USER: "sender@example.test",
-                GMAIL_APP_PASSWORD: "mock",
+                GMAIL_APP_PASSWORD: "abcdefghijklmnop",
             }
             : {
                 NODE_ENV: "production",
                 SMS_DISPATCHER_ENABLED: "true",
                 NOTIFICATION_SMS_PROVIDER: "MOBILE_SASA",
-                MOBILESASA_SMS_ENABLED: "true",
+                MOBILESASA_NOTIFICATION_SMS_ENABLED: "true",
+                MOBILESASA_SMS_ENABLED: "false",
                 MOBILE_SASA_SMS_API_TOKEN: "mbs_test-token",
                 MOBILE_SASA_SMS_SENDER_ID: "MicoPesa",
             };

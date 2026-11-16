@@ -121,6 +121,7 @@ test("returns only the authenticated user's KYC fields with a masked National ID
     assert.equal(res.statusCode, 200);
     assert.deepEqual(queryValues, [userId]);
     assert.match(queryText, /LEFT JOIN kyc_records kyc ON kyc\.user_id = users\.user_id/);
+    assert.match(queryText, /kyc\.date_of_birth::text AS date_of_birth/i);
     assert.match(queryText, /phone_verified_at IS NOT NULL\) AS phone_verified/i);
     assert.match(queryText, /right\(kyc\.national_id, 4\) AS national_id_last_four/i);
     assert.doesNotMatch(queryText, /(?:^|,)\s*kyc\.national_id\s*(?:,|FROM)/i);

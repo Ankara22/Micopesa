@@ -3,6 +3,166 @@ const REQUEST_TIMEOUT_MS = 10000;
 const mobileSasaService = require("./mobileSasaService");
 const { assertDevelopmentRecipientAllowed } = require("./communicationDeliveryPolicy");
 
+function getTransactionalSmsProvider(environment = process.env) {
+    const configuredProvider = typeof environment.TRANSACTIONAL_SMS_PROVIDER === "string"
+        ? environment.TRANSACTIONAL_SMS_PROVIDER.trim().toUpperCase()
+        : "";
+    const provider = configuredProvider || "AFRICAS_TALKING";
+    if (provider !== "AFRICAS_TALKING" && provider !== "MOBILE_SASA") {
+        throw createSmsError("The configured transactional SMS provider is unsupported.", "SMS_CONFIGURATION_MISSING");
+    }
+    return provider;
+}
+
+function getAfricaTalkConfigurationStatus(environment) {
+    const missingVariables = [];
+    const invalidVariables = [];
+    const atEnvironment = typeof environment.AT_ENVIRONMENT === "string"
+        ? environment.AT_ENVIRONMENT.trim().toLowerCase()
+        : "";
+    if (atEnvironment !== "production") {
+        (atEnvironment ? invalidVariables : missingVariables).push("AT_ENVIRONMENT");
+    }
+    const username = typeof environment.AT_USERNAME === "string"
+        ? environment.AT_USERNAME.trim()
+        : "";
+    if (!username) missingVariables.push("AT_USERNAME");
+    else if (username.toLowerCase() === "sandbox") invalidVariables.push("AT_USERNAME");
+    if (typeof environment.AT_API_KEY !== "string" || !environment.AT_API_KEY.trim()) {
+        missingVariables.push("AT_API_KEY");
+    }
+    const available = missingVariables.length === 0 && invalidVariables.length === 0;
+    return {
+        available,
+        errorCode: available
+            ? null
+            : invalidVariables.length
+                ? "SMS_CONFIGURATION_INVALID"
+                : "SMS_CONFIGURATION_MISSING",
+        missingVariables,
+        invalidVariables,
+    };
+}
+
+function getNotificationSmsConfigurationStatus(provider, environment = process.env) {
+    const selectorName = typeof environment.NOTIFICATION_SMS_PROVIDER === "string" &&
+        environment.NOTIFICATION_SMS_PROVIDER.trim()
+        ? "NOTIFICATION_SMS_PROVIDER"
+        : typeof environment.TRANSACTIONAL_SMS_PROVIDER === "string" &&
+            environment.TRANSACTIONAL_SMS_PROVIDER.trim()
+            ? "TRANSACTIONAL_SMS_PROVIDER"
+            : null;
+    if (provider === "MOBILE_SASA") {
+        return mobileSasaService.getNotificationSmsConfigurationStatus(environment);
+    }
+    if (provider === "AFRICAS_TALKING") {
+        if (environment.NODE_ENV === "development") {
+            return {
+                available: false,
+                errorCode: "SMS_PROVIDER_UNSUPPORTED",
+                missingVariables: [],
+                invalidVariables: selectorName ? [selectorName] : [],
+            };
+        }
+        return getAfricaTalkConfigurationStatus(environment);
+    }
+    return {
+        available: false,
+        errorCode: "SMS_PROVIDER_UNSUPPORTED",
+        missingVariables: [],
+        invalidVariables: selectorName ? [selectorName] : [],
+    };
+}
+
+function getPhoneVerificationSmsConfiguration(environment = process.env) {
+    if (environment.NODE_ENV === "development") {
+        return {
+            ...mobileSasaService.getSmsConfigurationStatus(environment, { testOnly: true }),
+            mode: "development-test",
+            provider: "MOBILE_SASA",
+        };
+    }
+    if (environment.NODE_ENV !== "production") {
+        return {
+            available: false,
+            errorCode: "SMS_ENVIRONMENT_UNSUPPORTED",
+            missingVariables: environment.NODE_ENV ? [] : ["NODE_ENV"],
+            invalidVariables: environment.NODE_ENV ? ["NODE_ENV"] : [],
+            mode: "unsupported",
+            provider: null,
+        };
+    }
+
+    let provider;
+    try {
+        provider = getTransactionalSmsProvider(environment);
+    } catch {
+        return {
+            available: false,
+            errorCode: "SMS_CONFIGURATION_MISSING",
+            missingVariables: [],
+            invalidVariables: ["TRANSACTIONAL_SMS_PROVIDER"],
+            mode: "production-transactional",
+            provider: null,
+        };
+    }
+    const status = provider === "MOBILE_SASA"
+        ? mobileSasaService.getSmsConfigurationStatus(environment)
+        : getAfricaTalkConfigurationStatus(environment);
+    return {
+        ...status,
+        mode: "production-transactional",
+        provider,
+    };
+}
+
+function isPhoneVerificationSmsConfigured(environment = process.env) {
+    return getPhoneVerificationSmsConfiguration(environment).available;
+}
+
+async function sendPhoneVerificationSms(input, options = {}) {
+    const environment = options.environment || process.env;
+    const configuration = getPhoneVerificationSmsConfiguration(environment);
+    const expectedConfiguration = options.providerConfiguration;
+    if (expectedConfiguration?.available &&
+        (expectedConfiguration.mode !== configuration.mode ||
+            expectedConfiguration.provider !== configuration.provider)) {
+        const error = createSmsError(
+            "The phone verification SMS provider changed after availability was checked.",
+            "SMS_CONFIGURATION_CHANGED"
+        );
+        error.diagnostics = {
+            errorCode: error.code,
+            failureCategory: "configuration_failure",
+            deliveryOutcomeUnknown: false,
+        };
+        throw error;
+    }
+    if (!configuration.available) {
+        const error = createSmsError(
+            "Phone verification SMS configuration is incomplete or invalid.",
+            configuration.errorCode || "SMS_CONFIGURATION_MISSING"
+        );
+        error.diagnostics = {
+            errorCode: error.code,
+            errorClass: error.name,
+            failureCategory: "configuration_failure",
+            deliveryOutcomeUnknown: false,
+            missingVariables: configuration.missingVariables,
+            invalidVariables: configuration.invalidVariables,
+        };
+        throw error;
+    }
+    if (configuration.mode === "development-test") {
+        return mobileSasaService.sendPhoneVerificationSms(input, options);
+    }
+    return sendSms(input, {
+        ...options,
+        environment,
+        provider: configuration.provider,
+    });
+}
+
 function createSmsError(message, code) {
     const error = new Error(message);
     error.code = code;
@@ -32,6 +192,7 @@ async function sendSms(
         timeoutMs = REQUEST_TIMEOUT_MS,
         provider = "AFRICAS_TALKING",
         logger = null,
+        notificationDelivery = false,
     } = {}
 ) {
     const recipient = normalizeRecipient(to);
@@ -46,7 +207,7 @@ async function sendSms(
     if (selectedProvider === "MOBILE_SASA") {
         return mobileSasaService.sendSms(
             { to: recipient, message, trackingId },
-            { environment, fetchImpl, timeoutMs, logger }
+            { environment, fetchImpl, timeoutMs, logger, notificationDelivery }
         );
     }
     if (selectedProvider !== "AFRICAS_TALKING") {
@@ -158,4 +319,13 @@ async function sendSms(
     }
 }
 
-module.exports = { sendSms, normalizeRecipient };
+module.exports = {
+    getAfricaTalkConfigurationStatus,
+    getNotificationSmsConfigurationStatus,
+    getPhoneVerificationSmsConfiguration,
+    getTransactionalSmsProvider,
+    isPhoneVerificationSmsConfigured,
+    sendPhoneVerificationSms,
+    sendSms,
+    normalizeRecipient,
+};

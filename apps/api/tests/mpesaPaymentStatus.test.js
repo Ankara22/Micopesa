@@ -250,10 +250,7 @@ test("idempotency-key status lookup logs missing payment-attempt table errors", 
         assert.equal(res.statusCode, 500);
         assert.equal(logs.length, 1);
         assert.equal(logs[0][0], "Failed to retrieve M-Pesa payment by idempotency key.");
-        assert.deepEqual(logs[0][1], {
-            code: "42P01",
-            message: 'relation "mpesa_payment_attempts" does not exist',
-        });
+        assert.deepEqual(logs[0][1], { code: "42P01" });
     } finally {
         console.error = originalConsoleError;
     }

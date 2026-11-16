@@ -2,20 +2,11 @@ const bcrypt = require("bcrypt");
 const crypto = require("node:crypto");
 const pool = require("../db/database");
 const smsService = require("../services/smsService");
+const { getTransactionalSmsProvider } = smsService;
 const { writeAuditLog } = require("../utils/auditLog");
 
 const STAFF_ROLES = ["FUND_MANAGER", "REGULATOR", "ADMIN"];
 const SALT_ROUNDS = 10;
-
-function getTransactionalSmsProvider(environment = process.env) {
-    const provider = environment.TRANSACTIONAL_SMS_PROVIDER?.trim().toUpperCase() || "AFRICAS_TALKING";
-    if (provider !== "AFRICAS_TALKING" && provider !== "MOBILE_SASA") {
-        const error = new Error("The configured transactional SMS provider is unsupported.");
-        error.code = "SMS_CONFIGURATION_MISSING";
-        throw error;
-    }
-    return provider;
-}
 
 function normalizeKenyanPhone(value) {
     if (typeof value !== "string") return null;
@@ -23,6 +14,14 @@ function normalizeKenyanPhone(value) {
     if (/^0[17]\d{8}$/.test(phone)) phone = `+254${phone.slice(1)}`;
     else if (/^254[17]\d{8}$/.test(phone)) phone = `+${phone}`;
     return /^\+254[17]\d{8}$/.test(phone) ? phone : null;
+}
+
+function normalizeStaffEmail(value) {
+    if (typeof value !== "string") return null;
+    const email = value.trim().toLowerCase();
+    return email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+        ? email
+        : null;
 }
 
 function generateTemporaryPassword() {
@@ -95,11 +94,13 @@ function logSmsFailure(error, provider) {
 async function createStaff(req, res) {
     const fullName = typeof req.body?.full_name === "string" ? req.body.full_name.trim() : "";
     const phone = normalizeKenyanPhone(req.body?.phone);
+    const email = normalizeStaffEmail(req.body?.email);
     const role = req.body?.role;
-    if (fullName.length < 2 || fullName.length > 100 || !phone || !STAFF_ROLES.includes(role)) {
+    if (fullName.length < 2 || fullName.length > 100 ||
+        !phone || !email || !STAFF_ROLES.includes(role)) {
         return res.status(400).json({
             status: "error",
-            message: "Provide a full name, a valid Kenyan phone number, and an eligible staff role.",
+            message: "Provide a full name, valid Kenyan phone and email addresses, and an eligible staff role.",
         });
     }
     let smsProvider;
@@ -125,13 +126,19 @@ async function createStaff(req, res) {
         await client.query("BEGIN");
         const result = await client.query(
             `INSERT INTO users
-                (full_name, phone, password_hash, role, login_method, account_status,
+                (full_name, phone, pending_email, phone_verified_at, email_verified,
+                 password_hash, role, login_method, account_status,
                  is_temp_password, force_password_change)
-             VALUES ($1, $2, $3, $4, 'PHONE', 'INACTIVE', TRUE, TRUE)
+             VALUES ($1, $2, $3, NULL, FALSE, $4, $5, 'PHONE', 'INACTIVE', TRUE, TRUE)
              RETURNING user_id, full_name, phone, role, account_status, created_at`,
-            [fullName, phone, passwordHash, role]
+            [fullName, phone, email, passwordHash, role]
         );
         user = result.rows[0];
+        await client.query(
+            `INSERT INTO notification_preferences (user_id, sms_enabled, email_enabled)
+             VALUES ($1, FALSE, FALSE)`,
+            [user.user_id]
+        );
         await writeAuditLog(client, {
             userId: req.user.userId,
             actionType: "CREATE",
@@ -143,7 +150,10 @@ async function createStaff(req, res) {
     } catch (error) {
         if (client) await client.query("ROLLBACK").catch(() => {});
         if (error.code === "23505") {
-            return res.status(409).json({ status: "error", message: "An account already uses this phone number." });
+            return res.status(409).json({
+                status: "error",
+                message: "An account already uses this phone number or email address.",
+            });
         }
         console.error("Staff account creation failed:", error.code || "STAFF_CREATE_FAILED");
         return res.status(500).json({ status: "error", message: "Unable to create staff account." });
@@ -324,6 +334,7 @@ module.exports = {
     createStaff,
     resendStaffOnboarding,
     normalizeKenyanPhone,
+    normalizeStaffEmail,
     generateTemporaryPassword,
     getTransactionalSmsProvider,
 };

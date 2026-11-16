@@ -37,14 +37,19 @@ function createHarness({
     const state = {
         notifications: copy(notifications),
         claimCalls: 0,
+        claimChannels: [],
         commits: 0,
         persistCalls: [],
     };
     const repository = {
-        async claimBatch(batchSize) {
+        async claimBatch(batchSize, channels) {
             state.claimCalls += 1;
+            state.claimChannels.push([...channels]);
             const claimed = state.notifications
-                .filter((item) => item.delivery_status === "PENDING")
+                .filter((item) =>
+                    channels.includes(item.notification_type) &&
+                    item.delivery_status === "PENDING"
+                )
                 .slice(0, batchSize);
             for (const item of claimed) {
                 item.delivery_status = "PROCESSING";
@@ -152,6 +157,159 @@ test("development self-test settings do not enable or claim the general SMS queu
     assert.equal(isSmsDispatcherEnabled(environment), false);
     assert.equal(await dispatcher.runOnce(), 0);
     assert.equal(claims, 0);
+});
+
+test("disabled notification SMS does not start SMS-only polling despite broader dispatcher flags", async () => {
+    const environment = {
+        NODE_ENV: "production",
+        NOTIFICATION_SMS_PROVIDER: "MOBILE_SASA",
+        SMS_DISPATCHER_ENABLED: "true",
+        MOBILESASA_NOTIFICATION_SMS_ENABLED: "false",
+        MOBILE_SASA_SMS_API_TOKEN: "mbs_test-token",
+        MOBILE_SASA_SMS_SENDER_ID: "MicoPesa",
+    };
+    const { dispatcher, state } = createHarness({ environment });
+
+    assert.equal(dispatcher.enabled, false);
+    assert.equal(dispatcher.start(), false);
+    assert.equal(await dispatcher.runOnce(), 0);
+    assert.equal(state.claimCalls, 0);
+});
+
+test("explicitly enabled notification SMS starts polling with only the SMS channel", async () => {
+    const environment = {
+        NODE_ENV: "production",
+        NOTIFICATION_SMS_PROVIDER: "MOBILE_SASA",
+        SMS_DISPATCHER_ENABLED: "true",
+        MOBILESASA_NOTIFICATION_SMS_ENABLED: "true",
+        MOBILE_SASA_SMS_API_TOKEN: "mbs_test-token",
+        MOBILE_SASA_SMS_SENDER_ID: "MicoPesa",
+    };
+    let intervalCallback;
+    const state = { claimCalls: 0, claimChannels: [] };
+    const worker = createSmsDeliveryDispatcher({
+        repository: {
+            async claimBatch(batchSize, channels) {
+                state.claimCalls += 1;
+                state.claimChannels.push([...channels]);
+                return [];
+            },
+        },
+        sendSms: async () => ({ accepted: true, status: "PROVIDER_ACCEPTED" }),
+        environment,
+        logger: { error() {} },
+        setIntervalImpl(callback) {
+            intervalCallback = callback;
+            return { unref() {} };
+        },
+        clearIntervalImpl() {},
+    });
+
+    assert.equal(worker.start(), true);
+    await new Promise((resolve) => setImmediate(resolve));
+    await worker.stop();
+
+    assert.equal(typeof intervalCallback, "function");
+    assert.equal(state.claimCalls, 1);
+    assert.deepEqual(state.claimChannels, [["SMS"]]);
+    assert.equal(worker.enabled, true);
+});
+
+test("email dispatch remains available when notification SMS is explicitly disabled", async () => {
+    const environment = {
+        NODE_ENV: "production",
+        NOTIFICATION_DISPATCHER_ENABLED: "true",
+        EMAIL_NOTIFICATIONS_ENABLED: "true",
+        EMAIL_PROVIDER: "MOBILE_SASA",
+        MOBILESASA_EMAIL_ENABLED: "true",
+        MOBILE_SASA_EMAIL_API_TOKEN: "mbs_test-token",
+        MOBILE_SASA_EMAIL_FROM: "billing@example.test",
+        NOTIFICATION_SMS_PROVIDER: "MOBILE_SASA",
+        SMS_DISPATCHER_ENABLED: "true",
+        MOBILESASA_NOTIFICATION_SMS_ENABLED: "false",
+        MOBILE_SASA_SMS_API_TOKEN: "mbs_test-token",
+        MOBILE_SASA_SMS_SENDER_ID: "MicoPesa",
+    };
+    let smsSends = 0;
+    let emailSends = 0;
+    const { dispatcher, state } = createHarness({
+        environment,
+        notifications: [{
+            notification_id: "email_001",
+            notification_type: "EMAIL",
+            recipient_email: "worker@example.test",
+            email_subject: "Contribution received",
+            message: "Contribution received",
+            delivery_status: "PENDING",
+            attempt_count: 0,
+        }],
+        sendSms: async () => {
+            smsSends += 1;
+            return { accepted: true, status: "PROVIDER_ACCEPTED" };
+        },
+        sendEmail: async () => {
+            emailSends += 1;
+            return { accepted: true, status: "PROVIDER_ACCEPTED", messageId: "email-1" };
+        },
+    });
+
+    await dispatcher.runOnce();
+
+    assert.deepEqual(state.claimChannels, [["EMAIL"]]);
+    assert.equal(smsSends, 0);
+    assert.equal(emailSends, 1);
+    assert.equal(state.notifications[0].delivery_status, "PROVIDER_ACCEPTED");
+});
+
+test("missing notification schema stops polling once without calling a provider", async () => {
+    let intervalCallback;
+    let clearedTimer;
+    let claims = 0;
+    let smsSends = 0;
+    const logs = [];
+    const timer = { unref() {} };
+    const error = new Error("Notification delivery requires the event classification schema.");
+    error.code = "NOTIFICATION_SCHEMA_MISMATCH";
+    error.databaseCode = "42703";
+    error.schemaObject = "notifications.notification_event_type";
+    const worker = createSmsDeliveryDispatcher({
+        repository: {
+            async claimBatch() {
+                claims += 1;
+                throw error;
+            },
+        },
+        sendSms: async () => {
+            smsSends += 1;
+            return { accepted: true, status: "PROVIDER_ACCEPTED" };
+        },
+        environment: productionEnvironment,
+        logger: { error: (...args) => logs.push(args) },
+        setIntervalImpl(callback) {
+            intervalCallback = callback;
+            return timer;
+        },
+        clearIntervalImpl(value) {
+            clearedTimer = value;
+        },
+    });
+
+    assert.equal(worker.start(), true);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(clearedTimer, timer);
+    assert.equal(claims, 1);
+    assert.equal(smsSends, 0);
+    assert.equal(logs.length, 1);
+    assert.equal(logs[0][1].code, "NOTIFICATION_SCHEMA_MISMATCH");
+    assert.equal(logs[0][1].databaseCode, "42703");
+    assert.equal(logs[0][1].schemaObject, "notifications.notification_event_type");
+
+    intervalCallback();
+    await new Promise((resolve) => setImmediate(resolve));
+    await assert.rejects(worker.runOnce(), { code: "NOTIFICATION_SCHEMA_MISMATCH" });
+    assert.equal(claims, 1);
+    assert.equal(logs.length, 1);
+    await worker.stop();
 });
 
 test("passes the stable notification ID to the SMS provider for Mobile Sasa reconciliation", async () => {
@@ -274,6 +432,56 @@ test("provider timeout becomes UNKNOWN and is not resent after restart", async (
     assert.equal(restarted.state.claimCalls, 1);
 });
 
+test("email provider failures use canonical sanitized codes without retrying unknown outcomes", async () => {
+    const environment = {
+        NODE_ENV: "production",
+        NOTIFICATION_DISPATCHER_ENABLED: "true",
+        EMAIL_NOTIFICATIONS_ENABLED: "true",
+        EMAIL_PROVIDER: "MOBILE_SASA",
+        MOBILESASA_EMAIL_ENABLED: "true",
+        MOBILE_SASA_EMAIL_API_TOKEN: "mbs_test-token",
+        MOBILE_SASA_EMAIL_FROM: "billing@example.test",
+    };
+    const cases = [
+        { code: "EMAIL_TIMEOUT", expected: "EMAIL_PROVIDER_TIMEOUT", status: "UNKNOWN" },
+        { code: "EMAIL_NETWORK_ERROR", expected: "EMAIL_NETWORK_ERROR", status: "UNKNOWN" },
+        { code: "EMAIL_PROVIDER_AUTH_FAILED", expected: "EMAIL_PROVIDER_AUTH_FAILED", status: "FAILED" },
+        { code: "EMAIL_PROVIDER_REJECTED", expected: "EMAIL_PROVIDER_REJECTED", status: "FAILED" },
+        { code: "EMAIL_DEVELOPMENT_ALLOWLIST_EMPTY", expected: "EMAIL_DEVELOPMENT_ALLOWLIST_EMPTY", status: "FAILED" },
+        { code: "EMAIL_INVALID_RESPONSE", expected: "EMAIL_UNKNOWN_OUTCOME", status: "UNKNOWN" },
+    ];
+
+    for (const testCase of cases) {
+        const { dispatcher, state } = createHarness({
+            environment,
+            notifications: [{
+                notification_id: `email_${testCase.expected}`,
+                notification_type: "EMAIL",
+                recipient_email: "worker@example.test",
+                email_subject: "Contribution received",
+                message: "Contribution received",
+                delivery_status: "PENDING",
+                attempt_count: 0,
+            }],
+            sendEmail: async () => {
+                const error = new Error("provider failure");
+                error.code = testCase.code;
+                throw error;
+            },
+        });
+
+        await dispatcher.runOnce();
+
+        assert.equal(state.notifications[0].delivery_status, testCase.status);
+        assert.deepEqual(state.persistCalls[0].slice(0, 3), [
+            testCase.status === "FAILED" ? "failed" : "unknown",
+            `email_${testCase.expected}`,
+            testCase.expected,
+        ]);
+        assert.equal(state.persistCalls.some(([operation]) => operation === "retry"), false);
+    }
+});
+
 test("accepted notifications are not retried while awaiting delivery reports", async () => {
     let sends = 0;
     const sendSms = async () => {
@@ -319,13 +527,17 @@ test("Mobile Sasa SMS dispatch requires explicit provider selection and complete
         NODE_ENV: "production",
         NOTIFICATION_SMS_PROVIDER: "MOBILE_SASA",
         SMS_DISPATCHER_ENABLED: "true",
-        MOBILESASA_SMS_ENABLED: "true",
+        MOBILESASA_NOTIFICATION_SMS_ENABLED: "true",
+        MOBILESASA_SMS_ENABLED: "false",
         MOBILE_SASA_SMS_API_TOKEN: "mbs_test-token",
         MOBILE_SASA_SMS_SENDER_ID: "MicoPesa",
     };
 
     assert.equal(isSmsDispatcherEnabled(environment), true);
-    assert.equal(isSmsDispatcherEnabled({ ...environment, MOBILESASA_SMS_ENABLED: "false" }), false);
+    assert.equal(isSmsDispatcherEnabled({
+        ...environment,
+        MOBILESASA_NOTIFICATION_SMS_ENABLED: "false",
+    }), false);
     assert.equal(isSmsDispatcherEnabled({ ...environment, MOBILE_SASA_SMS_API_TOKEN: "legacy-token" }), false);
     assert.equal(isSmsDispatcherEnabled({ ...environment, MOBILE_SASA_SMS_SENDER_ID: "" }), false);
     assert.equal(isSmsDispatcherEnabled({ ...environment, NOTIFICATION_SMS_PROVIDER: "UNKNOWN" }), false);

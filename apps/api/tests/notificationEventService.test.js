@@ -7,9 +7,15 @@ const { sendAdminEmail } = require("../src/services/adminEmailNotificationServic
 const {
     createBusinessNotificationEnqueuer,
     createNotificationEventService,
+    EVENT_MESSAGES,
     escapeHtml,
     renderTransactionalTemplate,
 } = require("../src/services/notificationEventService");
+const {
+    ESSENTIAL_TRANSACTIONAL_EVENT_TYPES,
+    NOTIFICATION_EVENT_POLICIES,
+    isEssentialTransactionalNotification,
+} = require("../src/services/notificationEventPolicy");
 
 function withModuleMocks(mocks, callback) {
     const originalLoad = Module._load;
@@ -63,6 +69,7 @@ function createPool({
         sms_enabled: true,
         email_enabled: true,
     },
+    recipientByUser = null,
     preferences = { sms_enabled: false, email_enabled: false },
     failChannel = null,
 } = {}) {
@@ -84,6 +91,7 @@ function createPool({
             subject: values[5],
             html: values[6],
             eventKey: values[7],
+            eventType: values[8],
         });
         return { rows: [{ notification_id: `notification-${records.length}` }], rowCount: 1 };
     }
@@ -102,6 +110,18 @@ function createPool({
                 };
                 return { rows: [{ ...preferenceState }] };
             }
+            if (sql.includes("FROM users u")) {
+                return {
+                    rows: [{
+                        ...preferenceState,
+                        phone_registered: Boolean(recipient.phone),
+                        phone_verified: Boolean(recipient.phone_verified_at),
+                        email_registered: Boolean(recipient.email || recipient.pending_email),
+                        email_verified: recipient.email_verified === true && Boolean(recipient.email),
+                        push_enabled: false,
+                    }],
+                };
+            }
             if (sql.includes("UPDATE notifications")) return { rows: [], rowCount: 0 };
             assert.fail(`Unexpected mocked client SQL: ${sql}`);
         },
@@ -111,11 +131,26 @@ function createPool({
         async connect() { return client; },
         async query(sql, values = []) {
             calls.push({ sql, values });
+            if (sql.includes("EXISTS (") && sql.includes("push_subscriptions")) {
+                return {
+                    rows: [{
+                        ...(preferenceState || { sms_enabled: false, email_enabled: false }),
+                        phone_registered: Boolean(recipient.phone),
+                        phone_verified: Boolean(recipient.phone_verified_at),
+                        email_registered: Boolean(recipient.email || recipient.pending_email),
+                        email_verified: recipient.email_verified === true && Boolean(recipient.email),
+                        push_enabled: false,
+                    }],
+                };
+            }
             if (sql.includes("FROM notification_preferences")) {
                 return { rows: preferenceState ? [{ ...preferenceState }] : [] };
             }
             if (sql.includes("FROM users u")) {
-                return { rows: recipient ? [{ ...recipient }] : [] };
+                const selectedRecipient = recipientByUser
+                    ? recipientByUser[values[0]]
+                    : recipient;
+                return { rows: selectedRecipient ? [{ ...selectedRecipient }] : [] };
             }
             assert.fail(`Unexpected mocked pool SQL: ${sql}`);
         },
@@ -136,6 +171,21 @@ test("event notifications keep in-app delivery and enqueue opted-in verified cha
     const mock = createPool({
         preferences: { sms_enabled: true, email_enabled: true },
     });
+
+    test("the central policy classifies every supported business event as essential and no unknown event", () => {
+        assert.deepEqual(
+            Object.keys(EVENT_MESSAGES).sort(),
+            Object.keys(NOTIFICATION_EVENT_POLICIES).sort()
+        );
+        assert.deepEqual(
+            [...ESSENTIAL_TRANSACTIONAL_EVENT_TYPES].sort(),
+            Object.keys(EVENT_MESSAGES).sort()
+        );
+        for (const eventType of Object.keys(EVENT_MESSAGES)) {
+            assert.equal(isEssentialTransactionalNotification(eventType), true);
+        }
+        assert.equal(isEssentialTransactionalNotification("UNSUPPORTED_EVENT"), false);
+    });
     const service = createNotificationEventService(mock.pool);
     const event = {
         userId: "worker-1",
@@ -155,19 +205,154 @@ test("event notifications keep in-app delivery and enqueue opted-in verified cha
     assert.equal(email.email, "worker@example.test");
     assert.equal(email.text.includes("KES"), false);
     assert.equal(email.html.includes("contribution-123"), false);
+    assert.equal(email.eventType, "CONTRIBUTION_CONFIRMED");
     assert.equal(new Set(mock.records.map((row) => row.eventKey)).size, 1);
 });
 
-test("a confirmed business event reaches the mocked transactional email transport once", async () => {
+test("essential business events reach only verified channels when optional preferences are off", async () => {
     const mock = createPool({
-        preferences: { sms_enabled: false, email_enabled: true },
+        preferences: { sms_enabled: false, email_enabled: false },
         recipient: {
             phone: "0712345678",
             phone_verified_at: "2026-01-01T00:00:00Z",
             email: "worker@example.test",
             email_verified: true,
             sms_enabled: false,
-            email_enabled: true,
+            email_enabled: false,
+        },
+    });
+    const service = createNotificationEventService(mock.pool);
+
+    const result = await service.enqueueEvent({
+        userId: "worker-1",
+        eventType: "CONTRIBUTION_CONFIRMED",
+        referenceId: "contribution-essential",
+    });
+
+    assert.deepEqual(result.channels, ["IN_APP", "SMS", "EMAIL"]);
+    assert.equal(mock.records.length, 3);
+    assert.ok(mock.records.every((record) =>
+        record.eventType === "CONTRIBUTION_CONFIRMED"
+    ));
+    assert.deepEqual(
+        mock.records.find((record) => record.channel === "SMS").phone,
+        "+254712345678"
+    );
+    assert.equal(
+        mock.records.find((record) => record.channel === "EMAIL").email,
+        "worker@example.test"
+    );
+});
+
+test("simulated contribution confirmations queue verified email but never queue SMS", async () => {
+    const mock = createPool({
+        preferences: { sms_enabled: true, email_enabled: true },
+    });
+    const service = createNotificationEventService(mock.pool);
+
+    const result = await service.enqueueEvent({
+        userId: "worker-1",
+        eventType: "CONTRIBUTION_CONFIRMED",
+        referenceId: "contribution-simulated",
+        simulated: true,
+    });
+
+    assert.deepEqual(result, { queued: 2, channels: ["IN_APP", "EMAIL"] });
+    assert.deepEqual(mock.records.map((record) => record.channel), ["IN_APP", "EMAIL"]);
+    assert.equal(mock.records[0].text.includes("simulated"), true);
+    assert.equal(mock.records[0].text.includes("No real money was transferred"), true);
+    assert.equal(mock.records[1].subject, "Simulated contribution confirmed");
+    assert.equal(mock.records[1].html.includes("No real money was transferred"), true);
+});
+
+test("simulated essential confirmation email bypasses optional opt-in only for verified email", async () => {
+    const mock = createPool({
+        preferences: { sms_enabled: false, email_enabled: false },
+        recipient: {
+            phone: "0712345678",
+            phone_verified_at: "2026-01-01T00:00:00Z",
+            email: "worker@example.test",
+            email_verified: true,
+            sms_enabled: false,
+            email_enabled: false,
+        },
+    });
+    const service = createNotificationEventService(mock.pool);
+
+    const result = await service.enqueueEvent({
+        userId: "worker-1",
+        eventType: "CONTRIBUTION_CONFIRMED",
+        referenceId: "contribution-simulated-opt-out",
+        simulated: true,
+    });
+
+    assert.deepEqual(result.channels, ["IN_APP", "EMAIL"]);
+    assert.equal(mock.records.length, 2);
+    assert.equal(mock.records.some((record) => record.channel === "SMS"), false);
+    assert.equal(mock.records.find((record) => record.channel === "EMAIL").email,
+        "worker@example.test");
+});
+
+test("event notifications use the selected active profile across roles without notifying others", async () => {
+    const profiles = [
+        { userId: "worker-1", phone: "0700000001", email: "worker@example.test", role: "WORKER" },
+        { userId: "manager-1", phone: "0700000002", email: "manager@example.test", role: "FUND_MANAGER" },
+        { userId: "regulator-1", phone: "0700000003", email: "regulator@example.test", role: "REGULATOR" },
+        { userId: "admin-1", phone: "0700000004", email: "admin@example.test", role: "ADMIN" },
+        { userId: "unrelated-user", phone: "0700000005", email: "unrelated@example.test", role: "WORKER" },
+    ];
+    const mock = createPool({
+        recipientByUser: Object.fromEntries(profiles.map((profile) => [
+            profile.userId,
+            {
+                phone: profile.phone,
+                phone_verified_at: "2026-01-01T00:00:00Z",
+                email: profile.email,
+                email_verified: true,
+                sms_enabled: true,
+                email_enabled: true,
+                role: profile.role,
+            },
+        ])),
+        preferences: { sms_enabled: true, email_enabled: true },
+    });
+    const service = createNotificationEventService(mock.pool);
+
+    for (const profile of profiles.slice(0, 4)) {
+        await service.enqueueEvent({
+            userId: profile.userId,
+            eventType: "KYC_VERIFIED",
+            referenceId: `kyc-${profile.userId}`,
+        });
+    }
+
+    assert.equal(mock.records.length, 12);
+    for (const profile of profiles.slice(0, 4)) {
+        const deliveries = mock.records.filter((record) => record.userId === profile.userId);
+        assert.deepEqual(deliveries.map((record) => record.channel).sort(), [
+            "EMAIL", "IN_APP", "SMS",
+        ]);
+        assert.equal(deliveries.find((record) => record.channel === "SMS").phone,
+            `+254${profile.phone.slice(1)}`);
+        assert.equal(deliveries.find((record) => record.channel === "EMAIL").email,
+            profile.email);
+    }
+    assert.equal(mock.records.some((record) => record.userId === "unrelated-user"), false);
+    assert.equal(mock.calls.some((call) =>
+        call.sql.includes("FROM users u") && call.values[0] === "unrelated-user"
+    ), false);
+});
+
+test("simulated contribution confirmation reaches mocked email transport without SMS", async () => {
+    const mock = createPool({
+        preferences: { sms_enabled: true, email_enabled: false },
+        recipient: {
+            phone: "0712345678",
+            phone_verified_at: "2026-01-01T00:00:00Z",
+            email: "worker@example.test",
+            email_verified: true,
+            sms_enabled: false,
+            email_enabled: false,
         },
     });
     const eventService = createNotificationEventService(mock.pool);
@@ -175,6 +360,7 @@ test("a confirmed business event reaches the mocked transactional email transpor
         userId: "worker-1",
         eventType: "CONTRIBUTION_CONFIRMED",
         referenceId: "contribution-email-123",
+        simulated: true,
     };
     const first = await eventService.enqueueEvent(event);
     const duplicate = await eventService.enqueueEvent(event);
@@ -197,7 +383,7 @@ test("a confirmed business event reaches the mocked transactional email transpor
         NOTIFICATION_DISPATCHER_ENABLED: "true",
         EMAIL_NOTIFICATIONS_ENABLED: "true",
         GMAIL_USER: "sender@example.test",
-        GMAIL_APP_PASSWORD: "mock-password",
+        GMAIL_APP_PASSWORD: "abcdefghijklmnop",
     };
     const deliveries = [];
     const dispatcher = createSmsDeliveryDispatcher({
@@ -237,7 +423,9 @@ test("a confirmed business event reaches the mocked transactional email transpor
     assert.equal(deliveries.length, 1);
     assert.equal(deliveries[0].to, "worker@example.test");
     assert.equal(deliveries[0].text, queuedEmail.text);
-    assert.match(deliveries[0].html, /Contribution confirmed/);
+    assert.match(deliveries[0].html, /Simulated contribution confirmed/);
+    assert.match(deliveries[0].text, /No real money was transferred/);
+    assert.equal(mock.records.some((row) => row.channel === "SMS"), false);
     assert.deepEqual(persisted, [["email-notification-1", "mock-email-acceptance"]]);
 });
 
@@ -287,6 +475,11 @@ test("preference reads default to explicit opt-out", async () => {
     assert.deepEqual(await service.getPreferences("worker-1"), {
         sms_enabled: false,
         email_enabled: false,
+        phone_registered: true,
+        phone_verified: true,
+        email_registered: true,
+        email_verified: true,
+        push_enabled: false,
     });
 });
 
@@ -297,13 +490,35 @@ test("preference updates patch only the authenticated user's supplied channel fi
     const service = createNotificationEventService(mock.pool);
     const result = await service.updatePreferences("worker-1", { sms_enabled: false });
 
-    assert.deepEqual(result, { sms_enabled: false, email_enabled: true });
+    assert.deepEqual(await service.getPreferences("worker-1"), result);
+    assert.deepEqual(result, {
+        sms_enabled: false,
+        email_enabled: true,
+        phone_registered: true,
+        phone_verified: true,
+        email_registered: true,
+        email_verified: true,
+        push_enabled: false,
+    });
     assert.deepEqual(mock.calls.find((call) =>
         call.sql.includes("INSERT INTO notification_preferences")
     ).values, ["worker-1", false, null]);
     assert.deepEqual(mock.calls.find((call) =>
         call.sql.includes("UPDATE notifications")
-    ).values, ["worker-1", ["SMS"]]);
+    ).values, [
+        "worker-1",
+        ["SMS"],
+        [
+            "CONTRIBUTION_CONFIRMED",
+            "KYC_VERIFIED",
+            "KYC_REJECTED",
+            "RETIREMENT_PLAN_SAVED",
+        ],
+    ]);
+    assert.match(
+        mock.calls.find((call) => call.sql.includes("UPDATE notifications")).sql,
+        /notification_event_type IS NULL/
+    );
 });
 
 test("delivery claims require explicit per-user SMS/email opt-in while push remains independent", async () => {
@@ -386,9 +601,21 @@ test("preference controller exposes only current-user boolean state and ignores 
     ]);
     assert.deepEqual(getResponse.body, {
         status: "success",
-        data: { sms_enabled: false, email_enabled: true },
+        data: {
+            sms_enabled: false,
+            email_enabled: true,
+            sms_delivery_enabled: false,
+            email_delivery_enabled: false,
+            push_delivery_enabled: false,
+        },
     });
-    assert.deepEqual(patchResponse.body.data, { sms_enabled: true, email_enabled: true });
+    assert.deepEqual(patchResponse.body.data, {
+        sms_enabled: true,
+        email_enabled: true,
+        sms_delivery_enabled: false,
+        email_delivery_enabled: false,
+        push_delivery_enabled: false,
+    });
     assert.equal(JSON.stringify(getResponse.body).includes("worker@example.test"), false);
 });
 

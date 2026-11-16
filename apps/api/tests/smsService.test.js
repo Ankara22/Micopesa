@@ -65,6 +65,238 @@ test("accepts an international Kenyan mobile number", async () => {
     assert.equal(recipient, "+254112345678");
 });
 
+test("phone verification availability follows the configured transactional provider", () => {
+    assert.equal(smsService.isPhoneVerificationSmsConfigured({
+        ...configuredEnvironment,
+        TRANSACTIONAL_SMS_PROVIDER: "AFRICAS_TALKING",
+    }), true);
+    assert.equal(smsService.isPhoneVerificationSmsConfigured({
+        ...configuredEnvironment,
+        AT_API_KEY: "",
+        TRANSACTIONAL_SMS_PROVIDER: "AFRICAS_TALKING",
+    }), false);
+    assert.equal(smsService.isPhoneVerificationSmsConfigured({
+        NODE_ENV: "production",
+        TRANSACTIONAL_SMS_PROVIDER: "MOBILE_SASA",
+        MOBILESASA_SMS_ENABLED: "true",
+        MOBILE_SASA_SMS_API_TOKEN: "mbs_test-token",
+        MOBILE_SASA_SMS_SENDER_ID: "MicoPesa",
+    }), true);
+    assert.equal(smsService.isPhoneVerificationSmsConfigured({
+        NODE_ENV: "production",
+        TRANSACTIONAL_SMS_PROVIDER: "UNSUPPORTED",
+    }), false);
+    assert.equal(smsService.isPhoneVerificationSmsConfigured({
+        ...configuredEnvironment,
+        NODE_ENV: "test",
+    }), false);
+});
+
+test("phone verification configuration reports sanitized development and production selection", () => {
+    const development = smsService.getPhoneVerificationSmsConfiguration({
+        NODE_ENV: "development",
+        MOBILESASA_TEST_SMS_ENABLED: "true",
+        MOBILESASA_SMS_ENABLED: "false",
+        MOBILE_SASA_SMS_API_TOKEN: "mbs_test-token",
+        MOBILE_SASA_SMS_SENDER_ID: "MicoPesa",
+    });
+    assert.deepEqual(development, {
+        available: true,
+        errorCode: null,
+        missingVariables: [],
+        invalidVariables: [],
+        mode: "development-test",
+        provider: "MOBILE_SASA",
+    });
+
+    const missingDevelopment = smsService.getPhoneVerificationSmsConfiguration({
+        NODE_ENV: "development",
+        MOBILESASA_SMS_ENABLED: "false",
+    });
+    assert.equal(missingDevelopment.available, false);
+    assert.equal(missingDevelopment.errorCode, "SMS_TEST_DISABLED");
+    assert.ok(missingDevelopment.missingVariables.includes("MOBILESASA_TEST_SMS_ENABLED"));
+    assert.ok(missingDevelopment.missingVariables.includes("MOBILE_SASA_SMS_API_TOKEN"));
+    assert.doesNotMatch(JSON.stringify(missingDevelopment), /mbs_|MicoPesa/);
+
+    const invalidDevelopment = smsService.getPhoneVerificationSmsConfiguration({
+        NODE_ENV: "development",
+        MOBILESASA_TEST_SMS_ENABLED: "true",
+        MOBILESASA_SMS_ENABLED: "true",
+        MOBILE_SASA_SMS_API_TOKEN: "mbs_test-token",
+        MOBILE_SASA_SMS_SENDER_ID: "MicoPesa",
+    });
+    assert.equal(invalidDevelopment.available, false);
+    assert.ok(invalidDevelopment.invalidVariables.includes("MOBILESASA_SMS_ENABLED"));
+
+    const africaTalking = smsService.getPhoneVerificationSmsConfiguration({
+        ...configuredEnvironment,
+        TRANSACTIONAL_SMS_PROVIDER: "AFRICAS_TALKING",
+    });
+    assert.equal(africaTalking.available, true);
+    assert.equal(africaTalking.mode, "production-transactional");
+    assert.equal(africaTalking.provider, "AFRICAS_TALKING");
+
+    const mobileSasa = smsService.getPhoneVerificationSmsConfiguration({
+        NODE_ENV: "production",
+        TRANSACTIONAL_SMS_PROVIDER: "MOBILE_SASA",
+        MOBILESASA_SMS_ENABLED: "true",
+        MOBILE_SASA_SMS_API_TOKEN: "mbs_test-token",
+        MOBILE_SASA_SMS_SENDER_ID: "MicoPesa",
+    });
+    assert.equal(mobileSasa.available, true);
+    assert.equal(mobileSasa.provider, "MOBILE_SASA");
+
+    const missingTransactional = smsService.getPhoneVerificationSmsConfiguration({
+        NODE_ENV: "production",
+        TRANSACTIONAL_SMS_PROVIDER: "AFRICAS_TALKING",
+        AT_ENVIRONMENT: "production",
+        AT_USERNAME: "production-user",
+    });
+    assert.equal(missingTransactional.available, false);
+    assert.deepEqual(missingTransactional.missingVariables, ["AT_API_KEY"]);
+});
+
+test("phone verification uses the selected transactional provider", async () => {
+    let requestUrl;
+    const result = await smsService.sendPhoneVerificationSms({
+        to: "+254712345678",
+        message: "verification code",
+        trackingId: "phone-verification-test",
+    }, {
+        environment: {
+            ...configuredEnvironment,
+            TRANSACTIONAL_SMS_PROVIDER: "AFRICAS_TALKING",
+        },
+        fetchImpl: async (url) => {
+            requestUrl = url;
+            return providerResponse({
+                recipients: [{ status: "Success", messageId: "message-id" }],
+            });
+        },
+    });
+    assert.equal(requestUrl, "https://api.africastalking.com/version1/messaging");
+    assert.equal(result.status, "PROVIDER_ACCEPTED");
+});
+
+test("development phone verification dispatches only through the configured Mobile Sasa test path", async () => {
+    const environment = {
+        NODE_ENV: "development",
+        MOBILESASA_TEST_SMS_ENABLED: "true",
+        MOBILESASA_SMS_ENABLED: "false",
+        MOBILESASA_NOTIFICATION_SMS_ENABLED: "false",
+        MOBILE_SASA_SMS_API_TOKEN: "mbs_test-token",
+        MOBILE_SASA_SMS_SENDER_ID: "MicoPesa",
+    };
+    const configuration = smsService.getPhoneVerificationSmsConfiguration(environment);
+    let request;
+    const result = await smsService.sendPhoneVerificationSms({
+        to: "+254712345678",
+        message: "verification code",
+        trackingId: "phone-verification-test",
+    }, {
+        environment,
+        fetchImpl: async (url, options) => {
+            request = { url, options, body: JSON.parse(options.body) };
+            return {
+                ok: true,
+                status: 200,
+                async json() {
+                    return { status: true, responseCode: "0200", messageId: "mock-id" };
+                },
+            };
+        },
+    });
+
+    assert.equal(configuration.available, true);
+    assert.equal(configuration.mode, "development-test");
+    assert.equal(request.url, "https://api.mobilesasa.com/v1/send/message");
+    assert.equal(request.options.headers.Authorization, "Bearer mbs_test-token");
+    assert.equal(request.body.phone, "+254712345678");
+    assert.equal(result.status, "PROVIDER_ACCEPTED");
+});
+
+test("unavailable development test SMS configuration fails before dispatch with variable names only", async () => {
+    let requests = 0;
+    const environment = {
+        NODE_ENV: "development",
+        MOBILESASA_SMS_ENABLED: "false",
+    };
+    await assert.rejects(smsService.sendPhoneVerificationSms({
+        to: "+254712345678",
+        message: "verification code",
+        trackingId: "phone-verification-test",
+    }, {
+        environment,
+        fetchImpl: async () => { requests += 1; },
+    }), (error) => {
+        assert.equal(error.code, "SMS_TEST_DISABLED");
+        assert.ok(error.diagnostics.missingVariables.includes("MOBILESASA_TEST_SMS_ENABLED"));
+        assert.doesNotMatch(JSON.stringify(error.diagnostics), /mbs_|MicoPesa/);
+        return true;
+    });
+    assert.equal(requests, 0);
+});
+
+test("availability and production Mobile Sasa dispatch use the same selected provider", async () => {
+    const environment = {
+        NODE_ENV: "production",
+        TRANSACTIONAL_SMS_PROVIDER: "MOBILE_SASA",
+        MOBILESASA_SMS_ENABLED: "true",
+        MOBILE_SASA_SMS_API_TOKEN: "mbs_test-token",
+        MOBILE_SASA_SMS_SENDER_ID: "MicoPesa",
+    };
+    const configuration = smsService.getPhoneVerificationSmsConfiguration(environment);
+    let requestUrl;
+    let deliveryProvider;
+    const result = await smsService.sendPhoneVerificationSms({
+        to: "+254712345678",
+        message: "verification code",
+        trackingId: "phone-verification-test",
+    }, {
+        environment,
+        fetchImpl: async (url) => {
+            requestUrl = url;
+            return {
+                ok: true,
+                status: 200,
+                async json() {
+                    return { status: true, responseCode: "0200", messageId: "mock-id" };
+                },
+            };
+        },
+    });
+    deliveryProvider = result.deliveryResult.provider;
+    assert.equal(configuration.available, true);
+    assert.equal(configuration.provider, deliveryProvider);
+    assert.equal(requestUrl, "https://api.mobilesasa.com/v1/send/message");
+});
+
+test("phone verification refuses a provider changed after its availability preflight", async () => {
+    let requests = 0;
+    const expectedConfiguration = {
+        available: true,
+        mode: "production-transactional",
+        provider: "AFRICAS_TALKING",
+    };
+    await assert.rejects(smsService.sendPhoneVerificationSms({
+        to: "+254712345678",
+        message: "verification code",
+        trackingId: "phone-verification-test",
+    }, {
+        environment: {
+            NODE_ENV: "production",
+            TRANSACTIONAL_SMS_PROVIDER: "MOBILE_SASA",
+            MOBILESASA_SMS_ENABLED: "true",
+            MOBILE_SASA_SMS_API_TOKEN: "mbs_test-token",
+            MOBILE_SASA_SMS_SENDER_ID: "MicoPesa",
+        },
+        providerConfiguration: expectedConfiguration,
+        fetchImpl: async () => { requests += 1; },
+    }), { code: "SMS_CONFIGURATION_CHANGED" });
+    assert.equal(requests, 0);
+});
+
 test("notification provider selection does not change direct staff SMS from Africa's Talking", async () => {
     let url;
     await smsService.sendSms(
@@ -120,60 +352,68 @@ test("notification service selects Mobile Sasa only when explicitly injected by 
     assert.equal(requestUrl, "https://api.mobilesasa.com/v1/send/message");
 });
 
-test("development SMS uses Mobile Sasa only for explicitly allowlisted recipients", async () => {
-    let requestBody;
+test("development SMS supports multiple allowlisted recipients", async () => {
+    const requestBodies = [];
     const environment = {
         NODE_ENV: "development",
         COMMUNICATIONS_DEV_DELIVERY_ENABLED: "true",
         COMMUNICATIONS_DEV_SMS_ENABLED: "true",
-        COMMUNICATIONS_DEV_ALLOWED_PHONES: "0712 345 678",
+        COMMUNICATIONS_DEV_ALLOWED_PHONES: "+254712345678,0700000001",
         TRANSACTIONAL_SMS_PROVIDER: "MOBILE_SASA",
         MOBILESASA_SMS_ENABLED: "true",
         MOBILE_SASA_SMS_API_TOKEN: "mbs_test-token",
         MOBILE_SASA_SMS_SENDER_ID: "MicoPesa",
     };
-    const result = await smsService.sendSms({
-        to: "+254712345678",
-        message: "Local development test",
-        trackingId: "development-sms-1",
-    }, {
-        environment,
-        provider: "MOBILE_SASA",
-        fetchImpl: async (_url, options) => {
-            requestBody = JSON.parse(options.body);
-            return {
-                ok: true,
-                status: 200,
-                async json() {
-                    return { status: true, responseCode: "0200", messageId: "accepted-1" };
-                },
-            };
-        },
-    });
+    for (const [to, trackingId] of [
+        ["+254712345678", "development-sms-1"],
+        ["0700000001", "development-sms-2"],
+    ]) {
+        const result = await smsService.sendSms({
+            to,
+            message: "Mocked development delivery",
+            trackingId,
+        }, {
+            environment,
+            provider: "MOBILE_SASA",
+            fetchImpl: async (_url, options) => {
+                requestBodies.push(JSON.parse(options.body));
+                return {
+                    ok: true,
+                    status: 200,
+                    async json() {
+                        return {
+                            status: true,
+                            responseCode: "0200",
+                            messageId: `accepted-${trackingId}`,
+                        };
+                    },
+                };
+            },
+        });
+        assert.equal(result.status, "PROVIDER_ACCEPTED");
+    }
 
-    assert.equal(result.status, "PROVIDER_ACCEPTED");
-    assert.equal(requestBody.phone, "+254712345678");
+    assert.deepEqual(requestBodies.map((request) => request.phone), [
+        "+254712345678",
+        "+254700000001",
+    ]);
 });
 
-test("development SMS is blocked for disabled policy, empty allowlist, and unapproved recipient", async () => {
+test("development SMS is blocked when delivery is disabled or the recipient is invalid", async () => {
     let requests = 0;
     const environment = {
         NODE_ENV: "development",
         COMMUNICATIONS_DEV_DELIVERY_ENABLED: "true",
         COMMUNICATIONS_DEV_SMS_ENABLED: "true",
-        COMMUNICATIONS_DEV_ALLOWED_PHONES: "0712 345 678",
         MOBILESASA_SMS_ENABLED: "true",
         MOBILE_SASA_SMS_API_TOKEN: "mbs_test-token",
         MOBILE_SASA_SMS_SENDER_ID: "MicoPesa",
     };
     for (const [overrides, code] of [
         [{ COMMUNICATIONS_DEV_DELIVERY_ENABLED: "false" }, "SMS_DEVELOPMENT_DELIVERY_DISABLED"],
-        [{ COMMUNICATIONS_DEV_ALLOWED_PHONES: "" }, "SMS_DEVELOPMENT_ALLOWLIST_EMPTY"],
-        [{}, "SMS_DEVELOPMENT_RECIPIENT_NOT_ALLOWED"],
     ]) {
-        const to = code === "SMS_DEVELOPMENT_RECIPIENT_NOT_ALLOWED" ? "0711111111" : "0712345678";
         await assert.rejects(() => smsService.sendSms({
-            to,
+            to: "0712345678",
             message: "Local development test",
             trackingId: "blocked-sms-1",
         }, {
@@ -182,6 +422,15 @@ test("development SMS is blocked for disabled policy, empty allowlist, and unapp
             fetchImpl: async () => { requests += 1; },
         }), { code });
     }
+    await assert.rejects(() => smsService.sendSms({
+        to: "not-a-phone",
+        message: "Local development test",
+        trackingId: "blocked-sms-invalid",
+    }, {
+        environment,
+        provider: "MOBILE_SASA",
+        fetchImpl: async () => { requests += 1; },
+    }), { code: "SMS_INVALID_RECIPIENT" });
     assert.equal(requests, 0);
 });
 

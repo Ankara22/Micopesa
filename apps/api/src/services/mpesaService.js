@@ -1,6 +1,17 @@
-const DARAJA_BASE_URL = "https://sandbox.safaricom.co.ke";
+const DARAJA_BASE_URLS = Object.freeze({
+    sandbox: "https://sandbox.safaricom.co.ke",
+    production: "https://api.safaricom.co.ke",
+});
 const REQUEST_TIMEOUT_MS = 15000;
 const TOKEN_REFRESH_MARGIN_MS = 60000;
+const {
+    getDarajaSetting,
+    getPaymentProviderConfiguration,
+} = require("./mpesaPaymentProviderConfig");
+const DARAJA_TRANSACTION_TYPES = new Set([
+    "CustomerPayBillOnline",
+    "CustomerBuyGoodsOnline",
+]);
 
 function createServiceError(message, statusCode, requestStage, options = {}) {
     const error = new Error(message);
@@ -13,19 +24,37 @@ function createServiceError(message, statusCode, requestStage, options = {}) {
 }
 
 function getConfiguration(environment = process.env) {
+    const paymentConfiguration = getPaymentProviderConfiguration(environment);
+    if (!paymentConfiguration.darajaEnvironment) {
+        throw createServiceError(
+            "DARAJA_ENV must explicitly select sandbox or production.",
+            503
+        );
+    }
+
     const configuration = {
-        consumerKey: environment.MPESA_CONSUMER_KEY?.trim(),
-        consumerSecret: environment.MPESA_CONSUMER_SECRET?.trim(),
-        passkey: environment.MPESA_PASSKEY?.trim(),
-        shortcode: environment.MPESA_SHORTCODE?.trim(),
-        callbackUrl: environment.MPESA_CALLBACK_URL?.trim(),
+        consumerKey: getDarajaSetting(environment, "DARAJA_CONSUMER_KEY", "MPESA_CONSUMER_KEY"),
+        consumerSecret: getDarajaSetting(environment, "DARAJA_CONSUMER_SECRET", "MPESA_CONSUMER_SECRET"),
+        passkey: getDarajaSetting(environment, "DARAJA_PASSKEY", "MPESA_PASSKEY"),
+        shortcode: getDarajaSetting(
+            environment,
+            "DARAJA_BUSINESS_SHORTCODE",
+            ["MPESA_BUSINESS_SHORTCODE", "MPESA_SHORTCODE"]
+        ),
+        callbackUrl: getDarajaSetting(environment, "DARAJA_CALLBACK_URL", "MPESA_CALLBACK_URL"),
+        transactionType: getDarajaSetting(
+            environment,
+            "DARAJA_TRANSACTION_TYPE",
+            "MPESA_TRANSACTION_TYPE"
+        ),
     };
     const envNames = {
-        consumerKey: "MPESA_CONSUMER_KEY",
-        consumerSecret: "MPESA_CONSUMER_SECRET",
-        passkey: "MPESA_PASSKEY",
-        shortcode: "MPESA_SHORTCODE",
-        callbackUrl: "MPESA_CALLBACK_URL",
+        consumerKey: "DARAJA_CONSUMER_KEY",
+        consumerSecret: "DARAJA_CONSUMER_SECRET",
+        passkey: "DARAJA_PASSKEY",
+        shortcode: "DARAJA_BUSINESS_SHORTCODE",
+        callbackUrl: "DARAJA_CALLBACK_URL",
+        transactionType: "DARAJA_TRANSACTION_TYPE",
     };
     const missing = Object.entries(configuration)
         .filter(([, value]) => !value)
@@ -35,14 +64,20 @@ function getConfiguration(environment = process.env) {
         throw createServiceError(`M-Pesa configuration is incomplete: ${missing.join(", ")}`, 503);
     }
     if (!/^\d{5,6}$/.test(configuration.shortcode)) {
-        throw createServiceError("MPESA_SHORTCODE must contain 5 or 6 digits.", 503);
+        throw createServiceError("DARAJA_BUSINESS_SHORTCODE must contain 5 or 6 digits.", 503);
+    }
+    if (!DARAJA_TRANSACTION_TYPES.has(configuration.transactionType)) {
+        throw createServiceError(
+            "DARAJA_TRANSACTION_TYPE must be CustomerPayBillOnline or CustomerBuyGoodsOnline.",
+            503
+        );
     }
 
     let callbackUrl;
     try {
         callbackUrl = new URL(configuration.callbackUrl);
     } catch {
-        throw createServiceError("MPESA_CALLBACK_URL must be a valid HTTPS URL.", 503);
+        throw createServiceError("DARAJA_CALLBACK_URL must be a valid HTTPS URL.", 503);
     }
     if (
         callbackUrl.protocol !== "https:" ||
@@ -51,10 +86,16 @@ function getConfiguration(environment = process.env) {
         callbackUrl.password ||
         callbackUrl.hash
     ) {
-        throw createServiceError("MPESA_CALLBACK_URL must be a valid HTTPS URL without credentials or a fragment.", 503);
+        throw createServiceError("DARAJA_CALLBACK_URL must be a valid HTTPS URL without credentials or a fragment.", 503);
     }
 
-    return { ...configuration, callbackUrl: callbackUrl.toString() };
+    return {
+        ...configuration,
+        callbackUrl: callbackUrl.toString(),
+        darajaEnvironment: paymentConfiguration.darajaEnvironment,
+        baseUrl: DARAJA_BASE_URLS[paymentConfiguration.darajaEnvironment],
+        paymentEnabled: paymentConfiguration.paymentEnabled,
+    };
 }
 
 function validateAmount(amount) {
@@ -206,7 +247,7 @@ function createMpesaService({
                 `${configuration.consumerKey}:${configuration.consumerSecret}`
             ).toString("base64");
             const { body: response } = await requestJson(
-                `${DARAJA_BASE_URL}/oauth/v1/generate?grant_type=client_credentials`,
+                `${configuration.baseUrl}/oauth/v1/generate?grant_type=client_credentials`,
                 { headers: { Authorization: `Basic ${authorization}` } },
                 "oauth"
             );
@@ -242,13 +283,20 @@ function createMpesaService({
         const normalizedPhone = normalizePhoneNumber(phoneNumber);
         const wholeKesAmount = validateAmount(amount);
         const configuration = configurationProvider();
+        if (configuration.paymentEnabled !== true) {
+            throw createServiceError(
+                "M-Pesa payment initiation is not enabled by server configuration.",
+                503,
+                "configuration"
+            );
+        }
         const accessToken = await getAccessToken(configuration);
         const timestamp = getDarajaTimestamp(new Date(clock()));
         const password = Buffer.from(
             `${configuration.shortcode}${configuration.passkey}${timestamp}`
         ).toString("base64");
         const { body: response, httpStatus } = await requestJson(
-            `${DARAJA_BASE_URL}/mpesa/stkpush/v1/processrequest`,
+            `${configuration.baseUrl}/mpesa/stkpush/v1/processrequest`,
             {
                 method: "POST",
                 headers: {
@@ -259,7 +307,7 @@ function createMpesaService({
                     BusinessShortCode: configuration.shortcode,
                     Password: password,
                     Timestamp: timestamp,
-                    TransactionType: "CustomerPayBillOnline",
+                    TransactionType: configuration.transactionType,
                     Amount: wholeKesAmount,
                     PartyA: normalizedPhone,
                     PartyB: configuration.shortcode,
@@ -309,7 +357,7 @@ function createMpesaService({
             `${configuration.shortcode}${configuration.passkey}${timestamp}`
         ).toString("base64");
         const { body: response } = await requestJson(
-            `${DARAJA_BASE_URL}/mpesa/stkpushquery/v1/query`,
+            `${configuration.baseUrl}/mpesa/stkpushquery/v1/query`,
             {
                 method: "POST",
                 headers: {
@@ -367,7 +415,7 @@ function createMpesaService({
 
     return {
         assertConfigured() {
-            configurationProvider();
+            return configurationProvider();
         },
         getAccessToken,
         initiateStkPush,
@@ -385,6 +433,8 @@ module.exports = {
     assertConfigured: defaultService.assertConfigured,
     createMpesaService,
     getConfiguration,
+    DARAJA_BASE_URLS,
+    DARAJA_TRANSACTION_TYPES,
     getDarajaTimestamp,
     initiateStkPush: defaultService.initiateStkPush,
     maskPhoneNumber,

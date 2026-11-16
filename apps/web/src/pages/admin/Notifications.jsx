@@ -1,14 +1,11 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import DOMPurify from "dompurify";
 import useApi from "../../hooks/useApi";
 import {
     createNotification,
-    getExternalSmsAvailability,
     listNotificationRecipients,
     listNotifications,
-    sendExternalRecipientSms,
-    sendAdminTestSms,
 } from "../../services/adminService";
 import Button from "../../components/ui/Button";
 import Modal from "../../components/ui/Modal";
@@ -26,10 +23,16 @@ import {
 import "../notifications/notifications.css";
 
 const CHANNELS = ["SMS", "EMAIL", "PUSH"];
+const ESSENTIAL_OPERATIONAL_CATEGORIES = new Set([
+    "ACCOUNT_SERVICE",
+    "CONTRIBUTION_REMINDER",
+    "SCHEME_UPDATE",
+    "REGULATORY_ADVISORY",
+    "COMPLIANCE_NOTICE",
+    "DEADLINE_REMINDER",
+]);
 const HISTORY_STATUSES = ["PENDING", "PROVIDER_ACCEPTED", "DELIVERED", "FAILED", "UNKNOWN"];
 const DISPATCH_PENDING_STATUSES = new Set(["PENDING", "PROCESSING"]);
-const ADMIN_TEST_SMS_MESSAGE =
-    "MicoPesa test notification: Your SMS notification service is working. This is a test message. No payment has been made.";
 const EMPTY_FORM = {
     user_ids: [],
     channels: [],
@@ -55,27 +58,41 @@ function Notifications() {
     const [messageTooLong, setMessageTooLong] = useState(false);
     const [selectedRecipientSnapshots, setSelectedRecipientSnapshots] = useState([]);
     const [lastResults, setLastResults] = useState([]);
-    const [testSmsPreviewOpen, setTestSmsPreviewOpen] = useState(false);
-    const [testSmsSubmitting, setTestSmsSubmitting] = useState(false);
-    const [testSmsResult, setTestSmsResult] = useState(null);
-    const externalSmsAvailabilityApi = useApi(getExternalSmsAvailability, []);
-    const [externalSmsRecipient, setExternalSmsRecipient] = useState("");
-    const [externalSmsMessage, setExternalSmsMessage] = useState("");
-    const [externalSmsConsent, setExternalSmsConsent] = useState(false);
-    const [externalSmsPreviewOpen, setExternalSmsPreviewOpen] = useState(false);
-    const [externalSmsSubmitting, setExternalSmsSubmitting] = useState(false);
-    const [externalSmsResult, setExternalSmsResult] = useState(null);
+    const [recipientDropdownOpen, setRecipientDropdownOpen] = useState(false);
     const [historySearch, setHistorySearch] = useState("");
     const [historyChannel, setHistoryChannel] = useState("");
     const [historyStatus, setHistoryStatus] = useState("");
     const [viewingNotification, setViewingNotification] = useState(null);
     const submissionInProgressRef = useRef(false);
-    const testSmsInProgressRef = useRef(false);
-    const externalSmsInProgressRef = useRef(false);
-    const externalSmsRequestIdRef = useRef(null);
+    const recipientDropdownRef = useRef(null);
     const requestIdRef = useRef(null);
+    const isEssentialOperationalCategory = ESSENTIAL_OPERATIONAL_CATEGORIES.has(form.category);
+    const adminCanOverrideOptionalPreferences = true;
 
-    const currentRecipients = recipientsApi.data || [];
+    useEffect(() => {
+        function closeRecipientDropdown(event) {
+            if (!recipientDropdownRef.current?.contains(event.target)) {
+                setRecipientDropdownOpen(false);
+            }
+        }
+        function closeOnEscape(event) {
+            if (event.key === "Escape") setRecipientDropdownOpen(false);
+        }
+        document.addEventListener("mousedown", closeRecipientDropdown);
+        document.addEventListener("keydown", closeOnEscape);
+        return () => {
+            document.removeEventListener("mousedown", closeRecipientDropdown);
+            document.removeEventListener("keydown", closeOnEscape);
+        };
+    }, []);
+
+    const currentRecipients = Array.isArray(recipientsApi.data) ? recipientsApi.data : [];
+    function hasCurrentRecipientDiagnostics(recipient) {
+        return !recipientsApi.loading &&
+            !recipientsApi.refreshing &&
+            !recipientsApi.error &&
+            currentRecipients.some((current) => current.user_id === recipient.user_id);
+    }
     const selectedRecipients = form.user_ids.map((userId) =>
         currentRecipients.find((recipient) => recipient.user_id === userId) ||
         selectedRecipientSnapshots.find((recipient) => recipient.user_id === userId)
@@ -149,10 +166,104 @@ function Notifications() {
     }
 
     function isChannelAvailable(channel) {
-        if (!selectedRecipients.length) return false;
-        if (channel === "SMS") return selectedRecipients.some((recipient) => Boolean(recipient.phone));
-        if (channel === "EMAIL") return selectedRecipients.some((recipient) => Boolean(recipient.email));
-        return selectedRecipients.some((recipient) => Number(recipient.push_subscription_count) > 0);
+        if (!selectedRecipients.length ||
+            selectedRecipients.some((recipient) => !hasCurrentRecipientDiagnostics(recipient))) {
+            return false;
+        }
+        if (channel === "SMS") return selectedRecipients.some((recipient) =>
+            recipient.phone_available &&
+            recipient.sms_delivery_enabled === true &&
+            (isEssentialOperationalCategory ||
+                adminCanOverrideOptionalPreferences ||
+                recipient.sms_enabled === true)
+        );
+        if (channel === "EMAIL") return selectedRecipients.some((recipient) =>
+            recipient.email_available &&
+            recipient.email_delivery_enabled === true &&
+            (isEssentialOperationalCategory ||
+                adminCanOverrideOptionalPreferences ||
+                recipient.email_enabled === true)
+        );
+        return selectedRecipients.some((recipient) =>
+            Number(recipient.push_subscription_count) > 0 &&
+            recipient.push_delivery_enabled === true
+        );
+    }
+
+    function systemDeliveryStatus(recipient, channel) {
+        const diagnostic = recipient[`${channel.toLowerCase()}_delivery_diagnostic`];
+        if (!diagnostic) {
+            return t(`adminNotifications.${channel.toLowerCase()}ProviderDisabled`);
+        }
+        if (diagnostic.reason_code === "provider_configuration_missing") {
+            return t("adminNotifications.providerConfigurationMissing", {
+                variables: diagnostic.missing_variables?.join(", ") || "",
+            });
+        }
+        if (diagnostic.reason_code === "provider_configuration_invalid") {
+            return t("adminNotifications.providerConfigurationInvalid", {
+                variables: diagnostic.invalid_variables?.join(", ") || "",
+            });
+        }
+        if (diagnostic.reason_code === "provider_unsupported") {
+            return t("adminNotifications.providerUnsupported");
+        }
+        if (diagnostic.reason_code === "system_delivery_disabled") {
+            const variables = [
+                ...(diagnostic.missing_variables || []),
+                ...(diagnostic.disabled_variables || []),
+                ...(diagnostic.invalid_variables || []),
+            ].join(", ");
+            return variables
+                ? t("adminNotifications.systemDeliveryDisabledWithVariables", { variables })
+                : t("adminNotifications.systemDeliveryDisabled");
+        }
+        if (diagnostic.reason_code === "environment_unsupported") {
+            return t("adminNotifications.channelUnsupportedInEnvironment");
+        }
+        return t(`adminNotifications.${channel.toLowerCase()}ProviderDisabled`);
+    }
+
+    function recipientChannelStatus(recipient, channel) {
+        if (!hasCurrentRecipientDiagnostics(recipient)) {
+            return t("adminNotifications.recipientDiagnosticsUnavailable");
+        }
+        if (channel === "SMS") {
+            const reasons = [];
+            if (!recipient.phone_registered) reasons.push(t("adminNotifications.phoneUnavailable"));
+            else if (!recipient.phone_verified) reasons.push(t("adminNotifications.phoneUnverified"));
+            if (!isEssentialOperationalCategory &&
+                !adminCanOverrideOptionalPreferences &&
+                recipient.sms_enabled !== true) {
+                reasons.push(t("adminNotifications.smsPreferenceDisabled"));
+            }
+            if (recipient.sms_delivery_enabled !== true) reasons.push(systemDeliveryStatus(recipient, channel));
+            return reasons.length
+                ? reasons.join("; ")
+                : t("adminNotifications.verifiedPhoneAvailable");
+        }
+        if (channel === "EMAIL") {
+            const reasons = [];
+            if (!recipient.email_registered) reasons.push(t("adminNotifications.emailUnavailable"));
+            else if (recipient.email_verified !== true) reasons.push(t("adminNotifications.emailUnverified"));
+            if (!isEssentialOperationalCategory &&
+                !adminCanOverrideOptionalPreferences &&
+                recipient.email_enabled !== true) {
+                reasons.push(t("adminNotifications.emailPreferenceDisabled"));
+            }
+            if (recipient.email_delivery_enabled !== true) reasons.push(systemDeliveryStatus(recipient, channel));
+            return reasons.length
+                ? reasons.join("; ")
+                : t("adminNotifications.verifiedEmailAvailable");
+        }
+        const count = Number(recipient.push_subscription_count);
+        const reasons = [];
+        if (count > 0) reasons.push(t("adminNotifications.pushDeviceCount", { count }));
+        else reasons.push(t("adminNotifications.pushUnavailable"));
+        if (recipient.push_delivery_enabled !== true) {
+            reasons.push(systemDeliveryStatus(recipient, channel));
+        }
+        return reasons.join("; ");
     }
 
     function handlePreview(event) {
@@ -165,23 +276,25 @@ function Notifications() {
         setPreviewOpen(true);
     }
 
+    async function refreshRecipientDiagnostics() {
+        const recipients = await recipientsApi.refetch(true);
+        if (!Array.isArray(recipients)) return null;
+        setSelectedRecipientSnapshots((current) => current.map((snapshot) =>
+            recipients.find((recipient) => recipient.user_id === snapshot.user_id) || snapshot
+        ));
+        return recipients;
+    }
+
     async function refreshStatuses() {
-        const rows = await notificationsApi.refetch();
+        const [rows] = await Promise.all([
+            notificationsApi.refetch(true),
+            refreshRecipientDiagnostics(),
+        ]);
         if (!Array.isArray(rows)) return;
         setLastResults((current) => current.map((result) => {
             const latest = rows.find((row) => row.notification_id === result.notification_id);
             return latest ? { ...result, ...latest } : result;
         }));
-        setTestSmsResult((current) => {
-            if (!current) return current;
-            const latest = rows.find((row) => row.notification_id === current.notification_id);
-            return latest ? { ...current, ...latest } : current;
-        });
-        setExternalSmsResult((current) => {
-            if (!current) return current;
-            const latest = rows.find((row) => row.notification_id === current.notification_id);
-            return latest ? { ...current, ...latest } : current;
-        });
     }
 
     async function watchQueuedDeliveryResults(results) {
@@ -225,48 +338,6 @@ function Notifications() {
         toast.info(t("adminNotifications.dispatchStillPending"));
     }
 
-    async function confirmTestSms() {
-        if (testSmsInProgressRef.current) return;
-        testSmsInProgressRef.current = true;
-        setTestSmsSubmitting(true);
-        try {
-            const requestId = window.crypto?.randomUUID?.();
-            if (!requestId) throw new Error("A secure request identifier is unavailable.");
-            const results = await sendAdminTestSms(requestId);
-            if (!Array.isArray(results) || results.length !== 1) {
-                toast.error(t("adminNotifications.testSmsUnavailable"));
-                return;
-            }
-            setTestSmsResult(results[0]);
-            setTestSmsPreviewOpen(false);
-            const outcomeKey = {
-                PENDING: "testSmsQueued",
-                PROVIDER_ACCEPTED: "testSmsAccepted",
-                DELIVERED: "testSmsDelivered",
-                FAILED: "testSmsFailed",
-                UNKNOWN: "testSmsUnknown",
-            }[normalizeNotificationStatus(results[0].delivery_status)] || "testSmsUnknown";
-            const outcomeMessage = t(`adminNotifications.${outcomeKey}`);
-            if (normalizeNotificationStatus(results[0].delivery_status) === "FAILED") {
-                toast.error(outcomeMessage);
-            } else if (normalizeNotificationStatus(results[0].delivery_status) === "UNKNOWN") {
-                toast.info(outcomeMessage);
-            } else {
-                toast.success(outcomeMessage);
-            }
-        } catch (error) {
-            const code = error?.response?.data?.code;
-            toast.error(code === "NOTIFICATION_RATE_LIMITED"
-                ? t("adminNotifications.testSmsRateLimited")
-                : code === "NOTIFICATION_SMS_UNAVAILABLE"
-                    ? t("adminNotifications.testSmsUnavailable")
-                    : t("adminNotifications.queueError"));
-        } finally {
-            testSmsInProgressRef.current = false;
-            setTestSmsSubmitting(false);
-        }
-    }
-
     function statusLabel(status) {
         const normalized = normalizeNotificationStatus(status);
         return t(`adminNotifications.statusLabels.${normalized}`, {
@@ -282,90 +353,6 @@ function Notifications() {
             (item.admin_request_key || item.request_id) === requestKey &&
             (item.recipient_user_id || item.user_id || item.recipient_phone) === recipientId
         );
-    }
-
-    function testSmsStatusMessage(result) {
-        const status = normalizeNotificationStatus(result.delivery_status);
-        if (status === "PENDING") return t("adminNotifications.testSmsPending");
-        if (status === "DELIVERED") return t("adminNotifications.testSmsDelivered");
-        if (status === "PROVIDER_ACCEPTED" &&
-            result.delivery_result?.provider === "MOBILE_SASA") {
-            return t("adminNotifications.testSmsAcceptedByMobileSasa");
-        }
-        return t("adminNotifications.testSmsStatusDescription", { status: statusLabel(status) });
-    }
-
-    function externalSmsStatusMessage(result) {
-        const status = normalizeNotificationStatus(result.delivery_status);
-        const key = {
-            PENDING: "externalSmsQueued",
-            PROCESSING: "externalSmsProcessing",
-            PROVIDER_ACCEPTED: "externalSmsAccepted",
-            DELIVERED: "externalSmsDelivered",
-            FAILED: "externalSmsFailed",
-            UNKNOWN: "externalSmsUnknown",
-        }[status];
-        return key
-            ? t(`adminNotifications.${key}`)
-            : t("adminNotifications.testSmsStatusDescription", { status: statusLabel(status) });
-    }
-
-    function handleExternalSmsPreview(event) {
-        event.preventDefault();
-        if (!/^\+254[17]\d{8}$/.test(externalSmsRecipient) ||
-            !externalSmsMessage.trim() || externalSmsMessage.length > 255 ||
-            !externalSmsConsent) {
-            return;
-        }
-        setExternalSmsPreviewOpen(true);
-    }
-
-    async function confirmExternalSms() {
-        if (externalSmsInProgressRef.current) return;
-        externalSmsInProgressRef.current = true;
-        setExternalSmsSubmitting(true);
-        try {
-            if (!externalSmsRequestIdRef.current) {
-                externalSmsRequestIdRef.current = window.crypto?.randomUUID?.();
-                if (!externalSmsRequestIdRef.current) {
-                    throw new Error("A secure request identifier is unavailable.");
-                }
-            }
-            const result = await sendExternalRecipientSms({
-                recipient_phone: externalSmsRecipient,
-                message: externalSmsMessage,
-                recipient_consented: true,
-                confirmed: true,
-                request_id: externalSmsRequestIdRef.current,
-            });
-            setExternalSmsResult(result);
-            setExternalSmsPreviewOpen(false);
-            externalSmsRequestIdRef.current = null;
-            const status = normalizeNotificationStatus(result.delivery_status);
-            const outcomeKey = {
-                PENDING: "externalSmsQueued",
-                PROCESSING: "externalSmsProcessing",
-                PROVIDER_ACCEPTED: "externalSmsAccepted",
-                DELIVERED: "externalSmsDelivered",
-                FAILED: "externalSmsFailed",
-                UNKNOWN: "externalSmsUnknown",
-            }[status] || "externalSmsUnknown";
-            const outcomeMessage = t(`adminNotifications.${outcomeKey}`);
-            if (status === "FAILED") toast.error(outcomeMessage);
-            else if (status === "UNKNOWN" || status === "PROCESSING") toast.info(outcomeMessage);
-            else toast.success(outcomeMessage);
-            await refreshStatuses();
-        } catch (error) {
-            const code = error?.response?.data?.code;
-            toast.error(code === "NOTIFICATION_RATE_LIMITED"
-                ? t("adminNotifications.externalSmsRateLimited")
-                : code === "NOTIFICATION_EXTERNAL_SMS_UNAVAILABLE"
-                    ? t("adminNotifications.externalSmsUnavailable")
-                    : t("adminNotifications.queueError"));
-        } finally {
-            externalSmsInProgressRef.current = false;
-            setExternalSmsSubmitting(false);
-        }
     }
 
     async function handleConfirm() {
@@ -398,8 +385,20 @@ function Notifications() {
             await refreshStatuses();
             toast.info(t("adminNotifications.queuedSuccess"));
             void watchQueuedDeliveryResults(queuedResults);
-        } catch {
-            toast.error(t("adminNotifications.queueError"));
+        } catch (error) {
+            const code = error?.data?.code || error?.response?.data?.code;
+            const messageKey = code === "NOTIFICATION_PREFERENCE_DISABLED"
+                ? "adminNotifications.preferenceChanged"
+                : code === "NOTIFICATION_CONTACT_UNAVAILABLE"
+                    ? "adminNotifications.contactChanged"
+                    : code === "NOTIFICATION_SYSTEM_DELIVERY_DISABLED"
+                        ? "adminNotifications.systemDeliveryDisabled"
+                        : code === "NOTIFICATION_PROVIDER_CONFIGURATION_MISSING"
+                            ? "adminNotifications.providerConfigurationMissingShort"
+                            : code === "NOTIFICATION_PROVIDER_CONFIGURATION_INVALID"
+                                ? "adminNotifications.providerConfigurationInvalidShort"
+                                : "adminNotifications.queueError";
+            toast.error(t(messageKey));
         } finally {
             submissionInProgressRef.current = false;
             setSubmitting(false);
@@ -437,126 +436,6 @@ function Notifications() {
                     </section>
                 )}
 
-                <section className="notification-test-banner" aria-labelledby="test-sms-heading">
-                    <div className="notification-test-copy">
-                        <span className="notification-eyebrow">{t("adminNotifications.testSmsEyebrow")}</span>
-                        <h2 id="test-sms-heading">{t("adminNotifications.testSmsTitle")}</h2>
-                        <p>{t("adminNotifications.testSmsDescription")}</p>
-                    </div>
-                    <Button variant="primary" onClick={() => setTestSmsPreviewOpen(true)}>
-                        {t("adminNotifications.testSmsAction")}
-                    </Button>
-                </section>
-
-                {testSmsResult && (
-                    <section className="notification-test-result" role="status" aria-live="polite">
-                        <div>
-                            <strong>{t("adminNotifications.testSmsLatest")}</strong>
-                            <p>{testSmsStatusMessage(testSmsResult)}</p>
-                        </div>
-                        <StatusBadge
-                            status={normalizeNotificationStatus(testSmsResult.delivery_status)}
-                            label={statusLabel(testSmsResult.delivery_status)}
-                        />
-                    </section>
-                )}
-
-                <AdminCard
-                    title={t("adminNotifications.externalSmsTitle")}
-                    description={t("adminNotifications.externalSmsDescription")}
-                >
-                    {externalSmsAvailabilityApi.loading &&
-                    externalSmsAvailabilityApi.data === null ? (
-                        <LoadingState message={t("worker.common.loadingRecords")} />
-                    ) : externalSmsAvailabilityApi.error &&
-                    externalSmsAvailabilityApi.data === null ? (
-                        <ErrorState
-                            message={t("adminNotifications.externalSmsAvailabilityError")}
-                            onRetry={externalSmsAvailabilityApi.refetch}
-                        />
-                    ) : !externalSmsAvailabilityApi.data?.enabled ? (
-                        <p role="status">{t("adminNotifications.externalSmsUnavailable")}</p>
-                    ) : (
-                        <form className="admin-form-grid" onSubmit={handleExternalSmsPreview}>
-                            <div>
-                                <label className="admin-field-label" htmlFor="external-sms-recipient">
-                                    {t("adminNotifications.externalSmsRecipient")}
-                                </label>
-                                <input
-                                    className="admin-control"
-                                    id="external-sms-recipient"
-                                    type="tel"
-                                    inputMode="tel"
-                                    autoComplete="tel"
-                                    pattern="\+254[17]\d{8}"
-                                    maxLength={13}
-                                    placeholder="+254712345678"
-                                    value={externalSmsRecipient}
-                                    onChange={(event) => {
-                                        externalSmsRequestIdRef.current = null;
-                                        setExternalSmsRecipient(event.target.value);
-                                    }}
-                                    required
-                                />
-                            </div>
-                            <div className="admin-span-all">
-                                <label className="admin-field-label" htmlFor="external-sms-message">
-                                    {t("adminNotifications.externalSmsMessage")}
-                                </label>
-                                <textarea
-                                    className="admin-control"
-                                    id="external-sms-message"
-                                    rows={4}
-                                    maxLength={255}
-                                    value={externalSmsMessage}
-                                    onChange={(event) => {
-                                        externalSmsRequestIdRef.current = null;
-                                        setExternalSmsMessage(event.target.value);
-                                    }}
-                                    required
-                                />
-                                <p className="admin-hint">
-                                    {t("adminNotifications.messageHint", {
-                                        count: externalSmsMessage.length,
-                                        max: 255,
-                                    })}
-                                </p>
-                            </div>
-                            <label className="admin-field-label admin-span-all">
-                                <input
-                                    type="checkbox"
-                                    checked={externalSmsConsent}
-                                    onChange={(event) => setExternalSmsConsent(event.target.checked)}
-                                    required
-                                />
-                                <span>{t("adminNotifications.externalSmsConsent")}</span>
-                            </label>
-                            <div className="admin-span-all">
-                                <Button
-                                    type="submit"
-                                    variant="primary"
-                                    disabled={!externalSmsRecipient || !externalSmsMessage.trim() ||
-                                        externalSmsMessage.length > 255 || !externalSmsConsent}
-                                >
-                                    {t("adminNotifications.externalSmsPreview")}
-                                </Button>
-                            </div>
-                        </form>
-                    )}
-                    {externalSmsResult && (
-                        <section className="notification-test-result" role="status" aria-live="polite">
-                            <div>
-                                <strong>{t("adminNotifications.externalSmsLatest")}</strong>
-                                <p>{externalSmsStatusMessage(externalSmsResult)}</p>
-                            </div>
-                            <StatusBadge
-                                status={normalizeNotificationStatus(externalSmsResult.delivery_status)}
-                                label={statusLabel(externalSmsResult.delivery_status)}
-                            />
-                        </section>
-                    )}
-                </AdminCard>
-
                 <AdminCard
                     title={t("adminNotifications.composeTitle")}
                     description={t("adminNotifications.composeDescription")}
@@ -567,43 +446,97 @@ function Notifications() {
                         <ErrorState message={t("worker.common.errors.load")} onRetry={recipientsApi.refetch} />
                     ) : (
                         <form className="admin-form-grid" onSubmit={handlePreview}>
+                            {recipientsApi.error && recipientsApi.data !== null && (
+                                <p className="admin-hint" role="alert">
+                                    {t("adminNotifications.recipientDiagnosticsUnavailable")}
+                                </p>
+                            )}
                             <div className="admin-span-all">
-                                <label className="admin-field-label" htmlFor="notification-recipient-search">
-                                    {t("adminNotifications.searchRecipients")}
-                                </label>
-                                <input
-                                    className="admin-control"
-                                    id="notification-recipient-search"
-                                    type="search"
-                                    value={recipientSearch}
-                                    onChange={(event) => setRecipientSearch(event.target.value)}
-                                    disabled={submitting}
-                                    autoComplete="off"
-                                />
+                                <div className="admin-stack">
+                                    <Button
+                                        variant="secondary"
+                                        size="sm"
+                                        loading={recipientsApi.refreshing}
+                                        disabled={recipientsApi.loading}
+                                        onClick={refreshRecipientDiagnostics}
+                                    >
+                                        {t("adminNotifications.refreshRecipientDiagnostics")}
+                                    </Button>
+                                </div>
                             </div>
                             <fieldset className="admin-span-all">
                                 <legend className="admin-field-label">
                                     {t("adminNotifications.recipient")}
                                 </legend>
-                                {recipientOptions.length === 0 ? (
-                                    <p className="admin-hint">{t("adminNotifications.noRecipients")}</p>
-                                ) : (
-                                    <div className="admin-stack">
-                                        {recipientOptions.map((recipient) => (
-                                            <label className="admin-channel-pill" key={recipient.user_id}>
-                                                <input
-                                                    type="checkbox"
-                                                    checked={form.user_ids.includes(recipient.user_id)}
-                                                    onChange={() => toggleRecipient(recipient)}
-                                                    disabled={submitting}
-                                                />
-                                                {recipient.full_name} ({t(`roles.${recipient.role}`, {
-                                                    defaultValue: recipient.role,
-                                                })})
-                                            </label>
-                                        ))}
-                                    </div>
-                                )}
+                                <div className="admin-stack" ref={recipientDropdownRef}>
+                                    {form.user_ids.length > 0 && (
+                                        <div className="admin-channel-pills" aria-label={t("adminNotifications.recipientsSelected", {
+                                            count: form.user_ids.length,
+                                        })}>
+                                            {selectedRecipients.map((recipient) => (
+                                                <span className="admin-channel-pill" key={recipient.user_id}>
+                                                    {recipient.full_name}
+                                                    <button
+                                                        type="button"
+                                                        aria-label={`${t("adminNotifications.removeRecipient")} ${recipient.full_name}`}
+                                                        onClick={() => toggleRecipient(recipient)}
+                                                        disabled={submitting}
+                                                    >
+                                                        ×
+                                                    </button>
+                                                </span>
+                                            ))}
+                                        </div>
+                                    )}
+                                    <Button
+                                        type="button"
+                                        variant="secondary"
+                                        aria-expanded={recipientDropdownOpen}
+                                        aria-haspopup="listbox"
+                                        onClick={() => setRecipientDropdownOpen((open) => !open)}
+                                        disabled={submitting}
+                                    >
+                                        {t("adminNotifications.searchAndSelectRecipients")}
+                                    </Button>
+                                    {recipientDropdownOpen && (
+                                        <div role="listbox" aria-label={t("adminNotifications.recipient")}>
+                                            <input
+                                                className="admin-control"
+                                                id="notification-recipient-search"
+                                                type="search"
+                                                aria-label={t("adminNotifications.searchRecipients")}
+                                                placeholder={t("adminNotifications.searchRecipients")}
+                                                value={recipientSearch}
+                                                onChange={(event) => setRecipientSearch(event.target.value)}
+                                                disabled={submitting}
+                                                autoComplete="off"
+                                                autoFocus
+                                            />
+                                            {recipientOptions.length === 0 ? (
+                                                <p className="admin-hint">{t("adminNotifications.noRecipients")}</p>
+                                            ) : (
+                                                <div className="admin-stack">
+                                                    {recipientOptions.map((recipient) => (
+                                                        <label className="admin-channel-pill" key={recipient.user_id}>
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={form.user_ids.includes(recipient.user_id)}
+                                                                onChange={() => {
+                                                                    toggleRecipient(recipient);
+                                                                    setRecipientDropdownOpen(false);
+                                                                }}
+                                                                disabled={submitting}
+                                                            />
+                                                            {recipient.full_name} ({t(`roles.${recipient.role}`, {
+                                                                defaultValue: recipient.role,
+                                                            })})
+                                                        </label>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
                                 <p className="admin-hint">
                                     {t("adminNotifications.recipientsSelected", { count: form.user_ids.length })}
                                 </p>
@@ -650,18 +583,15 @@ function Notifications() {
                                     ))}
                                 </div>
                                 {selectedRecipients.length > 0 && (
-                                    <ul className="admin-hint">
+                                    <ul className="admin-hint" aria-label={t("adminNotifications.channelAvailability")}>
                                         {selectedRecipients.map((recipient) => (
                                             <li key={recipient.user_id}>
-                                                {recipient.full_name}:{" "}
-                                                {form.channels.map((channel) => (
+                                                <strong>{recipient.full_name}:</strong>{" "}
+                                                {CHANNELS.map((channel) => (
                                                     <span key={channel}>
-                                                        {channel === "EMAIL" ? recipient.email
-                                                            : channel === "SMS" ? recipient.phone
-                                                                : t("adminNotifications.pushDeviceCount", {
-                                                                    count: recipient.push_subscription_count,
-                                                                })}
-                                                        {" "}
+                                                        {t(`adminNotifications.${channel.toLowerCase()}`)} —{" "}
+                                                        {recipientChannelStatus(recipient, channel)}
+                                                        {channel !== CHANNELS[CHANNELS.length - 1] ? "; " : ""}
                                                     </span>
                                                 ))}
                                             </li>
@@ -938,70 +868,6 @@ function Notifications() {
             </div>
 
             <Modal
-                open={testSmsPreviewOpen}
-                title={t("adminNotifications.testSmsPreviewTitle")}
-                onClose={() => {
-                    if (!testSmsSubmitting) setTestSmsPreviewOpen(false);
-                }}
-            >
-                <div className="notification-test-preview">
-                    <p><strong>{t("adminNotifications.testSmsRecipient")}:</strong>{" "}
-                        {t("adminNotifications.testSmsOwnNumber")}</p>
-                    <p><strong>{t("adminNotifications.message")}:</strong></p>
-                    <blockquote>{ADMIN_TEST_SMS_MESSAGE}</blockquote>
-                    <p className="notification-test-warning">{t("adminNotifications.testSmsWarning")}</p>
-                    <div className="admin-actions">
-                        <Button
-                            variant="secondary"
-                            disabled={testSmsSubmitting}
-                            onClick={() => setTestSmsPreviewOpen(false)}
-                        >
-                            {t("adminNotifications.cancel")}
-                        </Button>
-                        <Button variant="primary" loading={testSmsSubmitting} onClick={confirmTestSms}>
-                            {t("adminNotifications.testSmsConfirm")}
-                        </Button>
-                    </div>
-                </div>
-            </Modal>
-
-            <Modal
-                open={externalSmsPreviewOpen}
-                title={t("adminNotifications.externalSmsPreviewTitle")}
-                onClose={() => {
-                    if (!externalSmsSubmitting) setExternalSmsPreviewOpen(false);
-                }}
-            >
-                <div className="notification-test-preview">
-                    <p><strong>{t("adminNotifications.externalSmsRecipient")}:</strong>{" "}
-                        {externalSmsRecipient}</p>
-                    <p><strong>{t("adminNotifications.externalSmsMessage")}:</strong></p>
-                    <blockquote className="notification-external-message-preview">
-                        {externalSmsMessage}
-                    </blockquote>
-                    <p className="notification-test-warning">
-                        {t("adminNotifications.externalSmsConfirmation")}
-                    </p>
-                    <div className="admin-actions">
-                        <Button
-                            variant="secondary"
-                            disabled={externalSmsSubmitting}
-                            onClick={() => setExternalSmsPreviewOpen(false)}
-                        >
-                            {t("adminNotifications.cancel")}
-                        </Button>
-                        <Button
-                            variant="primary"
-                            loading={externalSmsSubmitting}
-                            onClick={confirmExternalSms}
-                        >
-                            {t("adminNotifications.externalSmsConfirm")}
-                        </Button>
-                    </div>
-                </div>
-            </Modal>
-
-            <Modal
                 open={previewOpen}
                 title={t("adminNotifications.previewTitle")}
                 onClose={() => {
@@ -1018,9 +884,8 @@ function Notifications() {
                                     <li key={recipient.user_id}>
                                         {recipient.full_name} — {form.channels.map((channel) => (
                                             <span key={channel}>
-                                                {channel === "SMS" ? recipient.phone
-                                                    : channel === "EMAIL" ? recipient.email
-                                                        : t("adminNotifications.push")}
+                                                {t(`adminNotifications.${channel.toLowerCase()}`)} —{" "}
+                                                {recipientChannelStatus(recipient, channel)}
                                                 {" "}
                                             </span>
                                         ))}
@@ -1038,9 +903,8 @@ function Notifications() {
                                     <li key={recipient.user_id}>
                                         {recipient.full_name}: {form.channels.map((channel) => (
                                             <span key={channel}>
-                                                {channel === "SMS" ? recipient.phone
-                                                    : channel === "EMAIL" ? recipient.email
-                                                        : t("adminNotifications.push")}
+                                                {t(`adminNotifications.${channel.toLowerCase()}`)} —{" "}
+                                                {recipientChannelStatus(recipient, channel)}
                                                 {" "}
                                             </span>
                                         ))}
@@ -1110,6 +974,17 @@ function Notifications() {
                                 defaultValue: viewingNotification.notification_category || "GENERAL",
                             })}
                         </p>
+                        {viewingNotification.notification_event_type ? (
+                            <p><strong>{t("adminNotifications.deliveryPolicy")}:</strong>{" "}
+                                {t("adminNotifications.essentialTransactionalEvent", {
+                                    eventType: viewingNotification.notification_event_type,
+                                })}
+                            </p>
+                        ) : (viewingNotification.admin_request_key || viewingNotification.created_by) ? (
+                            <p><strong>{t("adminNotifications.deliveryPolicy")}:</strong>{" "}
+                                {t("adminNotifications.optionalNotification")}
+                            </p>
+                        ) : null}
                         <p><strong>{t("adminNotifications.channel")}:</strong>{" "}
                             {t(`worker.common.notificationTypes.${viewingNotification.notification_type}`, {
                                 defaultValue: viewingNotification.notification_type,

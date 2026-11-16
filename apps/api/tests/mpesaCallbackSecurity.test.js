@@ -164,7 +164,7 @@ test("STK Push initiation is unavailable before provider or database access", as
 
         assert.equal(response.statusCode, 503);
         assert.equal(response.body.status, "error");
-        assert.match(response.body.message, /M-Pesa deposits are temporarily unavailable/);
+        assert.equal(response.body.message_key, "MPESA_PAYMENTS_DISABLED");
         assert.equal(providerRequests, 0);
         assert.equal(databaseCalls, 0);
     } finally {
@@ -207,7 +207,21 @@ test("authenticated STK Push route responds unavailable without database or prov
         });
 
         assert.equal(response.status, 503);
-        assert.match((await response.json()).message, /M-Pesa deposits are temporarily unavailable/);
+        const responseBody = await response.json();
+        assert.equal(responseBody.message_key, "MPESA_PAYMENTS_DISABLED");
+        assert.equal(authenticationLookups, 1);
+        assert.equal(databaseCalls, 0);
+        assert.equal(providerRequests, beforeProviderRequests);
+
+        const unauthenticatedResponse = await fetch(
+            `http://127.0.0.1:${address.port}/api/mpesa/stkpush`,
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ amount: 2500 }),
+            }
+        );
+        assert.equal(unauthenticatedResponse.status, 401);
         assert.equal(authenticationLookups, 1);
         assert.equal(databaseCalls, 0);
         assert.equal(providerRequests, beforeProviderRequests);

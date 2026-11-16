@@ -22,11 +22,36 @@ function createPhoneChangeController(service = phoneChangeService) {
                 "PHONE_CHANGE_CODE_EXPIRED",
                 "PHONE_CHANGE_CHALLENGE_NOT_FOUND",
                 "PHONE_CHANGE_SMS_UNAVAILABLE",
+                "PHONE_CHANGE_SMS_CONFIGURATION_MISSING",
+                "PHONE_CHANGE_SMS_PROVIDER_REJECTED",
+                "PHONE_CHANGE_SMS_OUTCOME_UNKNOWN",
+                "PHONE_CHANGE_SMS_DELIVERY_FAILED",
                 "PHONE_CHANGE_ACCOUNT_NOT_FOUND",
             ]);
             const code = knownCodes.has(error?.code) ? error.code : "PHONE_CHANGE_FAILED";
             if (statusCode >= 500) {
-                console.error("Phone change operation failed.", { code });
+                const diagnostics = error?.diagnostics || {};
+                const safeVariableNames = (names) => Array.isArray(names)
+                    ? names.filter((name) =>
+                        typeof name === "string" && /^[A-Z][A-Z0-9_]{0,80}$/.test(name))
+                    : [];
+                console.error("Phone change operation failed.", {
+                    code,
+                    ...(typeof diagnostics.provider === "string" &&
+                        ["AFRICAS_TALKING", "MOBILE_SASA"].includes(diagnostics.provider)
+                        ? { provider: diagnostics.provider }
+                        : {}),
+                    ...(typeof diagnostics.reasonCode === "string" &&
+                        /^SMS_[A-Z0-9_]{1,60}$/.test(diagnostics.reasonCode)
+                        ? { reasonCode: diagnostics.reasonCode }
+                        : {}),
+                    ...(typeof diagnostics.providerErrorCode === "string" &&
+                        /^SMS_[A-Z0-9_]{1,60}$/.test(diagnostics.providerErrorCode)
+                        ? { providerErrorCode: diagnostics.providerErrorCode }
+                        : {}),
+                    missingVariables: safeVariableNames(diagnostics.missingVariables),
+                    invalidVariables: safeVariableNames(diagnostics.invalidVariables),
+                });
             }
             return res.status(statusCode).json({
                 status: "error",

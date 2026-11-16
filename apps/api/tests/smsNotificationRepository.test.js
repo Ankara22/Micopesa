@@ -83,8 +83,13 @@ function createPool(rows, { currentEligibility = true } = {}) {
             return {
                 rows: [{
                     notification_id: row.notification_id,
+                    user_id: row.user_id,
+                    notification_type: row.notification_type,
                     recipient_phone: row.recipient_phone,
+                    recipient_email: row.recipient_email,
                     message: row.message,
+                    notification_category: row.notification_category,
+                    notification_event_type: row.notification_event_type,
                     attempt_count: row.attempt_count,
                     claim_token: row.claim_token,
                 }],
@@ -165,7 +170,9 @@ test("claims eligible SMS inside a committed SKIP LOCKED transaction", async () 
     assert.match(select, /FOR UPDATE SKIP LOCKED/);
     assert.match(select, /u\.phone_verified_at IS NOT NULL/);
     assert.match(select, /notifications\.recipient_phone/);
-    assert.match(select, /admin_request_key IS NOT NULL OR EXISTS/);
+    assert.match(select, /np\.sms_enabled IS TRUE/);
+    assert.match(select, /np\.email_enabled IS TRUE/);
+    assert.doesNotMatch(select, /admin_request_key IS NOT NULL OR EXISTS/);
     assert.ok(pool.state.statements.some((sql) =>
         sql.startsWith("UPDATE notifications n") &&
         sql.includes("NOTIFICATION_RECIPIENT_STALE")
@@ -175,6 +182,41 @@ test("claims eligible SMS inside a committed SKIP LOCKED transaction", async () 
         pool.state.statements.findIndex((sql) => sql.startsWith("UPDATE notifications") &&
             sql.includes("SET delivery_status = 'PROCESSING'"))
     );
+});
+
+test("classifies a missing notification event column and rolls back the failed claim", async () => {
+    const statements = [];
+    const pool = {
+        async connect() {
+            return {
+                async query(sql) {
+                    const statement = sql.trim();
+                    statements.push(statement);
+                    if (statement.startsWith("UPDATE notifications n")) {
+                        const error = new Error(
+                            'column "notification_event_type" does not exist; private context'
+                        );
+                        error.code = "42703";
+                        throw error;
+                    }
+                    return { rows: [], rowCount: 0 };
+                },
+                release() {},
+            };
+        },
+    };
+    const repository = createSmsNotificationRepository(pool);
+
+    await assert.rejects(repository.claimBatch(10), (error) => {
+        assert.equal(error.code, "NOTIFICATION_SCHEMA_MISMATCH");
+        assert.equal(error.databaseCode, "42703");
+        assert.equal(error.schemaObject, "notifications.notification_event_type");
+        assert.doesNotMatch(error.message, /private context/);
+        assert.equal(error.cause.code, "42703");
+        return true;
+    });
+
+    assert.equal(statements[statements.length - 1], "ROLLBACK");
 });
 
 test("revalidates the current verified recipient and preference immediately before dispatch", async () => {
@@ -191,7 +233,6 @@ test("revalidates the current verified recipient and preference immediately befo
         "u.email_verified IS TRUE",
         "lower(u.email) = lower(n.recipient_email)",
         "np.email_enabled IS TRUE",
-        "n.admin_request_key IS NOT NULL OR np.email_enabled IS TRUE",
         "n.claim_token = $2",
         "n.delivery_status = 'PROCESSING'",
     ]) {
@@ -217,6 +258,107 @@ test("revalidates the current verified recipient and preference immediately befo
         ...notification,
         notification_type: "PUSH",
     }), false);
+});
+
+test("admin-requested pending messages still require enabled recipient preferences", async () => {
+    const pool = createPool([pendingNotification({
+        admin_request_key: "admin-request-1",
+        notification_type: "SMS",
+    })]);
+    const repository = createSmsNotificationRepository(pool);
+
+    await repository.claimBatch(1);
+
+    const staleCheck = pool.state.statements.find((statement) =>
+        statement.includes("NOTIFICATION_RECIPIENT_STALE")
+    );
+    const eligibilityQuery = pool.state.statements.find((statement) =>
+        statement.startsWith("SELECT notification_id") &&
+        statement.includes("FOR UPDATE SKIP LOCKED")
+    );
+    assert.match(staleCheck, /np\.sms_enabled IS TRUE/);
+    assert.match(staleCheck, /np\.email_enabled IS TRUE/);
+    assert.match(eligibilityQuery, /np\.sms_enabled IS TRUE/);
+    assert.match(eligibilityQuery, /np\.email_enabled IS TRUE/);
+    assert.doesNotMatch(staleCheck, /admin_request_key IS NOT NULL OR/);
+    assert.doesNotMatch(eligibilityQuery, /admin_request_key IS NOT NULL OR/);
+});
+
+test("essential events bypass only optional preference checks during claim and pre-dispatch validation", async () => {
+    const essentialTypes = [
+        "CONTRIBUTION_CONFIRMED",
+        "KYC_VERIFIED",
+        "KYC_REJECTED",
+        "RETIREMENT_PLAN_SAVED",
+    ];
+    const pool = createPool([pendingNotification({
+        notification_event_type: "CONTRIBUTION_CONFIRMED",
+    })]);
+    const repository = createSmsNotificationRepository(pool);
+
+    const [claimed] = await repository.claimBatch(1);
+    const staleCheck = pool.state.queries.find(({ statement }) =>
+        statement.includes("NOTIFICATION_RECIPIENT_STALE")
+    );
+    const eligibilityQuery = pool.state.queries.find(({ statement }) =>
+        statement.startsWith("SELECT notification_id") &&
+        statement.includes("FOR UPDATE SKIP LOCKED")
+    );
+
+    assert.equal(claimed.notification_event_type, "CONTRIBUTION_CONFIRMED");
+    assert.deepEqual(staleCheck.params[1], essentialTypes);
+    assert.deepEqual(eligibilityQuery.params[3], essentialTypes);
+    assert.match(staleCheck.statement, /np\.sms_enabled IS TRUE\s+OR COALESCE/);
+    assert.match(eligibilityQuery.statement, /np\.sms_enabled IS TRUE/);
+    assert.match(eligibilityQuery.statement, /notifications\.notification_event_type = ANY\(\$4::varchar\[\]\)/);
+    assert.match(eligibilityQuery.statement, /u\.phone_verified_at IS NOT NULL/);
+    assert.match(eligibilityQuery.statement, /notifications\.recipient_phone/);
+
+    const preDispatchPool = createPool([], { currentEligibility: true });
+    const preDispatchRepository = createSmsNotificationRepository(preDispatchPool);
+    assert.equal(await preDispatchRepository.isClaimEligible({
+        notification_id: "notification_001",
+        user_id: "worker_001",
+        notification_type: "EMAIL",
+        claim_token: "claim_001",
+        notification_event_type: "CONTRIBUTION_CONFIRMED",
+    }), true);
+    assert.deepEqual(preDispatchPool.state.queries[0].params[4], essentialTypes);
+    assert.match(preDispatchPool.state.statements[0], /u\.email_verified IS TRUE/);
+    assert.match(preDispatchPool.state.statements[0], /np\.email_enabled IS TRUE\s+OR COALESCE/);
+    assert.match(preDispatchPool.state.statements[0], /n\.notification_event_type = ANY\(\$5::varchar\[\]\)/);
+});
+
+test("essential operational categories bypass optional preferences during claim and pre-dispatch validation", async () => {
+    const pool = createPool([pendingNotification({
+        notification_category: "ACCOUNT_SERVICE",
+    })]);
+    const repository = createSmsNotificationRepository(pool);
+    const [claimed] = await repository.claimBatch(1);
+    const staleCheck = pool.state.queries.find(({ statement }) =>
+        statement.includes("NOTIFICATION_RECIPIENT_STALE")
+    );
+    const eligibilityQuery = pool.state.queries.find(({ statement }) =>
+        statement.startsWith("SELECT notification_id") &&
+        statement.includes("FOR UPDATE SKIP LOCKED")
+    );
+
+    assert.equal(claimed.notification_category, "ACCOUNT_SERVICE");
+    assert.match(staleCheck.statement, /n\.notification_category = ANY\(\$3::varchar\[\]\)/);
+    assert.match(eligibilityQuery.statement, /notifications\.notification_category = ANY\(\$5::varchar\[\]\)/);
+    assert.equal(eligibilityQuery.params[4].includes("ACCOUNT_SERVICE"), true);
+
+    const preDispatchPool = createPool([], { currentEligibility: true });
+    const preDispatchRepository = createSmsNotificationRepository(preDispatchPool);
+    assert.equal(await preDispatchRepository.isClaimEligible({
+        notification_id: "notification_001",
+        user_id: "worker_001",
+        notification_type: "EMAIL",
+        claim_token: "claim_001",
+        notification_category: "ACCOUNT_SERVICE",
+    }), true);
+    assert.match(preDispatchPool.state.statements[0], /n\.notification_category = ANY\(\$6::varchar\[\]\)/);
+    assert.equal(preDispatchPool.state.queries[0].params[5].includes("ACCOUNT_SERVICE"), true);
 });
 
 test("concurrent repository instances cannot claim the same notification", async () => {

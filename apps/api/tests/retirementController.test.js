@@ -15,7 +15,11 @@ Module._load = function loadWithMockedDatabase(request, parent, isMain) {
     if (Module._resolveFilename(request, parent, isMain) === databaseModulePath) return pool;
     return originalModuleLoad.call(this, request, parent, isMain);
 };
-const { getPlan, upsertPlan } = require("../src/controllers/retirementController");
+const {
+    getAgeFromDateOfBirth,
+    getPlan,
+    upsertPlan,
+} = require("../src/controllers/retirementController");
 const { getMyContributions } = require("../src/controllers/accountController");
 const { requireRole } = require("../src/middleware/authMiddleware");
 Module._load = originalModuleLoad;
@@ -35,6 +39,14 @@ const settings = [
     { setting_key: "require_otp_on_withdrawal", setting_value: "true" },
 ];
 
+function dateOfBirthForAge(age) {
+    const today = new Date();
+    const year = today.getUTCFullYear() - age;
+    const month = String(today.getUTCMonth() + 1).padStart(2, "0");
+    const day = String(today.getUTCDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+}
+
 function response() {
     return {
         statusCode: null,
@@ -50,12 +62,17 @@ function response() {
     };
 }
 
-function projectionClient({ failProjectionInsert = false } = {}) {
+function projectionClient({ dateOfBirth, failProjectionInsert = false } = {}) {
     const queries = [];
     const client = {
         async query(query, values = []) {
             queries.push({ query, values });
             if (["BEGIN", "COMMIT", "ROLLBACK"].includes(query)) return { rows: [] };
+            if (query.includes("FROM kyc_records")) {
+                return {
+                    rows: dateOfBirth === undefined ? [] : [{ date_of_birth: dateOfBirth }],
+                };
+            }
             if (query.includes("FROM pension_accounts")) {
                 return { rows: [{ account_id: "account-worker-1", current_balance: "1250.00" }] };
             }
@@ -93,7 +110,7 @@ function projectionClient({ failProjectionInsert = false } = {}) {
 }
 
 test("saves owner-scoped annual projection snapshots using only the credited account balance", async () => {
-    const { client, queries } = projectionClient();
+    const { client, queries } = projectionClient({ dateOfBirth: dateOfBirthForAge(30) });
     pool.connect = async () => client;
     const res = response();
 
@@ -113,11 +130,123 @@ test("saves owner-scoped annual projection snapshots using only the credited acc
     assert.equal(res.body.data.projection.current_age, 30);
     assert.equal(res.body.data.projection.yearly_projection.length, 6);
     assert.equal(res.body.data.assumed_yearly_growth, 8);
-    assert.equal(queries[1].query.includes("FROM pension_accounts"), true);
-    assert.deepEqual(queries[1].values, ["worker-user-1"]);
+    assert.equal(queries.find(({ query }) => query.includes("FROM pension_accounts")).values[0], "worker-user-1");
+    const kycQuery = queries.find(({ query }) => query.includes("FROM kyc_records"));
+    assert.match(kycQuery.query, /SELECT date_of_birth::text AS date_of_birth/i);
+    assert.match(kycQuery.query, /WHERE user_id = \$1/i);
+    assert.deepEqual(kycQuery.values, ["worker-user-1"]);
     assert.equal(queries.some(({ query }) => query.includes("FROM contributions")), false);
     assert.equal(queries.some(({ query }) => query === "COMMIT"), true);
     assert.equal(queries.some(({ query }) => query === "ROLLBACK"), false);
+});
+
+test("rejects retirement calculations when the KYC date of birth is missing or null", async () => {
+    for (const dateOfBirth of [undefined, null]) {
+        const { client, queries } = projectionClient({ dateOfBirth });
+        pool.connect = async () => client;
+        const res = response();
+
+        await upsertPlan({
+            user: { userId: "worker-user-1" },
+            body: {
+                target_amount: "500000.00",
+                target_retirement_age: "35",
+                monthly_contribution_target: "500.00",
+                current_age: "30",
+            },
+        }, res);
+
+        assert.equal(res.statusCode, 400);
+        assert.equal(res.body.code, "DATE_OF_BIRTH_REQUIRED");
+        assert.match(res.body.message, /date of birth.*profile/i);
+        assert.equal(queries.some(({ query }) => query === "ROLLBACK"), true);
+        assert.equal(queries.some(({ query }) =>
+            query.includes("INSERT INTO retirement_plans") ||
+            query.includes("INSERT INTO retirement_projections")
+        ), false);
+        assert.equal(queries.some(({ query }) => query.includes("FROM kyc_records")), true);
+        assert.equal(queries.some(({ query }) => query.includes("FROM pension_accounts")), false);
+    }
+});
+
+test("derives current age from KYC date of birth instead of submitted age", async () => {
+    const { client } = projectionClient({ dateOfBirth: dateOfBirthForAge(30) });
+    pool.connect = async () => client;
+    const res = response();
+
+    await upsertPlan({
+        user: { userId: "worker-user-1" },
+        body: {
+            target_amount: "500000.00",
+            target_retirement_age: "35",
+            monthly_contribution_target: "500.00",
+            current_age: "25",
+        },
+    }, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.data.projection.current_age, 30);
+});
+
+test("calculates age before and after the birthday using the stored date of birth", () => {
+    assert.equal(getAgeFromDateOfBirth("1990-06-16", new Date("2026-06-15T12:00:00.000Z")), 35);
+    assert.equal(getAgeFromDateOfBirth("1990-06-15", new Date("2026-06-15T12:00:00.000Z")), 36);
+    assert.equal(getAgeFromDateOfBirth("1990-06-14", new Date("2026-06-15T12:00:00.000Z")), 36);
+});
+
+test("rejects malformed or out-of-range stored KYC dates without falling back to submitted age", async () => {
+    for (const dateOfBirth of ["1996-02-30", dateOfBirthForAge(101)]) {
+        const { client, queries } = projectionClient({ dateOfBirth });
+        pool.connect = async () => client;
+        const res = response();
+
+        await upsertPlan({
+            user: { userId: "worker-user-1" },
+            body: {
+                target_amount: "500000.00",
+                target_retirement_age: "35",
+                monthly_contribution_target: "500.00",
+                current_age: "30",
+            },
+        }, res);
+
+        assert.equal(res.statusCode, 400);
+        assert.match(res.body.message, /KYC date_of_birth/);
+        assert.equal(queries.some(({ query }) => query === "ROLLBACK"), true);
+        assert.equal(queries.some(({ query }) =>
+            query.includes("INSERT INTO retirement_plans") ||
+            query.includes("INSERT INTO retirement_projections")
+        ), false);
+    }
+});
+
+test("supports current-age boundaries and the maximum retirement age", async () => {
+    const today = new Date("2026-06-15T12:00:00.000Z");
+    assert.equal(getAgeFromDateOfBirth("2025-06-15", today), 1);
+    assert.equal(getAgeFromDateOfBirth("1926-06-15", today), 100);
+    assert.throws(() => getAgeFromDateOfBirth("1925-06-15", today), {
+        code: "PROJECTION_INVALID",
+    });
+    assert.throws(() => getAgeFromDateOfBirth("2026-06-16", today), {
+        code: "PROJECTION_INVALID",
+    });
+
+    const { client } = projectionClient({ dateOfBirth: dateOfBirthForAge(99) });
+    pool.connect = async () => client;
+    const res = response();
+    await upsertPlan({
+        user: { userId: "worker-user-1" },
+        body: {
+            target_amount: "500000.00",
+            target_retirement_age: "100",
+            monthly_contribution_target: "500.00",
+            current_age: "2",
+        },
+    }, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.data.projection.current_age, 99);
+    assert.equal(res.body.data.projection.projection_years, 1);
 });
 
 test("returns 404 with the authenticated user's account context when no active plan exists", async () => {
@@ -341,7 +470,10 @@ test("rejects invalid assumptions before connecting to the database", async () =
 });
 
 test("rolls back plan changes when projection persistence fails", async () => {
-    const { client, queries } = projectionClient({ failProjectionInsert: true });
+    const { client, queries } = projectionClient({
+        dateOfBirth: dateOfBirthForAge(30),
+        failProjectionInsert: true,
+    });
     pool.connect = async () => client;
     const res = response();
     const originalConsoleError = console.error;

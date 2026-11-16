@@ -490,7 +490,8 @@ CREATE TABLE mpesa_payment_attempts (
             'OUTCOME_UNKNOWN',
             'FAILED',
             'CANCELLED',
-            'TIMED_OUT'
+            'TIMED_OUT',
+            'SETTLED'
         )),
     checkout_request_id         VARCHAR(100),
     merchant_request_id         VARCHAR(100),
@@ -935,6 +936,7 @@ CREATE TABLE notifications (
             'ACCOUNT_SERVICE', 'REGULATORY_ADVISORY', 'COMPLIANCE_NOTICE',
             'DEADLINE_REMINDER', 'WORKER_EDUCATION'
         )),
+    notification_event_type VARCHAR(40),
     scope_fund_id       VARCHAR(25) REFERENCES funds (fund_id) ON DELETE SET NULL,
     deduplication_key   VARCHAR(128),
     admin_request_key   UUID,

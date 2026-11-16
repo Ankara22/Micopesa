@@ -1,7 +1,47 @@
 const pool = require("../db/database");
 const { enqueueBusinessNotification } = require("../services/notificationEventService");
-const { calculateProjection, validateProjectionInputs } = require("../services/projectionService");
+const {
+    calculateProjection,
+    MAX_AGE,
+    validateProjectionInputs,
+} = require("../services/projectionService");
 const { loadAdminSettings } = require("../services/adminSettingsService");
+
+function getAgeFromDateOfBirth(dateOfBirth, today = new Date()) {
+    if (typeof dateOfBirth !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(dateOfBirth)) {
+        throw projectionValidationError("KYC date_of_birth must be a valid calendar date.");
+    }
+
+    const [year, month, day] = dateOfBirth.split("-").map(Number);
+    const birthDate = new Date(Date.UTC(year, month - 1, day));
+    if (
+        birthDate.getUTCFullYear() !== year ||
+        birthDate.getUTCMonth() !== month - 1 ||
+        birthDate.getUTCDate() !== day
+    ) {
+        throw projectionValidationError("KYC date_of_birth must be a valid calendar date.");
+    }
+
+    let age = today.getUTCFullYear() - year;
+    if (
+        today.getUTCMonth() < month - 1 ||
+        (today.getUTCMonth() === month - 1 && today.getUTCDate() < day)
+    ) {
+        age -= 1;
+    }
+    if (age < 1 || age > MAX_AGE) {
+        throw projectionValidationError(
+            `KYC date_of_birth must produce a current age between 1 and ${MAX_AGE}.`
+        );
+    }
+    return age;
+}
+
+function projectionValidationError(message) {
+    const error = new Error(message);
+    error.code = "PROJECTION_INVALID";
+    return error;
+}
 
 async function findAccountForUser(userId, client = pool, { lock = false } = {}) {
     const result = await client.query(
@@ -82,14 +122,13 @@ async function upsertPlan(req, res) {
         target_amount: targetAmountInput,
         target_retirement_age: targetAgeInput,
         monthly_contribution_target: monthlyContributionInput,
-        current_age: currentAgeInput,
     } = req.body || {};
     const validationError = validateProjectionInputs({
         currentBalance: 0,
         monthlyContribution: monthlyContributionInput,
         targetAmount: targetAmountInput,
         targetAge: targetAgeInput,
-        currentAge: currentAgeInput,
+        currentAge: 1,
     });
 
     if (validationError) {
@@ -99,7 +138,6 @@ async function upsertPlan(req, res) {
     const targetAmount = Number(targetAmountInput);
     const targetAge = Number(targetAgeInput);
     const monthlyContribution = Number(monthlyContributionInput);
-    const currentAge = Number(currentAgeInput);
     let client;
     let transactionStarted = false;
 
@@ -107,6 +145,33 @@ async function upsertPlan(req, res) {
         client = await pool.connect();
         await client.query("BEGIN");
         transactionStarted = true;
+
+        const kycResult = await client.query(
+            `SELECT date_of_birth::text AS date_of_birth
+             FROM kyc_records
+             WHERE user_id = $1
+             FOR SHARE`,
+            [req.user.userId]
+        );
+        const dateOfBirth = kycResult.rows[0]?.date_of_birth;
+        if (dateOfBirth === null || dateOfBirth === undefined) {
+            const error = projectionValidationError(
+                "Add your date of birth to your profile before calculating a retirement projection."
+            );
+            error.code = "DATE_OF_BIRTH_REQUIRED";
+            throw error;
+        }
+        const currentAge = getAgeFromDateOfBirth(dateOfBirth);
+        const ageValidationError = validateProjectionInputs({
+            currentBalance: 0,
+            monthlyContribution: monthlyContributionInput,
+            targetAmount: targetAmountInput,
+            targetAge: targetAgeInput,
+            currentAge,
+        });
+        if (ageValidationError) {
+            throw projectionValidationError(ageValidationError);
+        }
 
         const account = await findAccountForUser(req.user.userId, client, { lock: true });
         if (!account) {
@@ -125,7 +190,7 @@ async function upsertPlan(req, res) {
             monthlyContribution,
             targetAmount,
             targetAge,
-            currentAge,
+            currentAge: Number(currentAge),
             annualRate,
         });
 
@@ -181,7 +246,7 @@ async function upsertPlan(req, res) {
                 settings.assumed_yearly_growth,
                 calculation.projectedBalance,
                 calculation.projectionYears,
-                currentAge,
+                Number(currentAge),
                 account.current_balance,
                 JSON.stringify(calculation.yearByYear),
             ]
@@ -210,8 +275,12 @@ async function upsertPlan(req, res) {
         if (transactionStarted && client) {
             await client.query("ROLLBACK").catch(() => {});
         }
-        if (error.code === "PROJECTION_INVALID") {
-            return res.status(400).json({ status: "error", message: error.message });
+        if (error.code === "PROJECTION_INVALID" || error.code === "DATE_OF_BIRTH_REQUIRED") {
+            return res.status(400).json({
+                status: "error",
+                code: error.code,
+                message: error.message,
+            });
         }
         console.error("Failed to save retirement projection:", error?.code || error?.name || "RETIREMENT_WRITE_ERROR");
         return res.status(500).json({
@@ -223,4 +292,4 @@ async function upsertPlan(req, res) {
     }
 }
 
-module.exports = { getPlan, upsertPlan };
+module.exports = { getAgeFromDateOfBirth, getPlan, upsertPlan };

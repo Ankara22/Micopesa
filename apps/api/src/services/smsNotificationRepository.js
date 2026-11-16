@@ -1,6 +1,31 @@
 const { randomUUID } = require("node:crypto");
 const { normalizedPhoneSql } = require("../utils/kenyanPhone");
+const {
+    ESSENTIAL_ROLE_NOTIFICATION_CATEGORIES,
+    ESSENTIAL_TRANSACTIONAL_EVENT_TYPES,
+} = require("./notificationEventPolicy");
 const ERROR_CODE_PATTERN = /^(SMS|EMAIL|PUSH|NOTIFICATION)_[A-Z0-9_]{1,60}$/;
+const VALID_EMAIL_SQL = "btrim(COALESCE(u.email, '')) ~ '^[^[:space:]@]+@[^[:space:]@]+[.][^[:space:]@]+$'";
+const EVENT_COLUMN_MISSING_PATTERN = /column\s+"?notification_event_type"?\s+does not exist/i;
+
+function classifyRepositoryError(error) {
+    if (!["42703", "42P01"].includes(error?.code)) return error;
+
+    const eventColumnMissing = error.code === "42703" &&
+        EVENT_COLUMN_MISSING_PATTERN.test(error.message || "");
+    const classified = new Error(
+        eventColumnMissing
+            ? "Notification delivery requires the notification event classification schema."
+            : "Notification delivery database schema is incompatible."
+    );
+    classified.code = "NOTIFICATION_SCHEMA_MISMATCH";
+    classified.databaseCode = error.code;
+    classified.schemaObject = eventColumnMissing
+        ? "notifications.notification_event_type"
+        : "notification delivery schema";
+    classified.cause = error;
+    return classified;
+}
 
 function createSmsNotificationRepository(
     pool,
@@ -53,26 +78,47 @@ function createSmsNotificationRepository(
                        (n.notification_type = 'SMS' AND NOT EXISTS (
                            SELECT 1
                            FROM users u
+                           LEFT JOIN users sender ON sender.user_id = n.created_by
                            LEFT JOIN notification_preferences np ON np.user_id = u.user_id
                            WHERE u.user_id = n.user_id
                              AND u.account_status = 'ACTIVE'
                              AND u.phone_verified_at IS NOT NULL
-                             AND (n.admin_request_key IS NOT NULL OR np.sms_enabled IS TRUE)
                              AND (${normalizedPhoneSql("u.phone")}) = n.recipient_phone
+                             AND (
+                                 sender.role = 'ADMIN'
+                                 OR np.sms_enabled IS TRUE
+                                 OR COALESCE(
+                                     n.notification_event_type = ANY($2::varchar[])
+                                     OR n.notification_category = ANY($3::varchar[]), FALSE
+                                 )
+                             )
                        ))
                        OR
                        (n.notification_type = 'EMAIL' AND NOT EXISTS (
                            SELECT 1
                            FROM users u
+                           LEFT JOIN users sender ON sender.user_id = n.created_by
                            LEFT JOIN notification_preferences np ON np.user_id = u.user_id
                            WHERE u.user_id = n.user_id
                              AND u.account_status = 'ACTIVE'
                              AND u.email_verified IS TRUE
-                             AND (n.admin_request_key IS NOT NULL OR np.email_enabled IS TRUE)
+                             AND ${VALID_EMAIL_SQL}
                              AND lower(u.email) = lower(n.recipient_email)
+                             AND (
+                                 sender.role = 'ADMIN'
+                                 OR np.email_enabled IS TRUE
+                                 OR COALESCE(
+                                     n.notification_event_type = ANY($2::varchar[])
+                                     OR n.notification_category = ANY($3::varchar[]), FALSE
+                                 )
+                             )
                        ))
                    )`,
-                [channels]
+                [
+                    channels,
+                    ESSENTIAL_TRANSACTIONAL_EVENT_TYPES,
+                    ESSENTIAL_ROLE_NOTIFICATION_CATEGORIES,
+                ]
             );
 
             const eligible = await client.query(
@@ -90,16 +136,36 @@ function createSmsNotificationRepository(
                    )
                    AND (
                        (notification_type = 'SMS' AND (
-                           admin_request_key IS NOT NULL OR EXISTS (
+                           COALESCE(
+                               notifications.notification_event_type = ANY($4::varchar[])
+                               OR notifications.notification_category = ANY($5::varchar[]),
+                               FALSE
+                           )
+                           OR EXISTS (
                            SELECT 1 FROM notification_preferences np
                            WHERE np.user_id = notifications.user_id
                              AND np.sms_enabled IS TRUE
+                       )
+                           OR EXISTS (
+                           SELECT 1 FROM users sender
+                           WHERE sender.user_id = notifications.created_by
+                             AND sender.role = 'ADMIN'
                        )))
                        OR (notification_type = 'EMAIL' AND (
-                           admin_request_key IS NOT NULL OR EXISTS (
+                           COALESCE(
+                               notifications.notification_event_type = ANY($4::varchar[])
+                               OR notifications.notification_category = ANY($5::varchar[]),
+                               FALSE
+                           )
+                           OR EXISTS (
                            SELECT 1 FROM notification_preferences np
                            WHERE np.user_id = notifications.user_id
                              AND np.email_enabled IS TRUE
+                       )
+                           OR EXISTS (
+                           SELECT 1 FROM users sender
+                           WHERE sender.user_id = notifications.created_by
+                             AND sender.role = 'ADMIN'
                        )))
                        OR notification_type = 'PUSH'
                    )
@@ -119,6 +185,7 @@ function createSmsNotificationRepository(
                            WHERE u.user_id = notifications.user_id
                              AND u.account_status = 'ACTIVE'
                              AND u.email_verified IS TRUE
+                             AND ${VALID_EMAIL_SQL}
                              AND lower(u.email) = lower(notifications.recipient_email)
                        ))
                        OR notification_type = 'PUSH'
@@ -128,7 +195,13 @@ function createSmsNotificationRepository(
                  ORDER BY next_attempt_at, created_at
                    LIMIT $3
                    FOR UPDATE SKIP LOCKED`,
-                [maxAttempts, channels, batchSize]
+                [
+                    maxAttempts,
+                    channels,
+                    batchSize,
+                    ESSENTIAL_TRANSACTIONAL_EVENT_TYPES,
+                    ESSENTIAL_ROLE_NOTIFICATION_CATEGORIES,
+                ]
             );
 
             const claimed = [];
@@ -147,7 +220,8 @@ function createSmsNotificationRepository(
                        AND delivery_status = 'PENDING'
                      RETURNING notification_id, user_id, notification_type,
                                recipient_phone, recipient_email, email_subject,
-                               email_html_body, push_title, message, attempt_count,
+                               email_html_body, push_title, message,
+                               notification_category, notification_event_type, attempt_count,
                                claim_token, created_by`,
                     [claimToken, row.notification_id]
                 );
@@ -162,7 +236,7 @@ function createSmsNotificationRepository(
                 await client.query("ROLLBACK");
                 transactionStarted = false;
             }
-            throw error;
+            throw classifyRepositoryError(error);
         } finally {
             client.release();
         }
@@ -178,30 +252,52 @@ function createSmsNotificationRepository(
         const contactCondition = notification.notification_type === "SMS"
             ? `u.phone_verified_at IS NOT NULL
                AND (${normalizedPhoneSql("u.phone")}) = n.recipient_phone
-               AND (n.admin_request_key IS NOT NULL OR np.sms_enabled IS TRUE)`
+               AND (
+                   sender.role = 'ADMIN'
+                   OR np.sms_enabled IS TRUE
+                   OR COALESCE(
+                       n.notification_event_type = ANY($5::varchar[])
+                       OR n.notification_category = ANY($6::varchar[]), FALSE
+                   )
+               )`
             : `u.email_verified IS TRUE
+               AND ${VALID_EMAIL_SQL}
                AND lower(u.email) = lower(n.recipient_email)
-               AND (n.admin_request_key IS NOT NULL OR np.email_enabled IS TRUE)`;
-        const result = await pool.query(
-            `SELECT n.notification_id
-             FROM notifications n
-             JOIN users u ON u.user_id = n.user_id
-             LEFT JOIN notification_preferences np ON np.user_id = n.user_id
-             WHERE n.notification_id = $1
-               AND n.claim_token = $2
-               AND n.user_id = $3
-               AND n.notification_type = $4
-               AND n.delivery_status = 'PROCESSING'
-               AND u.account_status = 'ACTIVE'
-               AND ${contactCondition}`,
-            [
-                notification.notification_id,
-                notification.claim_token,
-                notification.user_id,
-                notification.notification_type,
-            ]
-        );
-        return result.rowCount === 1;
+               AND (
+                   sender.role = 'ADMIN'
+                   OR np.email_enabled IS TRUE
+                   OR COALESCE(
+                       n.notification_event_type = ANY($5::varchar[])
+                       OR n.notification_category = ANY($6::varchar[]), FALSE
+                   )
+               )`;
+        try {
+            const result = await pool.query(
+                `SELECT n.notification_id
+                 FROM notifications n
+                 JOIN users u ON u.user_id = n.user_id
+                 LEFT JOIN users sender ON sender.user_id = n.created_by
+                 LEFT JOIN notification_preferences np ON np.user_id = n.user_id
+                 WHERE n.notification_id = $1
+                   AND n.claim_token = $2
+                   AND n.user_id = $3
+                   AND n.notification_type = $4
+                   AND n.delivery_status = 'PROCESSING'
+                   AND u.account_status = 'ACTIVE'
+                   AND ${contactCondition}`,
+                [
+                    notification.notification_id,
+                    notification.claim_token,
+                    notification.user_id,
+                    notification.notification_type,
+                    ESSENTIAL_TRANSACTIONAL_EVENT_TYPES,
+                    ESSENTIAL_ROLE_NOTIFICATION_CATEGORIES,
+                ]
+            );
+            return result.rowCount === 1;
+        } catch (error) {
+            throw classifyRepositoryError(error);
+        }
     }
 
     async function updateClaim(notificationId, claimToken, sql, params) {

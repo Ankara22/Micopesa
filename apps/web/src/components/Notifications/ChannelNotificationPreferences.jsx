@@ -26,12 +26,32 @@ function ChannelNotificationPreferences() {
         setChanges((current) => ({ ...current, [name]: value }));
     }
 
+    function contactStatus(channel) {
+        const registered = values?.[`${channel}_registered`];
+        const verified = values?.[`${channel}_verified`];
+        const key = !registered
+            ? `${channel}NotRegistered`
+            : verified
+                ? `${channel}Verified`
+                : `${channel}Unverified`;
+        return t(`worker.notifications.${key}`);
+    }
+
+    function deliveryStatus(channel) {
+        return values?.[`${channel}_delivery_enabled`] === false
+            ? t(`worker.notifications.${channel}DeliveryUnavailable`)
+            : "";
+    }
+
     async function savePreferences() {
         if (!values || !dirty || saving) return;
         setSaving(true);
         setMessageKey("");
         try {
-            const saved = await updateMyNotificationPreferences(values);
+            const saved = await updateMyNotificationPreferences({
+                sms_enabled: values.sms_enabled,
+                email_enabled: values.email_enabled,
+            });
             preferencesApi.setData(saved);
             setChanges({});
             setMessageKey("worker.notifications.preferencesSaved");
@@ -71,6 +91,9 @@ function ChannelNotificationPreferences() {
                         />
                         <span>{t("worker.notifications.emailPreference")}</span>
                     </label>
+                    <p className="page-subtitle">
+                        {[contactStatus("email"), deliveryStatus("email")].filter(Boolean).join(" ")}
+                    </p>
                     <label className="notification-preference-option">
                         <input
                             type="checkbox"
@@ -80,6 +103,17 @@ function ChannelNotificationPreferences() {
                         />
                         <span>{t("worker.notifications.smsPreference")}</span>
                     </label>
+                    <p className="page-subtitle">
+                        {[contactStatus("phone"), deliveryStatus("sms")].filter(Boolean).join(" ")}
+                    </p>
+                    <p className="page-subtitle">
+                        {values.push_enabled
+                            ? t("worker.notifications.pushRegistered")
+                            : t("worker.notifications.pushNotRegistered")}
+                        {values.push_delivery_enabled === false
+                            ? ` ${t("worker.notifications.pushDeliveryUnavailable")}`
+                            : ""}
+                    </p>
                     {messageKey && <p role={messageKey.endsWith("Error") ? "alert" : "status"}>{t(messageKey)}</p>}
                     <Button
                         variant="secondary"

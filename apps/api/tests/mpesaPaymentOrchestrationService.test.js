@@ -3,6 +3,10 @@ const assert = require("node:assert/strict");
 const {
     createMpesaPaymentOrchestrationService,
 } = require("../src/services/mpesaPaymentOrchestrationService");
+const {
+    createPensionLedgerReadinessChecker,
+    createPensionLedgerReadinessGuard,
+} = require("../src/services/mpesaLedgerReadiness");
 
 const pendingAttempt = {
     attempt_id: "attempt_001",
@@ -22,10 +26,24 @@ function createHarness({
     }),
     acceptedPersistenceError = null,
     acceptedPersistenceErrors = [],
+    enforcementEnabled = false,
+    readinessError = null,
+    ledgerRows = [{ status: "ACTIVE" }],
 } = {}) {
-    const calls = { create: [], retryCreate: [], provider: [], accepted: [], rejected: [], started: [] };
+    const calls = {
+        create: [],
+        retryCreate: [],
+        provider: [],
+        accepted: [],
+        rejected: [],
+        started: [],
+        readiness: 0,
+        createEnvironmentProviders: [],
+        retryEnvironmentProviders: [],
+    };
     const persistenceErrors = [...acceptedPersistenceErrors];
     if (acceptedPersistenceError) persistenceErrors.push(acceptedPersistenceError);
+    const checkLedgerReadiness = createPensionLedgerReadinessChecker();
     let status = pendingAttempt.attempt_status;
     async function recordAcceptance(input) {
         calls.accepted.push(input);
@@ -40,14 +58,25 @@ function createHarness({
         };
     }
     const repository = {
-        async createPendingMpesaPayment(input) {
+        async assertPensionLedgerActive() {
+            calls.readiness += 1;
+            return checkLedgerReadiness({
+                async query() {
+                    if (readinessError) throw readinessError;
+                    return { rows: ledgerRows };
+                },
+            });
+        },
+        async createPendingMpesaPayment(input, options) {
             calls.create.push(input);
+            calls.createEnvironmentProviders.push(options?.environmentProvider);
             return existingAttempt
                 ? { attempt: existingAttempt, created: false }
                 : { attempt: { ...pendingAttempt }, created: true };
         },
-        async createPaymentAttemptForContribution(input) {
+        async createPaymentAttemptForContribution(input, options) {
             calls.retryCreate.push(input);
+            calls.retryEnvironmentProviders.push(options?.environmentProvider);
             return existingAttempt
                 ? { attempt: existingAttempt, created: false }
                 : { attempt: { ...pendingAttempt }, created: true };
@@ -76,6 +105,9 @@ function createHarness({
             return providerBehavior();
         },
     };
+    const environmentProvider = () => ({
+        MPESA_LEDGER_ENFORCEMENT_ENABLED: enforcementEnabled ? "true" : "false",
+    });
     const service = createMpesaPaymentOrchestrationService({
         paymentAttemptRepository: repository,
         providerService,
@@ -91,8 +123,9 @@ function createHarness({
             }
             return "254712345678";
         },
+        environmentProvider,
     });
-    return { calls, service };
+    return { calls, environmentProvider, service };
 }
 
 function paymentRequest(overrides = {}) {
@@ -115,9 +148,146 @@ test("accepted prompt persists provider IDs but keeps the transaction pending", 
     assert.equal(result.outcome_unknown, false);
     assert.equal(result.checkout_request_id, "ws_CO_mock_001");
     assert.equal(calls.provider.length, 1);
+    assert.equal(calls.readiness, 0);
     assert.equal(calls.accepted.length, 1);
     assert.equal(calls.accepted[0].providerResultCode, "0");
     assert.equal(calls.rejected.length, 0);
+});
+
+test("ACTIVE ledger readiness permits the normal initiation path and shares its config", async () => {
+    const { calls, environmentProvider, service } = createHarness({ enforcementEnabled: true });
+
+    const result = await service.initiateWorkerPayment(paymentRequest());
+
+    assert.equal(result.payment_status, "PROMPT_ACCEPTED");
+    assert.equal(calls.readiness, 1);
+    assert.equal(calls.create.length, 1);
+    assert.equal(calls.createEnvironmentProviders[0], environmentProvider);
+    assert.equal(calls.provider.length, 1);
+});
+
+test("retry creation receives the orchestration environment provider", async () => {
+    const { calls, environmentProvider, service } = createHarness({ enforcementEnabled: true });
+
+    await service.retryWorkerPayment(paymentRequest({
+        contributionId: "contribution_existing",
+    }));
+
+    assert.equal(calls.readiness, 1);
+    assert.equal(calls.retryCreate.length, 1);
+    assert.equal(calls.retryEnvironmentProviders[0], environmentProvider);
+    assert.equal(calls.provider.length, 1);
+});
+
+test("closure winning between preflight and attempt transaction prevents dispatch", async () => {
+    let ledgerStatus = "ACTIVE";
+    let attemptsCreated = 0;
+    let providerRequests = 0;
+    const environmentProvider = () => ({
+        MPESA_LEDGER_ENFORCEMENT_ENABLED: "true",
+    });
+    const checkLedger = createPensionLedgerReadinessChecker();
+    const repository = {
+        async assertPensionLedgerActive() {
+            return checkLedger({
+                async query() {
+                    return { rows: [{ status: ledgerStatus }] };
+                },
+            });
+        },
+        async createPendingMpesaPayment(_input, options) {
+            ledgerStatus = "CLOSED";
+            const transactionReadiness = createPensionLedgerReadinessGuard({
+                environmentProvider: options.environmentProvider,
+                assertPensionLedgerActive: checkLedger,
+            });
+            await transactionReadiness({
+                async query() {
+                    return { rows: [{ status: ledgerStatus }] };
+                },
+            });
+            attemptsCreated += 1;
+            return { attempt: { ...pendingAttempt }, created: true };
+        },
+    };
+    const service = createMpesaPaymentOrchestrationService({
+        paymentAttemptRepository: repository,
+        providerService: {
+            async initiateStkPush() {
+                providerRequests += 1;
+                return {};
+            },
+        },
+        environmentProvider,
+    });
+
+    await assert.rejects(service.initiateWorkerPayment(paymentRequest()), {
+        code: "PENSION_LEDGER_NOT_ACTIVE",
+        statusCode: 503,
+    });
+    assert.equal(attemptsCreated, 0);
+    assert.equal(providerRequests, 0);
+});
+
+test("PREPARING ledger readiness blocks initiation before records or provider dispatch", async () => {
+    const { calls, service } = createHarness({
+        enforcementEnabled: true,
+        ledgerRows: [{ status: "PREPARING" }],
+    });
+
+    await assert.rejects(service.initiateWorkerPayment(paymentRequest()), {
+        code: "PENSION_LEDGER_NOT_ACTIVE",
+        statusCode: 503,
+    });
+
+    assert.equal(calls.create.length, 0);
+    assert.equal(calls.provider.length, 0);
+});
+
+test("missing ledger blocks initiation before records or provider dispatch", async () => {
+    const { calls, service } = createHarness({
+        enforcementEnabled: true,
+        ledgerRows: [],
+    });
+
+    await assert.rejects(service.initiateWorkerPayment(paymentRequest()), {
+        code: "PENSION_LEDGER_NOT_ACTIVE",
+        statusCode: 503,
+    });
+
+    assert.equal(calls.create.length, 0);
+    assert.equal(calls.provider.length, 0);
+});
+
+test("ledger readiness database errors block initiation before records or provider dispatch", async () => {
+    const readinessError = Object.assign(new Error("database detail"), { code: "42P01" });
+    const { calls, service } = createHarness({
+        enforcementEnabled: true,
+        readinessError,
+    });
+
+    await assert.rejects(service.initiateWorkerPayment(paymentRequest()), {
+        code: "PENSION_LEDGER_READINESS_UNAVAILABLE",
+        statusCode: 503,
+    });
+
+    assert.equal(calls.create.length, 0);
+    assert.equal(calls.provider.length, 0);
+});
+
+test("retry paths cannot create attempts or dispatch when ledger readiness fails", async () => {
+    const { calls, service } = createHarness({
+        enforcementEnabled: true,
+        ledgerRows: [{ status: "PREPARING" }],
+    });
+
+    await assert.rejects(
+        service.retryWorkerPayment(paymentRequest({ contributionId: "contribution_existing" })),
+        { code: "PENSION_LEDGER_NOT_ACTIVE" }
+    );
+
+    assert.equal(calls.retryCreate.length, 0);
+    assert.equal(calls.provider.length, 0);
 });
 
 test("definitive provider rejection is recorded as failed, not paid", async () => {
@@ -170,6 +340,23 @@ test("duplicate requests for pending, accepted, or unknown attempts do not call 
         assert.equal(calls.provider.length, 0);
         assert.equal(calls.started.length, 0);
     }
+});
+
+test("duplicate idempotency request returns an already-settled result without redispatch", async () => {
+    const existingAttempt = {
+        ...pendingAttempt,
+        attempt_status: "SETTLED",
+    };
+    const { calls, service } = createHarness({ existingAttempt });
+
+    const result = await service.initiateWorkerPayment(paymentRequest());
+
+    assert.equal(result.payment_status, "SETTLED");
+    assert.equal(result.transaction_status, "COMPLETED");
+    assert.equal(result.contribution_status, "COMPLETED");
+    assert.equal(result.confirmation_pending, false);
+    assert.equal(result.created, false);
+    assert.equal(calls.provider.length, 0);
 });
 
 test("a conflicting idempotency request fails before provider initiation", async () => {

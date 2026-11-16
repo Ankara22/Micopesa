@@ -13,7 +13,26 @@ const configuration = {
     passkey: "offline-test-passkey",
     shortcode: "174379",
     callbackUrl: "https://demo.example.test/api/mpesa/callback",
+    transactionType: "CustomerPayBillOnline",
+    darajaEnvironment: "sandbox",
+    baseUrl: "https://sandbox.safaricom.co.ke",
+    paymentEnabled: true,
 };
+
+function sandboxEnvironment(overrides = {}) {
+    return {
+        DARAJA_CONSUMER_KEY: configuration.consumerKey,
+        DARAJA_CONSUMER_SECRET: configuration.consumerSecret,
+        DARAJA_PASSKEY: configuration.passkey,
+        DARAJA_BUSINESS_SHORTCODE: configuration.shortcode,
+        DARAJA_CALLBACK_URL: configuration.callbackUrl,
+        DARAJA_TRANSACTION_TYPE: configuration.transactionType,
+        DARAJA_ENV: "sandbox",
+        MPESA_SANDBOX_ENABLED: "true",
+        MPESA_PROVIDER_DISPATCH_ENABLED: "true",
+        ...overrides,
+    };
+}
 
 function response(body, status = 200) {
     return {
@@ -110,19 +129,17 @@ test("accepts positive whole-KES amounts and rejects fractional or unsafe values
 });
 
 test("validates required configuration and HTTPS callback URLs without revealing values", () => {
-    assert.deepEqual(getConfiguration({
-        MPESA_CONSUMER_KEY: configuration.consumerKey,
-        MPESA_CONSUMER_SECRET: configuration.consumerSecret,
-        MPESA_PASSKEY: configuration.passkey,
-        MPESA_SHORTCODE: configuration.shortcode,
-        MPESA_CALLBACK_URL: configuration.callbackUrl,
-    }), configuration);
+    assert.deepEqual(getConfiguration(sandboxEnvironment()), configuration);
 
     assert.throws(
-        () => getConfiguration({ MPESA_CONSUMER_KEY: "do-not-show-consumer-key" }),
+        () => getConfiguration({
+            ...sandboxEnvironment(),
+            DARAJA_CONSUMER_SECRET: undefined,
+            DARAJA_CONSUMER_KEY: "do-not-show-consumer-key",
+        }),
         (error) => {
             assert.equal(error.statusCode, 503);
-            assert.match(error.message, /MPESA_CONSUMER_SECRET/);
+            assert.match(error.message, /DARAJA_CONSUMER_SECRET/);
             assert.doesNotMatch(error.message, /do-not-show-consumer-key/);
             return true;
         }
@@ -134,13 +151,187 @@ test("validates required configuration and HTTPS callback URLs without revealing
         "https://demo.example.test/callback#fragment",
     ]) {
         assert.throws(() => getConfiguration({
-            MPESA_CONSUMER_KEY: configuration.consumerKey,
-            MPESA_CONSUMER_SECRET: configuration.consumerSecret,
-            MPESA_PASSKEY: configuration.passkey,
-            MPESA_SHORTCODE: configuration.shortcode,
-            MPESA_CALLBACK_URL: callbackUrl,
+            ...sandboxEnvironment(),
+            DARAJA_CALLBACK_URL: callbackUrl,
         }), { statusCode: 503 });
     }
+});
+
+test("supports each requested legacy MPESA alias independently and canonical-only configuration", () => {
+    assert.deepEqual(getConfiguration(sandboxEnvironment()), configuration);
+
+    const aliasMappings = [
+        ["DARAJA_ENV", "MPESA_ENVIRONMENT", "sandbox"],
+        ["DARAJA_CONSUMER_KEY", "MPESA_CONSUMER_KEY", configuration.consumerKey],
+        ["DARAJA_CONSUMER_SECRET", "MPESA_CONSUMER_SECRET", configuration.consumerSecret],
+        ["DARAJA_BUSINESS_SHORTCODE", "MPESA_SHORTCODE", configuration.shortcode],
+        ["DARAJA_PASSKEY", "MPESA_PASSKEY", configuration.passkey],
+        ["DARAJA_CALLBACK_URL", "MPESA_CALLBACK_URL", configuration.callbackUrl],
+    ];
+    for (const [canonicalName, aliasName, value] of aliasMappings) {
+        const environment = sandboxEnvironment();
+        delete environment[canonicalName];
+        environment[aliasName] = value;
+        assert.deepEqual(getConfiguration(environment), configuration, aliasName);
+    }
+
+    const additionalEnvironmentAlias = sandboxEnvironment();
+    delete additionalEnvironmentAlias.DARAJA_ENV;
+    additionalEnvironmentAlias.MPESA_DARAJA_ENVIRONMENT = "sandbox";
+    assert.deepEqual(getConfiguration(additionalEnvironmentAlias), configuration);
+
+    const additionalShortcodeAlias = sandboxEnvironment();
+    delete additionalShortcodeAlias.DARAJA_BUSINESS_SHORTCODE;
+    additionalShortcodeAlias.MPESA_BUSINESS_SHORTCODE = configuration.shortcode;
+    assert.deepEqual(getConfiguration(additionalShortcodeAlias), configuration);
+});
+
+test("rejects conflicting canonical and legacy Daraja values", () => {
+    const conflictCases = [
+        ["DARAJA_ENV", "MPESA_ENVIRONMENT", "production"],
+        ["DARAJA_CONSUMER_KEY", "MPESA_CONSUMER_KEY", "different-offline-test-key"],
+        ["DARAJA_CONSUMER_SECRET", "MPESA_CONSUMER_SECRET", "different-offline-test-secret"],
+        ["DARAJA_BUSINESS_SHORTCODE", "MPESA_SHORTCODE", "12345"],
+        ["DARAJA_PASSKEY", "MPESA_PASSKEY", "different-offline-test-passkey"],
+        ["DARAJA_CALLBACK_URL", "MPESA_CALLBACK_URL", "https://different.example.test/callback"],
+    ];
+    for (const [, aliasName, value] of conflictCases) {
+        assert.throws(() => getConfiguration({
+            ...sandboxEnvironment(),
+            [aliasName]: value,
+        }), {
+            code: "PAYMENT_PROVIDER_CONFIGURATION_ERROR",
+            statusCode: 503,
+        }, aliasName);
+    }
+
+    for (const [name, value] of [
+        ["MPESA_BUSINESS_SHORTCODE", "12345"],
+        ["MPESA_TRANSACTION_TYPE", "CustomerBuyGoodsOnline"],
+    ]) {
+        assert.throws(() => getConfiguration({
+            ...sandboxEnvironment(),
+            [name]: value,
+        }), {
+            code: "PAYMENT_PROVIDER_CONFIGURATION_ERROR",
+            statusCode: 503,
+        });
+    }
+    assert.throws(() => getConfiguration({
+        ...sandboxEnvironment(),
+        MPESA_DARAJA_ENVIRONMENT: "production",
+    }), {
+        code: "PAYMENT_PROVIDER_CONFIGURATION_ERROR",
+        statusCode: 503,
+    });
+});
+
+test("rejects missing required credentials and unknown environments", () => {
+    for (const [name, canonicalName] of [
+        ["DARAJA_CONSUMER_KEY", "DARAJA_CONSUMER_KEY"],
+        ["DARAJA_CONSUMER_SECRET", "DARAJA_CONSUMER_SECRET"],
+        ["DARAJA_BUSINESS_SHORTCODE", "DARAJA_BUSINESS_SHORTCODE"],
+        ["DARAJA_PASSKEY", "DARAJA_PASSKEY"],
+        ["DARAJA_CALLBACK_URL", "DARAJA_CALLBACK_URL"],
+    ]) {
+        assert.throws(() => getConfiguration({
+            ...sandboxEnvironment(),
+            [name]: undefined,
+        }), (error) => {
+            assert.equal(error.statusCode, 503);
+            assert.match(error.message, new RegExp(canonicalName));
+            return true;
+        }, name);
+    }
+
+    for (const environment of [
+        { ...sandboxEnvironment(), DARAJA_ENV: "staging" },
+        { ...sandboxEnvironment(), DARAJA_ENV: undefined, MPESA_ENVIRONMENT: "unknown" },
+    ]) {
+        assert.throws(() => getConfiguration(environment), {
+            code: "PAYMENT_PROVIDER_CONFIGURATION_ERROR",
+            statusCode: 503,
+        });
+    }
+});
+
+test("requires explicit Daraja environment and sandbox opt-in before provider dispatch", async () => {
+    assert.throws(() => getConfiguration({
+        ...sandboxEnvironment(),
+        DARAJA_ENV: undefined,
+    }), { statusCode: 503 });
+    assert.throws(() => getConfiguration({
+        ...sandboxEnvironment(),
+        DARAJA_ENV: "staging",
+    }), { statusCode: 503 });
+    assert.throws(() => getConfiguration({
+        ...sandboxEnvironment(),
+        DARAJA_ENV: "production",
+        MPESA_ENVIRONMENT: "unknown",
+    }), { code: "PAYMENT_PROVIDER_CONFIGURATION_ERROR", statusCode: 503 });
+    assert.throws(() => getConfiguration({
+        ...sandboxEnvironment(),
+        MPESA_SANDBOX_ENABLED: "true",
+        MPESA_LIVE_PAYMENTS_ENABLED: "true",
+    }), { code: "PAYMENT_PROVIDER_CONFIGURATION_ERROR", statusCode: 503 });
+    assert.throws(() => getConfiguration({
+        ...sandboxEnvironment(),
+        DARAJA_ENV: "production",
+        MPESA_SANDBOX_ENABLED: undefined,
+        MPESA_LIVE_PAYMENTS_ENABLED: "true",
+        DARAJA_CALLBACK_URL: "http://insecure.example.test/callback",
+    }), { statusCode: 503 });
+    const productionWithoutLiveOptIn = getConfiguration({
+        ...sandboxEnvironment(),
+        DARAJA_ENV: "production",
+        MPESA_SANDBOX_ENABLED: undefined,
+        MPESA_LIVE_PAYMENTS_ENABLED: undefined,
+        MPESA_PROVIDER_DISPATCH_ENABLED: "true",
+    });
+    assert.equal(productionWithoutLiveOptIn.paymentEnabled, false);
+
+    let requestCount = 0;
+    const disabledService = createMpesaService({
+        configurationProvider: () => ({ ...configuration, paymentEnabled: false }),
+        fetchImpl: async () => {
+            requestCount += 1;
+            throw new Error("Provider must not be called");
+        },
+    });
+    await assert.rejects(
+        disabledService.initiateStkPush({ phoneNumber: "0712345678", amount: 10 }),
+        { statusCode: 503 }
+    );
+    assert.equal(requestCount, 0);
+});
+
+test("selects production Daraja endpoints explicitly while live payments remain disabled by default", async () => {
+    const production = getConfiguration(sandboxEnvironment({
+        DARAJA_ENV: "production",
+        MPESA_SANDBOX_ENABLED: undefined,
+        MPESA_LIVE_PAYMENTS_ENABLED: undefined,
+        MPESA_PROVIDER_DISPATCH_ENABLED: undefined,
+    }));
+    assert.equal(production.baseUrl, "https://api.safaricom.co.ke");
+    assert.equal(production.paymentEnabled, false);
+
+    const requests = [];
+    const service = createMpesaService({
+        configurationProvider: () => ({
+            ...production,
+            paymentEnabled: true,
+        }),
+        fetchImpl: async (url) => {
+            requests.push(url);
+            return url.includes("/oauth/")
+                ? oauthResponse()
+                : queryResponse();
+        },
+        clock: () => Date.UTC(2026, 0, 2, 3, 4, 5),
+    });
+    await service.queryStkPush({ checkoutRequestId: "checkout_mock_001" });
+    assert.equal(new URL(requests[0]).hostname, "api.safaricom.co.ke");
+    assert.equal(new URL(requests[1]).hostname, "api.safaricom.co.ke");
 });
 
 test("generates OAuth token and constructs a safe STK Push payload", async () => {
@@ -173,6 +364,7 @@ test("generates OAuth token and constructs a safe STK Push payload", async () =>
     assert.equal(payload.PartyB, configuration.shortcode);
     assert.equal(payload.PhoneNumber, "254712345678");
     assert.equal(payload.CallBackURL, configuration.callbackUrl);
+    assert.equal(payload.TransactionType, configuration.transactionType);
     assert.equal(requests[1].options.headers.Authorization, "Bearer offline-mock-access-token");
 });
 

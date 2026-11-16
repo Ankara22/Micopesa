@@ -121,7 +121,7 @@ test("conflicting Mobile Sasa canonical and legacy aliases disable dispatch befo
             requests += 1;
             return response({});
         },
-    }), { code: "SMS_CONFIGURATION_MISSING" });
+    }), { code: "SMS_CONFIGURATION_INVALID" });
     assert.equal(requests, 0);
 });
 

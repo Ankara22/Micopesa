@@ -1,6 +1,9 @@
+import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import useApi from "../../hooks/useApi";
 import { getMyPlan, saveMyPlan } from "../../services/retirementService";
+import { getMyProfile } from "../../services/profileApi";
+import { getProfileAge } from "../../components/Retirement/retirementAge";
 import PlanForm from "../../components/Retirement/PlanForm";
 import SkeletonLoader from "../../components/ui/SkeletonLoader";
 import ErrorState from "../../components/ui/ErrorState";
@@ -9,8 +12,10 @@ import { formatKes } from "../../i18n/formatters";
 function RetirementPlan() {
     const { t, i18n } = useTranslation();
     const planApi = useApi(() => getMyPlan(), []);
+    const profileApi = useApi(() => getMyProfile(), []);
     const plan = planApi.data?.plan || null;
     const projection = planApi.data?.projection || null;
+    const profileAge = getProfileAge(profileApi.data?.date_of_birth);
 
     async function savePlan(payload) {
         const saved = await saveMyPlan(payload);
@@ -45,12 +50,30 @@ function RetirementPlan() {
                             <p>{t("worker.retirement.status")} {t(`worker.common.statuses.${plan.plan_status}`, { defaultValue: plan.plan_status })}</p>
                         </div>
                     )}
-                    <PlanForm
-                        key={plan?.plan_id || "new"}
-                        plan={plan}
-                        projection={projection}
-                        onSaved={savePlan}
-                    />
+                    {profileApi.loading && profileApi.data === null ? (
+                        <SkeletonLoader variant="form" label={t("worker.retirement.loadingProfile")} />
+                    ) : profileApi.error && profileApi.data === null ? (
+                        <ErrorState
+                            message={t("worker.common.errors.load")}
+                            title={t("worker.common.profileUnableToLoad")}
+                            retryLabel={t("worker.common.tryAgain")}
+                            onRetry={profileApi.refetch}
+                        />
+                    ) : profileAge === null ? (
+                        <div className="state-block" role="alert">
+                            <span className="state-title">{t("worker.retirement.dateOfBirthRequiredTitle")}</span>
+                            <span>{t("worker.retirement.dateOfBirthRequiredMessage")}</span>
+                            <Link to="/worker/profile">{t("worker.retirement.completeProfile")}</Link>
+                        </div>
+                    ) : (
+                        <PlanForm
+                            key={plan?.plan_id || "new"}
+                            plan={plan}
+                            projection={projection}
+                            profileAge={profileAge}
+                            onSaved={savePlan}
+                        />
+                    )}
                 </>
             )}
         </div>

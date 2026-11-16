@@ -2,7 +2,7 @@ const crypto = require("node:crypto");
 const { promisify } = require("node:util");
 const bcrypt = require("bcrypt");
 const pool = require("../db/database");
-const mobileSasaService = require("./mobileSasaService");
+const defaultSmsService = require("./smsService");
 const {
     normalizeKenyanPhone,
     normalizedPhoneSql,
@@ -20,8 +20,61 @@ const LOCKOUT_MS = 15 * 60 * 1000;
 const PHONE_CHANGE_MESSAGE = (code) =>
     `Your MicoPesa phone verification code is ${code}. It expires in 10 minutes. Do not share this code.`;
 
-function createPhoneChangeError(message, code, statusCode) {
-    return Object.assign(new Error(message), { code, statusCode });
+function createPhoneChangeError(message, code, statusCode, diagnostics) {
+    return Object.assign(new Error(message), {
+        code,
+        statusCode,
+        ...(diagnostics ? { diagnostics } : {}),
+    });
+}
+
+function getPhoneVerificationConfiguration(smsService, environment) {
+    if (typeof smsService.getPhoneVerificationSmsConfiguration === "function") {
+        return smsService.getPhoneVerificationSmsConfiguration(environment);
+    }
+    const available = typeof smsService.isPhoneVerificationSmsConfigured === "function" &&
+        smsService.isPhoneVerificationSmsConfigured(environment);
+    return {
+        available,
+        mode: "injected",
+        provider: null,
+        missingVariables: available ? [] : ["SMS_PROVIDER_CONFIGURATION"],
+        invalidVariables: [],
+    };
+}
+
+function classifySmsDispatchError(error) {
+    const providerErrorCode = typeof error?.code === "string" &&
+        /^SMS_[A-Z0-9_]{1,60}$/.test(error.code)
+        ? error.code
+        : "SMS_SEND_FAILED";
+    if ([
+        "SMS_CONFIGURATION_MISSING",
+        "SMS_ENVIRONMENT_MISMATCH",
+        "SMS_PRODUCTION_ONLY",
+        "SMS_DEVELOPMENT_DELIVERY_DISABLED",
+        "SMS_TEST_DISABLED",
+        "SMS_CONFIGURATION_CHANGED",
+    ].includes(providerErrorCode)) {
+        return { code: "PHONE_CHANGE_SMS_CONFIGURATION_MISSING", providerErrorCode };
+    }
+    if ([
+        "SMS_PROVIDER_REJECTED",
+        "SMS_RETRYABLE_REJECTION",
+        "SMS_PROVIDER_AUTH_FAILED",
+        "SMS_SANDBOX_CREDENTIALS",
+    ].includes(providerErrorCode)) {
+        return { code: "PHONE_CHANGE_SMS_PROVIDER_REJECTED", providerErrorCode };
+    }
+    if ([
+        "SMS_TIMEOUT",
+        "SMS_UNKNOWN_OUTCOME",
+        "SMS_NETWORK_ERROR",
+        "SMS_INVALID_RESPONSE",
+    ].includes(providerErrorCode)) {
+        return { code: "PHONE_CHANGE_SMS_OUTCOME_UNKNOWN", providerErrorCode };
+    }
+    return { code: "PHONE_CHANGE_SMS_DELIVERY_FAILED", providerErrorCode };
 }
 
 async function hashCode(code, salt = crypto.randomBytes(16)) {
@@ -60,7 +113,7 @@ async function startPhoneChange({
     confirmed,
 }, {
     database = pool,
-    smsService = mobileSasaService,
+    smsService = defaultSmsService,
     environment = process.env,
     fetchImpl = global.fetch,
     now = () => new Date(),
@@ -87,12 +140,18 @@ async function startPhoneChange({
             400
         );
     }
-    if (typeof smsService.isPhoneVerificationSmsConfigured !== "function" ||
-        !smsService.isPhoneVerificationSmsConfigured(environment)) {
+    const providerConfiguration = getPhoneVerificationConfiguration(smsService, environment);
+    if (!providerConfiguration.available) {
         throw createPhoneChangeError(
-            "Phone verification by SMS is not configured.",
-            "PHONE_CHANGE_SMS_UNAVAILABLE",
-            503
+            "Phone verification SMS configuration is incomplete or invalid.",
+            "PHONE_CHANGE_SMS_CONFIGURATION_MISSING",
+            503,
+            {
+                provider: providerConfiguration.provider,
+                reasonCode: providerConfiguration.errorCode || "SMS_CONFIGURATION_MISSING",
+                missingVariables: providerConfiguration.missingVariables,
+                invalidVariables: providerConfiguration.invalidVariables,
+            }
         );
     }
 
@@ -266,19 +325,35 @@ async function startPhoneChange({
             to: phone,
             message: PHONE_CHANGE_MESSAGE(otp),
             trackingId: `phone-change-${userId}-${crypto.randomUUID()}`,
-        }, { environment, fetchImpl });
+        }, { environment, fetchImpl, providerConfiguration });
         if (result?.accepted !== true || result.status !== "PROVIDER_ACCEPTED") {
             throw createPhoneChangeError(
                 "The SMS provider outcome could not be confirmed.",
-                "PHONE_CHANGE_SMS_UNKNOWN",
-                503
+                "PHONE_CHANGE_SMS_OUTCOME_UNKNOWN",
+                503,
+                { provider: providerConfiguration.provider }
             );
         }
-    } catch {
+    } catch (error) {
+        if (typeof error?.code === "string" &&
+            error.code.startsWith("PHONE_CHANGE_SMS_")) throw error;
+        const dispatchFailure = classifySmsDispatchError(error);
         throw createPhoneChangeError(
-            "The verification message could not be confirmed. If it arrived, enter its code; otherwise wait before requesting another.",
-            "PHONE_CHANGE_SMS_UNAVAILABLE",
-            503
+            dispatchFailure.code === "PHONE_CHANGE_SMS_CONFIGURATION_MISSING"
+                ? "Phone verification SMS configuration is incomplete or invalid."
+                : "The phone verification message could not be confirmed.",
+            dispatchFailure.code,
+            503,
+            {
+                provider: providerConfiguration.provider,
+                providerErrorCode: dispatchFailure.providerErrorCode,
+                missingVariables: Array.isArray(error?.diagnostics?.missingVariables)
+                    ? error.diagnostics.missingVariables
+                    : [],
+                invalidVariables: Array.isArray(error?.diagnostics?.invalidVariables)
+                    ? error.diagnostics.invalidVariables
+                    : [],
+            }
         );
     }
 

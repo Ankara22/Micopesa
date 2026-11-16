@@ -4,6 +4,14 @@ const PROVIDER_RESULT_CODE_PATTERN = /^-?\d{1,30}$/;
 const CALLBACK_FINGERPRINT_PATTERN = /^[a-f0-9]{64}$/;
 const { distributeContributionAmount, parsePercentageHundredths } = require("./contributionAllocationService");
 const { getPaymentProviderConfiguration } = require("./mpesaPaymentProviderConfig");
+const { normalizePhoneNumber } = require("./mpesaService");
+const {
+    createPensionLedgerReadinessChecker,
+    createPensionLedgerReadinessGuard,
+} = require("./mpesaLedgerReadiness");
+// Keep this key aligned with migration_pension_ledger_mpesa_dispatch_guard.sql.
+const LEDGER_DISPATCH_LOCK_QUERY =
+    "SELECT pg_advisory_xact_lock_shared(1296917328, 1280265540)";
 
 function createRepositoryError(message, code, statusCode) {
     const error = new Error(message);
@@ -127,10 +135,29 @@ function failureStatusesFor(resultCode) {
 
 function createMpesaPaymentAttemptRepository(
     databasePool,
-    { providerModeProvider = () => getPaymentProviderConfiguration() } = {}
+    {
+        providerModeProvider = () => getPaymentProviderConfiguration(),
+        environmentProvider = () => process.env,
+    } = {}
 ) {
     if (!databasePool || typeof databasePool.connect !== "function") {
         throw new TypeError("A database pool with a connect() method is required.");
+    }
+
+    const assertPensionLedgerActive = createPensionLedgerReadinessChecker();
+    const assertPensionLedgerActiveWithDispatchLock = createPensionLedgerReadinessChecker({
+        beforeRead: (queryable) => queryable.query(LEDGER_DISPATCH_LOCK_QUERY),
+    });
+
+    async function enforcePensionLedgerReadiness(
+        queryable = databasePool,
+        readinessEnvironmentProvider = environmentProvider
+    ) {
+        const assertPensionLedgerReady = createPensionLedgerReadinessGuard({
+            environmentProvider: readinessEnvironmentProvider,
+            assertPensionLedgerActive: assertPensionLedgerActiveWithDispatchLock,
+        });
+        await assertPensionLedgerReady(queryable);
     }
 
     function configuredProviderMode() {
@@ -218,7 +245,7 @@ function createMpesaPaymentAttemptRepository(
                         AND c.contribution_status = 'COMPLETED'
                         AND t.mpesa_result_code = 0
                         AND t.completed_at IS NOT NULL
-                        AND a.attempt_status IN ('PROMPT_ACCEPTED', 'OUTCOME_UNKNOWN')
+                        AND a.attempt_status IN ('PROMPT_ACCEPTED', 'OUTCOME_UNKNOWN', 'SETTLED')
                     ) AS settlement_confirmed,
                     t.mpesa_receipt AS receipt_reference,
                     CASE
@@ -226,7 +253,7 @@ function createMpesaPaymentAttemptRepository(
                          AND c.contribution_status = 'COMPLETED'
                          AND t.mpesa_result_code = 0
                          AND t.completed_at IS NOT NULL
-                         AND a.attempt_status IN ('PROMPT_ACCEPTED', 'OUTCOME_UNKNOWN')
+                         AND a.attempt_status IN ('PROMPT_ACCEPTED', 'OUTCOME_UNKNOWN', 'SETTLED')
                         THEN t.completed_at
                         ELSE NULL
                     END AS settled_at
@@ -260,6 +287,28 @@ function createMpesaPaymentAttemptRepository(
         return result.rows[0] || null;
     }
 
+    async function getVerifiedWorkerPhone(workerId) {
+        requireIdentifier(workerId, "Worker ID");
+        const result = await databasePool.query(
+            `SELECT phone
+             FROM users
+             WHERE user_id = $1
+               AND role = 'WORKER'
+               AND account_status = 'ACTIVE'
+               AND phone_verified_at IS NOT NULL`,
+            [workerId]
+        );
+        const phone = result.rows[0]?.phone;
+        if (typeof phone !== "string" || phone.trim() === "") {
+            return null;
+        }
+        try {
+            return normalizePhoneNumber(phone);
+        } catch {
+            return null;
+        }
+    }
+
     async function getWorkerPaymentStatusByIdempotencyKey(idempotencyKey, workerId) {
         requireIdempotencyKey(idempotencyKey);
         requireIdentifier(workerId, "Worker ID");
@@ -291,7 +340,7 @@ function createMpesaPaymentAttemptRepository(
                         AND c.contribution_status = 'COMPLETED'
                         AND t.mpesa_result_code = 0
                         AND t.completed_at IS NOT NULL
-                        AND a.attempt_status IN ('PROMPT_ACCEPTED', 'OUTCOME_UNKNOWN')
+                        AND a.attempt_status IN ('PROMPT_ACCEPTED', 'OUTCOME_UNKNOWN', 'SETTLED')
                     ) AS settlement_confirmed,
                     t.mpesa_receipt AS receipt_reference,
                     CASE
@@ -299,7 +348,7 @@ function createMpesaPaymentAttemptRepository(
                          AND c.contribution_status = 'COMPLETED'
                          AND t.mpesa_result_code = 0
                          AND t.completed_at IS NOT NULL
-                         AND a.attempt_status IN ('PROMPT_ACCEPTED', 'OUTCOME_UNKNOWN')
+                         AND a.attempt_status IN ('PROMPT_ACCEPTED', 'OUTCOME_UNKNOWN', 'SETTLED')
                         THEN t.completed_at
                         ELSE NULL
                     END AS settled_at
@@ -404,7 +453,9 @@ function createMpesaPaymentAttemptRepository(
         idempotencyKey,
         amount,
         phoneNumber,
-    }) {
+    }, {
+        environmentProvider: readinessEnvironmentProvider = environmentProvider,
+    } = {}) {
         const request = {
             workerId: requireIdentifier(workerId, "Worker ID"),
             idempotencyKey: requireIdempotencyKey(idempotencyKey),
@@ -417,6 +468,7 @@ function createMpesaPaymentAttemptRepository(
         try {
             await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");
             transactionStarted = true;
+            await enforcePensionLedgerReadiness(client, readinessEnvironmentProvider);
 
             const existing = await selectExistingByIdempotencyKey(client, request.idempotencyKey);
             if (existing) {
@@ -614,7 +666,10 @@ function createMpesaPaymentAttemptRepository(
         return result.rows[0] || null;
     }
 
-    async function createPaymentAttemptForContribution(input, { allowOmittedAmount = false } = {}) {
+    async function createPaymentAttemptForContribution(input, {
+        allowOmittedAmount = false,
+        environmentProvider: readinessEnvironmentProvider = environmentProvider,
+    } = {}) {
         const {
             workerId,
             contributionId,
@@ -637,6 +692,7 @@ function createMpesaPaymentAttemptRepository(
         try {
             await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");
             transactionStarted = true;
+            await enforcePensionLedgerReadiness(client, readinessEnvironmentProvider);
             const existing = await selectExistingByIdempotencyKey(client, request.idempotencyKey);
             if (existing) {
                 assertSameIdempotentRequest(existing, request);
@@ -741,8 +797,11 @@ function createMpesaPaymentAttemptRepository(
         }
     }
 
-    async function createPendingPaymentAttempt(input) {
-        return createPaymentAttemptForContribution(input, { allowOmittedAmount: true });
+    async function createPendingPaymentAttempt(input, options = {}) {
+        return createPaymentAttemptForContribution(input, {
+            ...options,
+            allowOmittedAmount: true,
+        });
     }
 
     async function recordProviderRequestAcceptedForStatus(input, requiredStatus) {
@@ -1173,7 +1232,9 @@ function createMpesaPaymentAttemptRepository(
         return result.rows[0];
     }
 
-    async function settleVerifiedPayment({ attemptId, verificationId }) {
+    async function settleVerifiedPayment({ attemptId, verificationId }, {
+        environmentProvider: readinessEnvironmentProvider = environmentProvider,
+    } = {}) {
         const normalizedAttemptId = requireIdentifier(attemptId, "Payment attempt ID");
         const normalizedVerificationId = Number(verificationId);
         if (!Number.isSafeInteger(normalizedVerificationId) || normalizedVerificationId <= 0) {
@@ -1224,7 +1285,7 @@ function createMpesaPaymentAttemptRepository(
                         c.channel, c.contribution_status,
                         p.account_id AS pension_account_id, p.user_id,
                         p.current_balance, p.account_status, u.role,
-                        u.account_status AS user_status, u.phone AS worker_phone
+                        u.account_status AS user_status
                  FROM transactions t
                  JOIN contributions c ON c.transaction_id = t.transaction_id
                  JOIN pension_accounts p ON p.account_id = c.account_id
@@ -1334,7 +1395,8 @@ function createMpesaPaymentAttemptRepository(
                     evidence.callback_result_code === "0" &&
                     evidence.callback_amount_matches === true &&
                     evidence.callback_phone_matches === true &&
-                    /^[A-Za-z0-9]{1,25}$/.test(evidence.callback_receipt || "");
+                    typeof evidence.callback_receipt === "string" &&
+                    /^[A-Za-z0-9]{1,25}$/.test(evidence.callback_receipt);
                 const queryVerified =
                     evidence.verification_source === "RECONCILIATION" &&
                     evidence.callback_result_code === null &&
@@ -1350,6 +1412,7 @@ function createMpesaPaymentAttemptRepository(
                 }
 
                 let callbackEvidenceId = null;
+                let verifiedReceipt = null;
                 let simulatorConfirmationId = null;
                 if (attempt.provider_mode === "DARAJA") {
                     if (evidence.simulator_outcome !== null) {
@@ -1361,21 +1424,33 @@ function createMpesaPaymentAttemptRepository(
                     }
                     if (callbackVerified) {
                         const callbackResult = await client.query(
-                            `SELECT callback_id
+                            `SELECT callback_id, callback_receipt
                              FROM mpesa_callback_inbox
                              WHERE callback_fingerprint = $1
                                AND attempt_id = $2
                                AND verification_id = $3
                                AND callback_status = 'VERIFIED'
+                               AND checkout_request_id = $4
+                               AND merchant_request_id = $5
+                               AND callback_result_code = '0'
+                               AND callback_amount = $6
+                               AND callback_phone = $7
+                               AND callback_receipt = $8
                              FOR UPDATE`,
                             [
                                 evidence.callback_fingerprint,
                                 normalizedAttemptId,
                                 normalizedVerificationId,
+                                attempt.checkout_request_id,
+                                attempt.merchant_request_id,
+                                attempt.expected_amount,
+                                attempt.mpesa_phone,
+                                evidence.callback_receipt,
                             ]
                         );
                         callbackEvidenceId = callbackResult.rows[0]?.callback_id ?? null;
-                        if (!callbackEvidenceId) {
+                        verifiedReceipt = callbackResult.rows[0]?.callback_receipt ?? null;
+                        if (!callbackEvidenceId || !verifiedReceipt) {
                             throw createRepositoryError(
                                 "Daraja callback evidence is not durably linked to its verification.",
                                 "PAYMENT_NOT_VERIFIED",
@@ -1430,55 +1505,33 @@ function createMpesaPaymentAttemptRepository(
                 if (
                     linked.transaction_status === "COMPLETED" &&
                     linked.contribution_status === "COMPLETED" &&
-                    ["PROMPT_ACCEPTED", "OUTCOME_UNKNOWN"].includes(attempt.attempt_status) &&
+                    ["PROMPT_ACCEPTED", "OUTCOME_UNKNOWN", "SETTLED"].includes(attempt.attempt_status) &&
                     linked.transaction_checkout_request_id === attempt.checkout_request_id &&
                     linked.transaction_phone === attempt.mpesa_phone &&
                     String(linked.transaction_result_code) === "0"
                 ) {
-                    if (evidence.callback_receipt !== null &&
-                        linked.mpesa_receipt !== evidence.callback_receipt) {
-                        if (linked.mpesa_receipt !== null) {
-                            throw createRepositoryError(
-                                "A verified callback receipt conflicts with the settled transaction receipt.",
-                                "PAYMENT_RECEIPT_CONFLICT",
-                                409
-                            );
-                        }
+                    if (verifiedReceipt !== null &&
+                        linked.mpesa_receipt !== null &&
+                        linked.mpesa_receipt !== verifiedReceipt) {
+                        throw createRepositoryError(
+                            "A late callback receipt conflicts with the settled transaction.",
+                            "PAYMENT_RECEIPT_CONFLICT",
+                            409
+                        );
+                    }
+                    if (verifiedReceipt !== null &&
+                        linked.mpesa_receipt === null) {
                         const receiptOwner = await client.query(
                             `SELECT transaction_id
                              FROM transactions
                              WHERE mpesa_receipt = $1 AND transaction_id <> $2
                              FOR UPDATE`,
-                            [evidence.callback_receipt, attempt.transaction_id]
+                            [verifiedReceipt, attempt.transaction_id]
                         );
                         if (receiptOwner.rows[0]) {
                             throw createRepositoryError(
                                 "Provider receipt is already associated with another transaction.",
                                 "DUPLICATE_MPESA_RECEIPT",
-                                409
-                            );
-                        }
-                        const enrichedTransaction = await client.query(
-                            `UPDATE transactions
-                             SET mpesa_receipt = $1, updated_at = now()
-                             WHERE transaction_id = $2
-                               AND transaction_status = 'COMPLETED'
-                               AND mpesa_receipt IS NULL
-                               AND checkout_request_id = $3
-                               AND mpesa_phone = $4
-                               AND mpesa_result_code = 0
-                             RETURNING transaction_id`,
-                            [
-                                evidence.callback_receipt,
-                                attempt.transaction_id,
-                                attempt.checkout_request_id,
-                                attempt.mpesa_phone,
-                            ]
-                        );
-                        if (!enrichedTransaction.rows[0]) {
-                            throw createRepositoryError(
-                                "Settled transaction receipt could not be safely enriched.",
-                                "PAYMENT_RECEIPT_CONFLICT",
                                 409
                             );
                         }
@@ -1505,13 +1558,13 @@ function createMpesaPaymentAttemptRepository(
                     );
                 }
 
-                if (evidence.callback_receipt !== null) {
+                if (verifiedReceipt !== null) {
                     const receiptOwner = await client.query(
                         `SELECT transaction_id
                          FROM transactions
                          WHERE mpesa_receipt = $1 AND transaction_id <> $2
                          FOR UPDATE`,
-                        [evidence.callback_receipt, attempt.transaction_id]
+                        [verifiedReceipt, attempt.transaction_id]
                     );
                     if (receiptOwner.rows[0]) {
                         throw createRepositoryError(
@@ -1522,7 +1575,8 @@ function createMpesaPaymentAttemptRepository(
                     }
                 }
 
-                const verifiedReceipt = evidence.callback_receipt;
+                await enforcePensionLedgerReadiness(client, readinessEnvironmentProvider);
+
                 const updatedTransaction = await client.query(
                     `UPDATE transactions
                      SET transaction_status = 'COMPLETED',
@@ -1565,6 +1619,22 @@ function createMpesaPaymentAttemptRepository(
                 if (!updatedContribution.rows[0]) {
                     throw createRepositoryError(
                         "Contribution could not be completed.",
+                        "PAYMENT_SETTLEMENT_CONFLICT",
+                        409
+                    );
+                }
+
+                const settledAttempt = await client.query(
+                    `UPDATE mpesa_payment_attempts
+                     SET attempt_status = 'SETTLED', updated_at = now()
+                     WHERE attempt_id = $1
+                       AND attempt_status IN ('PROMPT_ACCEPTED', 'OUTCOME_UNKNOWN')
+                     RETURNING attempt_id`,
+                    [normalizedAttemptId]
+                );
+                if (!settledAttempt.rows[0]) {
+                    throw createRepositoryError(
+                        "Payment attempt could not be marked settled.",
                         "PAYMENT_SETTLEMENT_CONFLICT",
                         409
                     );
@@ -1620,33 +1690,18 @@ function createMpesaPaymentAttemptRepository(
                         409
                     );
                 }
-                const reference = verifiedReceipt || attempt.transaction_id;
-                const message = `MicoPesa: We received your contribution of KES ${centsToDecimal(expectedCents)}. Ref: ${reference}.`;
-                if (attempt.provider_mode === "DARAJA") {
-                    await client.query(
-                        `INSERT INTO notifications (
-                            user_id, notification_type, message, recipient_phone, deduplication_key
-                         )
-                         VALUES ($1, 'SMS', $2, $3, $4)
-                         ON CONFLICT (deduplication_key)
-                         WHERE notification_type = 'SMS' AND deduplication_key IS NOT NULL
-                         DO NOTHING`,
-                        [
-                            linked.user_id,
-                            message,
-                            linked.worker_phone,
-                            `mpesa-contribution:${normalizedAttemptId}`,
-                        ]
-                    );
-                }
                 await client.query("COMMIT");
                 transactionStarted = false;
                 return {
                     attempt_id: normalizedAttemptId,
                     alreadySettled: false,
                     account_balance: balanceResult.rows[0].current_balance,
+                    contribution_id: linked.contribution_id,
                     contribution_status: "COMPLETED",
                     transaction_status: "COMPLETED",
+                    user_id: linked.user_id,
+                    verification_status: evidence.verification_status,
+                    provider_mode: attempt.provider_mode,
                 };
             }
 
@@ -1742,14 +1797,17 @@ function createMpesaPaymentAttemptRepository(
     }
 
     return {
+        assertPensionLedgerActive: (queryable = databasePool) =>
+            assertPensionLedgerActive(queryable),
         claimVerification,
         completeVerification,
-        createPaymentAttemptForContribution: (input) =>
-            createPaymentAttemptForContribution(input),
+        createPaymentAttemptForContribution: (input, options) =>
+            createPaymentAttemptForContribution(input, options),
         createPendingMpesaPayment,
         createPendingPaymentAttempt,
         findByCheckoutRequestId,
         findById,
+        getVerifiedWorkerPhone,
         getWorkerPaymentStatus,
         getWorkerPaymentStatusByIdempotencyKey,
         markProviderRequestRejected,
@@ -1769,6 +1827,8 @@ function getDefaultRepository() {
 }
 
 module.exports = {
+    assertPensionLedgerActive: (...args) =>
+        getDefaultRepository().assertPensionLedgerActive(...args),
     claimVerification: (...args) => getDefaultRepository().claimVerification(...args),
     completeVerification: (...args) => getDefaultRepository().completeVerification(...args),
     createMpesaPaymentAttemptRepository,
@@ -1778,6 +1838,7 @@ module.exports = {
     createPendingPaymentAttempt: (...args) => getDefaultRepository().createPendingPaymentAttempt(...args),
     findByCheckoutRequestId: (...args) => getDefaultRepository().findByCheckoutRequestId(...args),
     findById: (...args) => getDefaultRepository().findById(...args),
+    getVerifiedWorkerPhone: (...args) => getDefaultRepository().getVerifiedWorkerPhone(...args),
     getWorkerPaymentStatus: (...args) => getDefaultRepository().getWorkerPaymentStatus(...args),
     getWorkerPaymentStatusByIdempotencyKey: (...args) =>
         getDefaultRepository().getWorkerPaymentStatusByIdempotencyKey(...args),

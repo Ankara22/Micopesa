@@ -379,6 +379,8 @@ test("email verification transfers a pending address only once", async () => {
     const token = "unit-test-email-verification-token-long-enough";
     const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
     const state = {
+        loginMethod: "PHONE",
+        forcePasswordChange: false,
         email: "legacy@example.com",
         pendingEmail: "new@example.com",
         verified: false,
@@ -417,11 +419,76 @@ test("email verification transfers a pending address only once", async () => {
     assert.equal(state.pendingEmail, null);
     assert.equal(state.verified, true);
     assert.equal(state.consumed, true);
+    assert.equal(state.loginMethod, "PHONE");
+    assert.equal(state.forcePasswordChange, false);
 
     const reused = response();
     await authController.verifyEmail({ body: { token } }, reused);
     assert.equal(reused.statusCode, 400);
     assert.equal(state.updateCount, 1);
+});
+
+test("expired administrator email-verification tokens are rejected", async () => {
+    const token = "expired-admin-email-verification-token-long-enough";
+    const originalConnectForExpiry = pool.connect;
+    pool.connect = async () => ({
+        async query(query) {
+            if (query === "BEGIN" || query === "ROLLBACK") return { rows: [] };
+            if (query.includes("FROM pending_registrations") || query.includes("FROM auth_tokens")) {
+                return { rows: [] };
+            }
+            assert.fail(`Unexpected transaction query: ${query}`);
+        },
+        release() {},
+    });
+
+    try {
+        const res = response();
+        await authController.verifyEmail({ body: { token } }, res);
+        assert.equal(res.statusCode, 400);
+        assert.match(res.body.message, /invalid or expired/i);
+    } finally {
+        pool.connect = originalConnectForExpiry;
+    }
+});
+
+test("administrator-created users can request email verification after changing their temporary password", async () => {
+    const originalQueryForRequest = pool.query;
+    const originalLimits = authEmailService.enforceRequestLimits;
+    const originalIssue = authEmailService.issueEmailToken;
+    const issued = [];
+    authEmailService.enforceRequestLimits = async (input) => {
+        assert.equal(input.userId, "staff-user");
+        assert.equal(input.action, "EMAIL_VERIFICATION");
+    };
+    authEmailService.issueEmailToken = async (input) => issued.push(input);
+    pool.query = async (query, values) => {
+        assert.match(query, /account_status = 'ACTIVE'/);
+        assert.deepEqual(values, ["staff-user"]);
+        return { rows: [{
+            user_id: "staff-user",
+            pending_email: "staff@example.test",
+            email_verified: false,
+        }] };
+    };
+
+    try {
+        const res = response();
+        await authController.resendEmailVerification({
+            user: { userId: "staff-user" },
+            ip: "127.0.0.1",
+        }, res);
+        assert.equal(res.statusCode, 200);
+        assert.deepEqual(issued, [{
+            userId: "staff-user",
+            email: "staff@example.test",
+            purpose: "EMAIL_VERIFICATION",
+        }]);
+    } finally {
+        pool.query = originalQueryForRequest;
+        authEmailService.enforceRequestLimits = originalLimits;
+        authEmailService.issueEmailToken = originalIssue;
+    }
 });
 
 test("email-verification conflicts do not disclose that another account owns the address", async () => {

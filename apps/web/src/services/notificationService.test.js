@@ -19,12 +19,26 @@ describe("notification preference API", () => {
 
     it("loads only the current user's boolean email and SMS preferences", async () => {
         api.get.mockResolvedValue({
-            data: { data: { email_enabled: true, sms_enabled: false } },
+            data: { data: {
+                email_enabled: true,
+                sms_enabled: false,
+                phone_registered: true,
+                phone_verified: false,
+                email_registered: true,
+                email_verified: true,
+                push_enabled: true,
+                phone: "must-not-be-returned",
+            } },
         });
 
         await expect(getMyNotificationPreferences()).resolves.toEqual({
             email_enabled: true,
             sms_enabled: false,
+            phone_registered: true,
+            phone_verified: false,
+            email_registered: true,
+            email_verified: true,
+            push_enabled: true,
         });
         expect(api.get).toHaveBeenCalledWith("/api/notifications/preferences");
     });
