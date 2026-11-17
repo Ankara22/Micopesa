@@ -583,6 +583,7 @@ test("preference controller exposes only current-user boolean state and ignores 
         repository: {},
         eventService,
         webPushService: { getPublicKey: () => "unused" },
+        environment: { NODE_ENV: "test" },
     });
     const req = {
         user: { userId: "worker-1" },
@@ -669,13 +670,20 @@ test("GET and PATCH /api/notifications/preferences are authenticated current-use
 test("transactional templates are concise, plain-text and HTML escaped without sensitive data", () => {
     const template = renderTransactionalTemplate("RETIREMENT_PLAN_SAVED");
     const approval = renderTransactionalTemplate("KYC_VERIFIED");
+    const previousFrontendUrl = process.env.FRONTEND_BASE_URL;
+    process.env.FRONTEND_BASE_URL = "https://micopesa.example.test";
     const rejection = renderTransactionalTemplate("KYC_REJECTED");
+    if (previousFrontendUrl === undefined) delete process.env.FRONTEND_BASE_URL;
+    else process.env.FRONTEND_BASE_URL = previousFrontendUrl;
     assert.equal(template.subject, "Retirement plan saved");
     assert.match(template.text, /retirement plan has been saved/);
     assert.match(template.html, /MicoPesa/);
     assert.equal(template.html.includes("plan_id"), false);
     assert.match(approval.text, /was approved/);
     assert.match(rejection.text, /was not approved/);
+    assert.match(rejection.text, /https:\/\/micopesa\.example\.test\/worker\/profile#kyc-status/);
+    assert.match(rejection.html, /href="https:\/\/micopesa\.example\.test\/worker\/profile#kyc-status"/);
+    assert.match(rejection.text, /contact your fund administrator/);
     assert.equal(escapeHtml(`<script>&"'`), "&lt;script&gt;&amp;&quot;&#39;");
     assert.throws(() => renderTransactionalTemplate("UNSUPPORTED"));
 });

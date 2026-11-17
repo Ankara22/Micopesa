@@ -224,7 +224,7 @@ pre-persistent notifications
   -> migration_unified_notifications
        -> migration_transactional_notifications
        -> migration_role_notifications_and_reporting
-            -> migration_notification_event_classification
+            -> migration_notification_event_classification_repair_forward
        -> migration_external_recipient_sms (optional)
        -> migration_mobilesasa_sms_delivery_reports (optional; also needs persistent SMS fields)
 ```
@@ -242,8 +242,8 @@ request/contact columns. The MobileSasa delivery-report migration requires
 `deduplication_key` and `notification_event_type`, and reads
 `notification_preferences`; therefore the
 application service requires the persistent, unified, transactional, and
-role/reporting migrations, followed by the event-classification migration,
-not merely the migration that creates preferences.
+role/reporting migrations, followed by the guarded event-classification
+repair, not merely the migration that creates preferences.
 `smsNotificationRepository.js` also uses persistent delivery fields,
 unified channel snapshots, transactional preferences, and the event
 classification column. A safe recommended
@@ -269,10 +269,15 @@ application/API rollout is:
    event idempotency index, and opt-in preferences. It requires persistent
    delivery's `deduplication_key`; the documented position also ensures the
    role category exists before deploying `notificationEventService.js`.
-5. `database/migration_notification_event_classification.sql` — nullable
-   event classification for supported transactional notifications. It is
-   additive, leaves existing rows unclassified and optional, and must be
-   applied before deploying code that inserts or queries the column.
+5. `database/migration_notification_event_classification_repair_forward.sql`
+   — guarded correction for the nullable event-classification column. It
+   removes the historical event CHECK only when its definition and referenced
+   column match a verified historical form; otherwise it aborts. For an
+   existing database needing this correction, use it in place of the older
+   `database/migration_notification_event_classification.sql`. Do not run the
+   older name-based drop first. Apply this after both the transactional and
+   role/reporting prerequisites and before deploying code that writes or
+   queries `notification_event_type`.
 6. `database/migration_external_recipient_sms.sql` only if that feature is
    authorized and the target schema has the unified-notification channel
    snapshot constraint. Its preflight rejects absent prerequisites and
@@ -297,6 +302,12 @@ statements without a universal compatibility preflight. Any partially
 applied, manually modified, or differently versioned schema must be reviewed
 against each SQL statement before proceeding; do not rely on filenames or
 comments as proof of compatibility.
+
+Before either event-classification migration, obtain database-owner approval
+and a verified restorable backup. The guarded correction preserves existing
+notification rows and unrelated checks, but it does not activate or otherwise
+change the pension ledger. Ledger activation still requires independent
+financial reconciliation and separate formal cutover approval.
 
 Compliance workflow upgrades are a separate one-time chain for databases
 still on the pre-workflow compliance schema:

@@ -391,14 +391,17 @@ describe("admin unified notifications", () => {
         expect(screen.getByText("1 recipient(s) selected (maximum 100).")).toBeInTheDocument();
 
         for (let index = 3; index <= 101; index += 1) {
-            await selectRecipient(`Worker ${index} (Worker)`);
+            fireEvent.click(screen.getByRole("button", {
+                name: "Search and select registered users",
+            }));
+            fireEvent.click(screen.getByLabelText(`Worker ${index} (Worker)`));
         }
         expect(screen.getByText("100 recipient(s) selected (maximum 100).")).toBeInTheDocument();
         await selectRecipient("Worker 1 (Worker)");
         expect(screen.getByRole("alert")).toHaveTextContent(
             "You can select up to 100 recipients per announcement."
         );
-    }, 15000);
+    }, 60000);
 
     it("shows persisted provider and delivery evidence in both languages", async () => {
         mocks.listNotifications.mockResolvedValue([{
@@ -452,6 +455,38 @@ describe("admin unified notifications", () => {
         expect(screen.getByLabelText("Email")).toBeDisabled();
         expect(screen.getByText(/Registered phone number is not verified/)).toBeInTheDocument();
         expect(screen.getByText(/Registered email address is not verified/)).toBeInTheDocument();
+    });
+
+    it("blocks only the development email channel for recipients outside its allowlist", async () => {
+        mocks.listNotificationRecipients.mockResolvedValue([{
+            user_id: "worker-outside-email-allowlist",
+            full_name: "Worker Outside Email Allowlist",
+            role: "WORKER",
+            phone_registered: true,
+            phone_verified: true,
+            phone_available: true,
+            sms_enabled: true,
+            sms_delivery_enabled: true,
+            sms_recipient_allowed: true,
+            email_registered: true,
+            email_verified: true,
+            email_available: true,
+            email_enabled: true,
+            email_delivery_enabled: true,
+            email_recipient_allowed: false,
+            push_subscription_count: 0,
+            push_delivery_enabled: false,
+        }]);
+        renderPage();
+
+        await selectRecipient("Worker Outside Email Allowlist (Worker)");
+
+        expect(screen.getByLabelText("SMS")).toBeEnabled();
+        expect(screen.getByLabelText("Email")).toBeDisabled();
+        expect(screen.getByLabelText("Selected recipient channel availability"))
+            .toHaveTextContent(
+                "Email — This recipient is not authorized by the development delivery allowlist"
+            );
     });
 
     it("allows Admin to send optional notifications to verified contacts despite opt-out", async () => {

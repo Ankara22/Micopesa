@@ -32,6 +32,7 @@ function createSettlementPool({
             provider_mode: "DARAJA",
             checkout_request_id: "checkout_001",
             merchant_request_id: "merchant_001",
+            created_at: "2026-01-01T00:00:00.000Z",
             ...attempt,
         },
         verification: {
@@ -47,8 +48,6 @@ function createSettlementPool({
             provider_result_code: "0",
             provider_result_description: "Provider-confirmed success",
             verification_status: "VERIFIED_SUCCESS",
-            provider_mode: "DARAJA",
-            simulator_outcome: null,
             callback_fingerprint: "a".repeat(64),
             ...verification,
         },
@@ -86,6 +85,7 @@ function createSettlementPool({
         notifications: [],
         movements: [],
         simulatorConfirmation: null,
+        simulatorInitiation: null,
         callbackEvidence: {
             callback_id: 1,
             attempt_id: "attempt_001",
@@ -110,6 +110,18 @@ function createSettlementPool({
         ledgerReadinessError,
         snapshot: null,
     };
+    if (state.attempt.provider_mode === "SIMULATOR") {
+        state.simulatorInitiation = {
+            confirmation_id: "confirmation-initiation-001",
+            attempt_id: state.attempt.attempt_id,
+            record_type: "INITIATION",
+            provider_mode: "SIMULATOR",
+            checkout_request_id: state.attempt.checkout_request_id,
+            merchant_request_id: state.attempt.merchant_request_id,
+            synthetic_reference: state.attempt.checkout_request_id,
+            initiated_at: state.attempt.created_at,
+        };
+    }
 
     function snapshot() {
         return {
@@ -117,6 +129,8 @@ function createSettlementPool({
             transaction: copy(state.transaction),
             contribution: copy(state.contribution),
             account: copy(state.account),
+            simulatorConfirmation: copy(state.simulatorConfirmation),
+            simulatorInitiation: copy(state.simulatorInitiation),
             otherTransactions: copy(state.otherTransactions),
             notifications: copy(state.notifications),
             movements: copy(state.movements),
@@ -129,6 +143,8 @@ function createSettlementPool({
         state.transaction = saved.transaction;
         state.contribution = saved.contribution;
         state.account = saved.account;
+        state.simulatorConfirmation = saved.simulatorConfirmation;
+        state.simulatorInitiation = saved.simulatorInitiation;
         state.otherTransactions = saved.otherTransactions;
         state.notifications = saved.notifications;
         state.movements = saved.movements;
@@ -203,13 +219,81 @@ function createSettlementPool({
             };
         }
         if (statement.includes("FROM simulator_payment_confirmations")) {
+            if (statement.includes("record_type = 'INITIATION'")) {
+                return {
+                    rows: state.simulatorInitiation &&
+                        state.simulatorInitiation.attempt_id === params[0]
+                        ? [copy(state.simulatorInitiation)]
+                        : [],
+                };
+            }
             const confirmation = state.simulatorConfirmation;
             const matches = confirmation &&
                 confirmation.attempt_id === params[0] &&
                 String(confirmation.verification_id) === String(params[1]) &&
-                confirmation.synthetic_reference === params[2] &&
-                confirmation.outcome === "SUCCESS";
+                (statement.includes("outcome = 'SUCCESS'")
+                    ? confirmation.outcome === "SUCCESS"
+                    : statement.includes("outcome = 'FAILED'")
+                        ? confirmation.outcome === "FAILED"
+                        : true) &&
+                (!params[2] || confirmation.synthetic_reference === params[2]);
             return { rows: matches ? [{ confirmation_id: confirmation.confirmation_id }] : [] };
+        }
+        if (statement.includes("FROM pension_account_movements")) {
+            const movement = state.movements.find((item) =>
+                item.payment_attempt_id === params[0]
+            );
+            return { rows: movement ? [copy(movement)] : [] };
+        }
+        if (statement.startsWith("INSERT INTO simulator_payment_confirmations")) {
+            const recordType = statement.includes("'INITIATION'") ? "INITIATION" : "CONFIRMATION";
+            if (recordType === "INITIATION") {
+                const initiation = {
+                    confirmation_id: "confirmation-initiation-001",
+                    attempt_id: params[0],
+                    record_type: "INITIATION",
+                    provider_mode: "SIMULATOR",
+                    checkout_request_id: null,
+                    merchant_request_id: null,
+                    synthetic_reference: null,
+                    initiated_at: "2026-01-01T00:00:00.000Z",
+                };
+                state.simulatorInitiation = initiation;
+                state.attempt.provider_mode = "SIMULATOR";
+                return { rows: [copy(initiation)] };
+            }
+            const isSettlementSuccess = statement.includes("'SUCCESS'");
+            const [attemptId, verificationId, outcomeOrCheckout, checkoutOrMerchant, merchantOrReference,
+                referenceOrConfirmed, maybeConfirmedAt] = params;
+            const outcome = isSettlementSuccess ? "SUCCESS" : outcomeOrCheckout;
+            const checkoutId = isSettlementSuccess ? outcomeOrCheckout : checkoutOrMerchant;
+            const merchantId = isSettlementSuccess ? checkoutOrMerchant : merchantOrReference;
+            const syntheticReference = isSettlementSuccess ? merchantOrReference : referenceOrConfirmed;
+            const confirmedAt = isSettlementSuccess ? referenceOrConfirmed : maybeConfirmedAt;
+            const confirmation = {
+                confirmation_id: "confirmation-001",
+                attempt_id: attemptId,
+                verification_id: verificationId,
+                record_type: "CONFIRMATION",
+                provider_mode: "SIMULATOR",
+                outcome,
+                checkout_request_id: checkoutId,
+                merchant_request_id: merchantId,
+                synthetic_reference: syntheticReference,
+                confirmed_at: confirmedAt,
+            };
+            state.simulatorConfirmation = confirmation;
+            return { rows: [{ confirmation_id: confirmation.confirmation_id }] };
+        }
+        if (statement.startsWith("UPDATE simulator_payment_confirmations")) {
+            const [checkoutId, merchantId] = params;
+            if (!state.simulatorInitiation) return { rows: [] };
+            Object.assign(state.simulatorInitiation, {
+                checkout_request_id: checkoutId,
+                merchant_request_id: merchantId,
+                synthetic_reference: checkoutId,
+            });
+            return { rows: [] };
         }
         if (statement.includes("FROM transactions t") && statement.includes("JOIN contributions c")) {
             const matches = params[0] === state.transaction.transaction_id &&
@@ -349,12 +433,35 @@ function createSettlementPool({
                 simulator_confirmation_id: simulatorId,
                 provider_mode: providerMode,
             });
+            return { rows: [{ movement_id: "movement_001" }] };
+        }
+        if (statement.startsWith("UPDATE pension_accounts")) {
+            const [accountId, amount] = params;
+            if (accountId !== state.account.account_id) return { rows: [] };
             const [whole, fraction] = amount.split(".");
             const current = state.account.current_balance.split(".");
             const cents = BigInt(current[0]) * 100n + BigInt((current[1] || "").padEnd(2, "0")) +
                 BigInt(whole) * 100n + BigInt(fraction.padEnd(2, "0"));
             state.account.current_balance = `${cents / 100n}.${String(cents % 100n).padStart(2, "0")}`;
-            return { rows: [{ movement_id: "movement_001" }] };
+            return { rows: [{ current_balance: state.account.current_balance }] };
+        }
+        if (statement.startsWith("UPDATE mpesa_payment_verifications") &&
+            statement.includes("SET verification_status = 'UNVERIFIED'")) {
+            const [description, verificationId, attemptId] = params;
+            const verification = state.verification;
+            if (
+                verification.verification_id !== Number(verificationId) &&
+                String(verification.verification_id) !== String(verificationId)
+            ) return { rows: [] };
+            if (verification.attempt_id !== attemptId ||
+                verification.verification_status !== "PROCESSING") return { rows: [] };
+            Object.assign(verification, {
+                verification_status: "UNVERIFIED",
+                provider_result_code: "0",
+                provider_result_description: description,
+                completed_at: "2026-01-01T00:00:02.000Z",
+            });
+            return { rows: [{ completed_at: verification.completed_at }] };
         }
         if (statement.startsWith("SELECT current_balance") &&
             statement.includes("FROM pension_accounts")) {
@@ -416,6 +523,18 @@ function settlementRequest(overrides = {}) {
     return { attemptId: "attempt_001", verificationId: 1, ...overrides };
 }
 
+function simulatedSettlementRequest(overrides = {}) {
+    return settlementRequest({
+        simulatorConfirmation: {
+            outcome: "SUCCESS",
+            providerResultCode: "0",
+            providerResultDescription:
+                "SIMULATED: Payment succeeded; no real money was transferred.",
+        },
+        ...overrides,
+    });
+}
+
 test("atomically settles callback-verified payment with its durable M-Pesa receipt", async () => {
     const { repository, state } = setup({ ledgerEnforcementEnabled: true });
     const result = await repository.settleVerifiedPayment(settlementRequest());
@@ -437,7 +556,7 @@ test("atomically settles callback-verified payment with its durable M-Pesa recei
         { contribution_id: "contribution_001", fund_id: "fund_002", allocated_amount: "750.00" },
     ]);
     assert.ok(state.queries.some((sql) => sql.includes("FOR UPDATE OF t, c, u")));
-    assert.equal(state.queries.filter((sql) => sql.startsWith("UPDATE pension_accounts")).length, 0);
+    assert.equal(state.queries.filter((sql) => sql.startsWith("UPDATE pension_accounts")).length, 1);
     assert.equal(
         state.queries.some((sql) => sql.startsWith("INSERT INTO notifications")),
         false
@@ -477,19 +596,14 @@ test("query-only verified success settles without inventing a receipt", async ()
             callback_receipt: null,
         },
     });
-    const result = await repository.settleVerifiedPayment(settlementRequest());
-
-    assert.equal(result.alreadySettled, false);
-    assert.equal(state.transaction.transaction_status, "COMPLETED");
-    assert.equal(state.transaction.mpesa_receipt, null);
-    assert.equal(state.transaction.transaction_checkout_request_id, "checkout_001");
-    assert.equal(state.transaction.transaction_phone, "254712345678");
-    assert.equal(state.account.current_balance, "3500.00");
-    assert.equal(state.queries.filter((sql) => sql.startsWith("UPDATE pension_accounts")).length, 0);
-    assert.equal(state.notifications.length, 0);
+    await assert.rejects(repository.settleVerifiedPayment(settlementRequest()), {
+        code: "PAYMENT_NOT_VERIFIED",
+    });
+    assert.equal(state.transaction.transaction_status, "PENDING");
+    assert.equal(state.account.current_balance, "1000.00");
 });
 
-test("simulated query success uses its synthetic reference and never queues an SMS", async () => {
+test("simulated query success credits once with explicit simulated evidence and no M-Pesa receipt", async () => {
     const syntheticReference = `SIM${"A".repeat(22)}`;
     const { repository, state } = setup({
         attempt: {
@@ -498,29 +612,91 @@ test("simulated query success uses its synthetic reference and never queues an S
             merchant_request_id: `SIMM${"A".repeat(21)}`,
         },
         verification: {
-            provider_mode: "SIMULATOR",
-            simulator_outcome: "SUCCESS",
             verification_source: "RECONCILIATION",
+            verification_status: "PROCESSING",
             checkout_request_id: syntheticReference,
             merchant_request_id: `SIMM${"A".repeat(21)}`,
+            callback_fingerprint: null,
             callback_result_code: null,
             callback_amount_matches: null,
             callback_phone_matches: null,
             callback_receipt: null,
-            provider_result_description:
-                "SIMULATED: Payment succeeded; no real money was transferred.",
+            provider_result_code: null,
+            provider_result_description: null,
         },
     });
-    state.simulatorConfirmation = {
-        confirmation_id: "confirmation-001",
-        attempt_id: "attempt_001",
-        verification_id: 1,
-        synthetic_reference: syntheticReference,
-        outcome: "SUCCESS",
-    };
+    const result = await repository.settleVerifiedPayment(simulatedSettlementRequest());
 
-    await repository.settleVerifiedPayment(settlementRequest());
-    const duplicate = await repository.settleVerifiedPayment(settlementRequest());
+    assert.equal(result.alreadySettled, false);
+    assert.equal(state.transaction.transaction_status, "COMPLETED");
+    assert.equal(state.transaction.mpesa_receipt, null);
+    assert.equal(state.account.current_balance, "3500.00");
+    assert.equal(state.simulatorConfirmation.outcome, "SUCCESS");
+    assert.equal(state.simulatorConfirmation.provider_mode, "SIMULATOR");
+    assert.equal(state.movements.length, 1);
+    assert.equal(state.movements[0].simulator_confirmation_id, "confirmation-001");
+    assert.equal(state.movements[0].provider_mode, "SIMULATOR");
+    assert.equal(state.attempt.attempt_status, "SETTLED");
+    assert.equal(state.queries.filter((sql) => sql.startsWith("UPDATE pension_accounts")).length, 1);
+    assert.equal(state.notifications.length, 0);
+});
+
+test("simulated settlement is idempotent and cannot credit a second time", async () => {
+    const syntheticReference = `SIM${"A".repeat(22)}`;
+    const { repository, state } = setup({
+        attempt: {
+            provider_mode: "SIMULATOR",
+            checkout_request_id: syntheticReference,
+            merchant_request_id: `SIMM${"A".repeat(21)}`,
+        },
+        verification: {
+            verification_source: "RECONCILIATION",
+            verification_status: "PROCESSING",
+            checkout_request_id: syntheticReference,
+            merchant_request_id: `SIMM${"A".repeat(21)}`,
+            callback_fingerprint: null,
+            callback_result_code: null,
+            callback_amount_matches: null,
+            callback_phone_matches: null,
+            callback_receipt: null,
+            provider_result_code: null,
+            provider_result_description: null,
+        },
+    });
+    await repository.settleVerifiedPayment(simulatedSettlementRequest());
+    const duplicate = await repository.settleVerifiedPayment(simulatedSettlementRequest());
+
+    assert.equal(duplicate.alreadySettled, true);
+    assert.equal(state.account.current_balance, "3500.00");
+    assert.equal(state.movements.length, 1);
+    assert.equal(state.queries.filter((sql) => sql.startsWith("UPDATE pension_accounts")).length, 1);
+});
+
+test("simulated success is not represented as a real M-Pesa transaction", async () => {
+    const syntheticReference = `SIM${"A".repeat(22)}`;
+    const { repository, state } = setup({
+        attempt: {
+            provider_mode: "SIMULATOR",
+            checkout_request_id: syntheticReference,
+            merchant_request_id: `SIMM${"A".repeat(21)}`,
+        },
+        verification: {
+            verification_source: "RECONCILIATION",
+            verification_status: "PROCESSING",
+            checkout_request_id: syntheticReference,
+            merchant_request_id: `SIMM${"A".repeat(21)}`,
+            callback_fingerprint: null,
+            callback_result_code: null,
+            callback_amount_matches: null,
+            callback_phone_matches: null,
+            callback_receipt: null,
+            provider_result_code: null,
+            provider_result_description: null,
+        },
+    });
+
+    await repository.settleVerifiedPayment(simulatedSettlementRequest());
+    const duplicate = await repository.settleVerifiedPayment(simulatedSettlementRequest());
 
     assert.equal(duplicate.alreadySettled, true);
     assert.equal(state.transaction.mpesa_receipt, null);
@@ -530,7 +706,7 @@ test("simulated query success uses its synthetic reference and never queues an S
     assert.equal(state.account.current_balance, "3500.00");
     assert.equal(state.notifications.length, 0);
     assert.equal(state.queries.some((sql) => sql.startsWith("INSERT INTO notifications")), false);
-    assert.equal(state.queries.filter((sql) => sql.startsWith("UPDATE pension_accounts")).length, 0);
+    assert.equal(state.queries.filter((sql) => sql.startsWith("UPDATE pension_accounts")).length, 1);
     assert.equal(state.movements[0].simulator_confirmation_id, "confirmation-001");
     assert.equal(state.movements[0].payment_callback_id, null);
 });
@@ -544,11 +720,11 @@ test("simulated verified failure does not complete the contribution or credit it
             merchant_request_id: `SIMM${"B".repeat(21)}`,
         },
         verification: {
-            provider_mode: "SIMULATOR",
-            simulator_outcome: "FAILED",
             verification_source: "RECONCILIATION",
+            verification_status: "VERIFIED_FAILURE",
             checkout_request_id: syntheticReference,
             merchant_request_id: `SIMM${"B".repeat(21)}`,
+            callback_fingerprint: null,
             callback_result_code: null,
             callback_amount_matches: null,
             callback_phone_matches: null,
@@ -556,9 +732,16 @@ test("simulated verified failure does not complete the contribution or credit it
             provider_result_code: "1",
             provider_result_description:
                 "SIMULATED: Payment failed; no real money was transferred.",
-            verification_status: "VERIFIED_FAILURE",
         },
     });
+    state.simulatorConfirmation = {
+        confirmation_id: "confirmation-failure-001",
+        attempt_id: "attempt_001",
+        verification_id: 1,
+        record_type: "CONFIRMATION",
+        synthetic_reference: syntheticReference,
+        outcome: "FAILED",
+    };
 
     await repository.settleVerifiedPayment(settlementRequest());
 
@@ -570,53 +753,28 @@ test("simulated verified failure does not complete the contribution or credit it
     assert.equal(state.notifications.length, 0);
 });
 
-test("late callback receipt does not alter an already-settled query-only transaction", async () => {
+test("query-only success without explicit simulator or callback evidence cannot settle", async () => {
     const { repository, state } = setup({
         verification: {
             verification_source: "RECONCILIATION",
-            provider_mode: "DARAJA",
             callback_result_code: null,
             callback_amount_matches: null,
             callback_phone_matches: null,
             callback_receipt: null,
         },
     });
-    await repository.settleVerifiedPayment(settlementRequest());
-    state.verification = {
-        ...state.verification,
-        verification_id: 2,
-        verification_source: "CALLBACK",
-        callback_result_code: "0",
-        callback_amount_matches: true,
-        callback_phone_matches: true,
-        callback_receipt: "LATE123RECEIPT",
-    };
-    state.callbackEvidence = {
-        callback_id: 2,
-        attempt_id: "attempt_001",
-        verification_id: 2,
-        callback_fingerprint: "a".repeat(64),
-        callback_status: "VERIFIED",
-        checkout_request_id: "checkout_001",
-        merchant_request_id: "merchant_001",
-        callback_result_code: "0",
-        callback_amount: "2500.00",
-        callback_phone: "254712345678",
-        callback_receipt: "LATE123RECEIPT",
-    };
-
-    const result = await repository.settleVerifiedPayment(settlementRequest({ verificationId: 2 }));
-
-    assert.equal(result.alreadySettled, true);
+    await assert.rejects(repository.settleVerifiedPayment(settlementRequest()), {
+        code: "PAYMENT_NOT_VERIFIED",
+    });
     assert.equal(state.transaction.mpesa_receipt, null);
-    assert.equal(state.account.current_balance, "3500.00");
+    assert.equal(state.account.current_balance, "1000.00");
     assert.equal(state.queries.filter((sql) => sql.startsWith("UPDATE pension_accounts")).length, 0);
     assert.equal(state.notifications.length, 0);
-    assert.equal(state.queries.some((sql) => /SET mpesa_receipt/.test(sql)), false);
 });
 
 test("conflicting late callback receipt cannot replace an already-settled receipt", async () => {
     const { repository, state } = setup({
+        attempt: { attempt_status: "SETTLED" },
         transaction: {
             transaction_status: "COMPLETED",
             mpesa_receipt: "ORIGINAL123",
@@ -625,6 +783,12 @@ test("conflicting late callback receipt cannot replace an already-settled receip
             transaction_result_code: 0,
         },
         contribution: { contribution_status: "COMPLETED" },
+    });
+    state.movements.push({
+        movement_id: "movement-existing",
+        movement_type: "CONTRIBUTION_SETTLEMENT",
+        payment_attempt_id: "attempt_001",
+        provider_mode: "DARAJA",
     });
     await assert.rejects(
         repository.settleVerifiedPayment(settlementRequest()),
@@ -778,9 +942,17 @@ test("unverified evidence cannot settle and ambiguous evidence remains pending",
 
 test("verified failure terminalizes only the attempt and leaves the unpaid obligation pending", async () => {
     for (const [resultCode, expectedStatus] of [["1032", "CANCELLED"], ["1037", "TIMED_OUT"], ["1", "FAILED"]]) {
+        const syntheticReference = `SIM${String(resultCode).replace(/\D/g, "").padEnd(22, "C").slice(0, 22)}`;
         const { repository, state } = setup({
+            attempt: {
+                provider_mode: "SIMULATOR",
+                checkout_request_id: syntheticReference,
+                merchant_request_id: `SIMM${syntheticReference.slice(3, 24)}`,
+            },
             verification: {
                 verification_source: "RECONCILIATION",
+                checkout_request_id: syntheticReference,
+                merchant_request_id: `SIMM${syntheticReference.slice(3, 24)}`,
                 callback_result_code: null,
                 callback_amount_matches: null,
                 callback_phone_matches: null,
@@ -789,6 +961,14 @@ test("verified failure terminalizes only the attempt and leaves the unpaid oblig
                 verification_status: "VERIFIED_FAILURE",
             },
         });
+        state.simulatorConfirmation = {
+            confirmation_id: `confirmation-failure-${resultCode}`,
+            attempt_id: "attempt_001",
+            verification_id: 1,
+            record_type: "CONFIRMATION",
+            synthetic_reference: syntheticReference,
+            outcome: "FAILED",
+        };
         const result = await repository.settleVerifiedPayment(settlementRequest());
 
         assert.equal(result.attempt_status, expectedStatus);

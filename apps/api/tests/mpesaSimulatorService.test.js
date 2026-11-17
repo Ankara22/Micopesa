@@ -109,6 +109,7 @@ test("configured success, pending, failure and unknown outcomes repeat consisten
 test("simulator controller rejects non-worker roles and ignores caller-supplied success outcomes", async () => {
     const calls = [];
     const repository = {
+        async assertPensionLedgerActive() {},
         async createPendingMpesaPayment() {
             calls.push("create");
             return { attempt: {}, created: true };
@@ -185,6 +186,7 @@ test("simulator confirmation logs sanitized database diagnostics and preserves t
     );
     const controller = createMpesaSimulatorController({
         repository: {
+            async assertPensionLedgerActive() {},
             async createPendingMpesaPayment() {
                 assert.fail("confirmation must not create another attempt");
             },
@@ -214,7 +216,13 @@ test("simulator confirmation logs sanitized database diagnostics and preserves t
         }, res);
 
         assert.equal(res.statusCode, 503);
-        assert.equal(res.body.message, "The payment simulator is unavailable");
+        assert.equal(res.body.status, "error");
+        assert.equal(res.body.message_key, "MPESA_INITIATION_UNAVAILABLE");
+        assert.equal(
+            res.body.message,
+            "Payment initiation could not be completed. Check contribution history before retrying."
+        );
+        assert.equal(res.body.data, undefined);
     } finally {
         console.error = originalConsoleError;
     }

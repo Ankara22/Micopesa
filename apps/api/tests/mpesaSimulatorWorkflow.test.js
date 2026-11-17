@@ -41,7 +41,8 @@ function createWorkflow(outcome) {
         },
         async claimVerification(input) {
             const confirmed = verifications.find((item) =>
-                ["VERIFIED_SUCCESS", "VERIFIED_FAILURE"].includes(item.verification_status)
+                ["VERIFIED_SUCCESS", "VERIFIED_FAILURE"].includes(item.verification_status) ||
+                item.simulator_outcome === "SUCCESS"
             );
             if (confirmed) {
                 return {
@@ -64,14 +65,29 @@ function createWorkflow(outcome) {
             );
             Object.assign(verification, input, {
                 verification_status: input.verificationStatus,
+                simulator_outcome: input.simulatorOutcome ?? null,
             });
             return verification;
         },
     };
     const settlementService = {
-        async settleVerifiedPayment({ verificationId }) {
+        async settleVerifiedPayment({ verificationId, simulatorConfirmation }) {
             calls.settlement += 1;
             const evidence = verifications.find((item) => item.verification_id === verificationId);
+            if (simulatorConfirmation &&
+                !settledAttemptIds.has(attempt.attempt_id)) {
+                settledAttemptIds.add(attempt.attempt_id);
+                Object.assign(evidence, {
+                    verification_status: "UNVERIFIED",
+                    simulator_outcome: "SUCCESS",
+                    providerResultDescription:
+                        simulatorConfirmation.providerResultDescription,
+                });
+                calls.balance += 250;
+                calls.contributionCredits += 1;
+                calls.successfulSettlements += 1;
+                return { alreadySettled: false, verification_status: "UNVERIFIED" };
+            }
             if (evidence.verification_status === "VERIFIED_SUCCESS" &&
                 !settledAttemptIds.has(attempt.attempt_id)) {
                 settledAttemptIds.add(attempt.attempt_id);
@@ -80,7 +96,7 @@ function createWorkflow(outcome) {
                 calls.successfulSettlements += 1;
                 return { alreadySettled: false };
             }
-            return { alreadySettled: true };
+            return { alreadySettled: true, verification_status: evidence.verification_status };
         },
     };
     const simulator = createMpesaSimulatorService({
@@ -136,7 +152,7 @@ test("successful simulated payment reaches one clearly identified simulated cont
         attempt.user_id
     );
 
-    assert.equal(result.verification_status, "VERIFIED_SUCCESS");
+    assert.equal(result.verification_status, "UNVERIFIED");
     assert.equal(result.outcome, "SUCCESS");
     assert.equal(calls.balance, 1250);
     assert.equal(calls.settlement, 1);
@@ -146,7 +162,7 @@ test("successful simulated payment reaches one clearly identified simulated cont
     assert.match(attempt.checkout_request_id, /^SIM[A-F0-9]{22}$/);
     assert.doesNotMatch(attempt.checkout_request_id, /^[A-Z0-9]{10}$/);
     assert.equal(verifications[0].verification_source, "RECONCILIATION");
-    assert.equal(verifications[0].verification_status, "VERIFIED_SUCCESS");
+    assert.equal(verifications[0].verification_status, "UNVERIFIED");
     assert.match(verifications[0].providerResultDescription, /^SIMULATED:/);
     assert.match(verifications[0].providerResultDescription, /no real money was transferred/i);
 });
@@ -197,7 +213,8 @@ test("unknown simulated payment remains unresolved and can be safely retried", a
         attempt.attempt_id,
         attempt.user_id
     );
-    assert.equal(retried.verification_status, "VERIFIED_SUCCESS");
+    assert.equal(retried.verification_status, "UNVERIFIED");
+    assert.equal(retried.outcome, "SUCCESS");
     assert.equal(calls.balance, 1250);
     assert.equal(calls.contributionCredits, 1);
 });

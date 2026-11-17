@@ -158,6 +158,29 @@ function configureDb() {
                 if (query.includes("DELETE FROM pending_registrations WHERE expires_at")) {
                     return { rows: [] };
                 }
+                if (query.includes("SELECT pending_registration_id") &&
+                    query.includes("FROM pending_registrations") &&
+                    query.includes("lower(email)") &&
+                    query.includes("FOR UPDATE")) {
+                    const registration = state.pendingRegistrations.find((candidate) =>
+                        candidate.email.toLowerCase() === String(values[0]).toLowerCase() &&
+                        new Date(candidate.expires_at).getTime() > Date.now()
+                    );
+                    return { rows: registration
+                        ? [{ pending_registration_id: registration.pending_registration_id }]
+                        : [] };
+                }
+                if (query.includes("UPDATE pending_registrations") &&
+                    query.includes("SET token_hash")) {
+                    const registration = state.pendingRegistrations.find((candidate) =>
+                        candidate.pending_registration_id === values[1]
+                    );
+                    if (registration) {
+                        registration.token_hash = values[0];
+                        registration.expires_at = new Date(Date.now() + 30 * 60 * 1000);
+                    }
+                    return { rows: [] };
+                }
                 if (query.includes("FROM users") &&
                     query.includes("FROM pending_registrations") &&
                     query.includes("UNION ALL")) {
@@ -194,7 +217,9 @@ function configureDb() {
                     });
                     return { rows: [] };
                 }
-                if (query.includes("FROM pending_registrations") && query.includes("FOR UPDATE")) {
+                if (query.includes("FROM pending_registrations") &&
+                    query.includes("token_hash") &&
+                    query.includes("FOR UPDATE")) {
                     const registration = state.pendingRegistrations.find((candidate) =>
                         candidate.token_hash === values[0] &&
                         new Date(candidate.expires_at).getTime() > Date.now()
@@ -284,13 +309,29 @@ function configureDb() {
                 if (query.includes("UPDATE users") && query.includes("email_verified = TRUE")) {
                     const user = state.users.find((candidate) =>
                         candidate.user_id === values[0] &&
-                        candidate.login_method === "EMAIL" &&
                         !candidate.email_verified &&
-                        candidate.email.toLowerCase() === values[1].toLowerCase()
+                        (
+                            (candidate.login_method === "EMAIL" &&
+                                candidate.email?.toLowerCase() === values[1].toLowerCase()) ||
+                            candidate.pending_email?.toLowerCase() === values[1].toLowerCase()
+                        )
                     );
                     if (!user) return { rows: [] };
+                    if (user.pending_email) {
+                        user.email = user.pending_email;
+                        user.pending_email = null;
+                    }
                     user.email_verified = true;
-                    return { rows: [{ user_id: user.user_id }] };
+                    if (user.login_method === "PHONE" && user.force_password_change &&
+                        user.account_status === "INACTIVE") {
+                        user.account_status = "ACTIVE";
+                    }
+                    return { rows: [{
+                        user_id: user.user_id,
+                        account_status: user.account_status,
+                        login_method: user.login_method,
+                        force_password_change: user.force_password_change,
+                    }] };
                 }
                 if (query.includes("UPDATE auth_tokens")) {
                     const token = [...state.tokens.values()].find((item) => item.id === values[0]);
@@ -438,10 +479,18 @@ test("valid registration attempts return the same acknowledgement for existing i
             email: "third@example.com",
             phone: "07000000003",
         });
-        for (const response of [duplicateEmail, duplicatePhone, duplicateNationalId]) {
+        for (const response of [duplicateEmail, duplicatePhone]) {
             assert.equal(response.status, 202);
-            assert.deepEqual(await response.json(), firstBody);
+            assert.deepEqual(await response.json(), {
+                status: "accepted",
+                message: "If we can complete your registration, we will send verification instructions to the provided email address.",
+            });
         }
+        assert.equal(duplicateNationalId.status, 202);
+        assert.deepEqual(await duplicateNationalId.json(), {
+            status: "accepted",
+            message: "If we can complete your registration, we will send verification instructions to the provided email address.",
+        });
         const duplicateIdVerification = await api.request("/email/verify", {
             token: state.emailAttempts[1].token,
             password: "another-secure-password",
@@ -455,7 +504,7 @@ test("valid registration attempts return the same acknowledgement for existing i
         assert.equal(state.kycRecords.every((record) => record.duplicate_submission === true), true);
         assert.equal(state.pendingRegistrations.length, 0);
         assert.equal(state.emailAttempts.length, 2);
-        assert.equal(state.rateLimitAttempts.length, 4);
+        assert.equal(state.rateLimitAttempts.filter(({ action }) => action === "REGISTRATION").length, 4);
         assert.ok(state.emailAttempts.every(({ purpose }) => purpose === "REGISTRATION_VERIFICATION"));
     } finally {
         await api.close();
@@ -564,7 +613,7 @@ test("invalid, expired, and consumed registration tokens cannot create accounts"
     }
 });
 
-test("rate-limited and email-delivery-failed valid submissions retain the generic acknowledgement", async () => {
+test("signup acknowledgement does not reveal registration email delivery outcomes", async () => {
     const api = await createApi();
     const originalConsoleError = console.error;
     const diagnostics = [];
@@ -579,9 +628,13 @@ test("rate-limited and email-delivery-failed valid submissions retain the generi
             national_id: "12345678",
             date_of_birth: "1990-04-15",
         };
+        const acknowledgement = {
+            status: "accepted",
+            message: "If we can complete your registration, we will send verification instructions to the provided email address.",
+        };
         const first = await api.request("/register", details);
-        const acceptedBody = await first.json();
         assert.equal(first.status, 202);
+        assert.deepEqual(await first.json(), acknowledgement);
 
         state.rejectRegistrationRateLimit = true;
         const rateLimited = await api.request("/register", {
@@ -591,7 +644,7 @@ test("rate-limited and email-delivery-failed valid submissions retain the generi
             national_id: "12345679",
         });
         assert.equal(rateLimited.status, 202);
-        assert.deepEqual(await rateLimited.json(), acceptedBody);
+        assert.deepEqual(await rateLimited.json(), acknowledgement);
         assert.equal(state.emailAttempts.length, 1);
         assert.equal(state.pendingRegistrations.length, 1);
 
@@ -604,7 +657,7 @@ test("rate-limited and email-delivery-failed valid submissions retain the generi
             national_id: "12345670",
         });
         assert.equal(deliveryFailed.status, 202);
-        assert.deepEqual(await deliveryFailed.json(), acceptedBody);
+        assert.deepEqual(await deliveryFailed.json(), acknowledgement);
         assert.equal(state.pendingRegistrations.length, 2);
         assert.deepEqual(state.rateLimitAttempts.map(({ action }) => action), [
             "REGISTRATION",
@@ -617,6 +670,101 @@ test("rate-limited and email-delivery-failed valid submissions retain the generi
         }]);
     } finally {
         console.error = originalConsoleError;
+        await api.close();
+    }
+});
+
+test("public resend rotates a failed registration link and remains generic", async () => {
+    const api = await createApi();
+    const originalConsoleError = console.error;
+    console.error = () => {};
+    try {
+        state.failNextDelivery = true;
+        const registration = await api.request("/register", {
+            full_name: "New Worker",
+            email: "retry@example.com",
+            phone: "07000000021",
+            occupation: "OTHER_INFORMAL_WORKER",
+            national_id: "87654321",
+            date_of_birth: "1990-04-15",
+        });
+        assert.equal(registration.status, 202);
+        assert.deepEqual(await registration.json(), {
+            status: "accepted",
+            message: "If we can complete your registration, we will send verification instructions to the provided email address.",
+        });
+        const oldToken = state.emailAttempts[0].token;
+        const oldTokenHash = state.pendingRegistrations[0].token_hash;
+
+        const resend = await api.request("/email/verification-request/public", {
+            email: "retry@example.com",
+        });
+        assert.equal(resend.status, 200);
+        assert.match((await resend.json()).message, /eligible account or registration/i);
+        const newToken = state.emailAttempts[1].token;
+        assert.notEqual(newToken, oldToken);
+        assert.notEqual(state.pendingRegistrations[0].token_hash, oldTokenHash);
+        assert.equal(state.pendingRegistrations[0].token_hash, hashOpaque(newToken));
+
+        const oldLink = await api.request("/email/verify", {
+            token: oldToken,
+            password: "secure-password",
+        });
+        assert.equal(oldLink.status, 400);
+        const verified = await api.request("/email/verify", {
+            token: newToken,
+            password: "secure-password",
+        });
+        assert.equal(verified.status, 200);
+        assert.equal(state.users[0].email_verified, true);
+        assert.equal(state.users[0].phone_verified_at, undefined);
+        assert.equal(state.kycRecords[0].kyc_status, "PENDING");
+    } finally {
+        console.error = originalConsoleError;
+        await api.close();
+    }
+});
+
+test("staff email verification activates only the pending staff account and leaves phone/KYC state unchanged", async () => {
+    const api = await createApi();
+    try {
+        const token = "staff-verification-token-that-is-long-enough-to-pass-format-check";
+        const tokenHash = hashOpaque(token);
+        const staff = {
+            user_id: "staff-user",
+            full_name: "New Staff",
+            phone: "07000000021",
+            phone_verified_at: null,
+            email: null,
+            pending_email: "staff@example.com",
+            email_verified: false,
+            login_method: "PHONE",
+            force_password_change: true,
+            account_status: "INACTIVE",
+            role: "REGULATOR",
+        };
+        state.users.push(staff);
+        state.kycRecords.push({ user_id: staff.user_id, kyc_status: "PENDING" });
+        state.tokens.set(tokenHash, {
+            id: 700,
+            user_id: staff.user_id,
+            email: "staff@example.com",
+            purpose: "EMAIL_VERIFICATION",
+            consumed: false,
+        });
+
+        const verified = await api.request("/email/verify", { token });
+        const body = await verified.json();
+        assert.equal(verified.status, 200);
+        assert.equal(body.next_step, "STAFF_SIGN_IN");
+        assert.equal(staff.email, "staff@example.com");
+        assert.equal(staff.pending_email, null);
+        assert.equal(staff.email_verified, true);
+        assert.equal(staff.account_status, "ACTIVE");
+        assert.equal(staff.phone_verified_at, null);
+        assert.equal(state.kycRecords[0].kyc_status, "PENDING");
+        assert.equal(state.tokens.get(tokenHash).consumed, true);
+    } finally {
         await api.close();
     }
 });
@@ -742,7 +890,6 @@ test("duplicate National IDs reach the same pending account state without an aut
         };
         const first = await api.request("/register", details);
         assert.equal(first.status, 202);
-        const acceptedBody = await first.json();
         const firstVerification = await api.request("/email/verify", {
             token: state.emailAttempts[0].token,
             password: "secure-password",
@@ -757,7 +904,10 @@ test("duplicate National IDs reach the same pending account state without an aut
             phone: "07000000002",
         });
         assert.equal(duplicate.status, 202);
-        assert.deepEqual(await duplicate.json(), acceptedBody);
+        assert.deepEqual(await duplicate.json(), {
+            status: "accepted",
+            message: "If we can complete your registration, we will send verification instructions to the provided email address.",
+        });
         const completion = await api.request("/email/verify", {
             token: state.emailAttempts[1].token,
             password: "another-secure-password",
@@ -1010,7 +1160,10 @@ test("legacy PHONE-policy accounts keep phone login and public resend remains ge
             date_of_birth: "1990-04-15",
         });
         assert.equal(request.status, 202);
-        const acceptedBody = await request.json();
+        assert.deepEqual(await request.json(), {
+            status: "accepted",
+            message: "If we can complete your registration, we will send verification instructions to the provided email address.",
+        });
         assert.equal(state.users.length, 1);
         assert.equal(state.pendingRegistrations.length, 1);
         const retryRegistration = await api.request("/register", {
@@ -1023,7 +1176,10 @@ test("legacy PHONE-policy accounts keep phone login and public resend remains ge
             date_of_birth: "1990-04-15",
         });
         assert.equal(retryRegistration.status, 202);
-        assert.deepEqual(await retryRegistration.json(), acceptedBody);
+        assert.deepEqual(await retryRegistration.json(), {
+            status: "accepted",
+            message: "If we can complete your registration, we will send verification instructions to the provided email address.",
+        });
         assert.equal(state.users.length, 1);
         assert.equal(state.pendingRegistrations.length, 1);
 

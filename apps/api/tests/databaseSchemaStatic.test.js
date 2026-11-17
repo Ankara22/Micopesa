@@ -49,6 +49,10 @@ const mpesaRetryMigration = fs.readFileSync(
     path.join(databaseDirectory, "migration_mpesa_retry_recovery.sql"),
     "utf8"
 );
+const simulatorLedgerMigration = fs.readFileSync(
+    path.join(databaseDirectory, "migration_simulator_ledger_scoped_forward.sql"),
+    "utf8"
+);
 const notificationEventService = fs.readFileSync(
     path.resolve(__dirname, "../src/services/notificationEventService.js"),
     "utf8"
@@ -81,6 +85,57 @@ function extractIndex(source, indexName) {
     assert.ok(match, `Expected CREATE UNIQUE INDEX ${indexName}`);
     return match[0].replace(/\s+/g, " ").trim().toLowerCase();
 }
+
+test("simulator ledger migration limits existing-table DDL and preserves opening balances", () => {
+    const alteredTables = [...simulatorLedgerMigration.matchAll(
+        /\bALTER\s+TABLE\s+(?:ONLY\s+)?([a-z_][a-z0-9_.]*)/gi
+    )].map((match) => match[1].toLowerCase());
+    assert.deepEqual(
+        [...new Set(alteredTables)],
+        ["public.mpesa_payment_attempts"]
+    );
+
+    const createdTables = [...simulatorLedgerMigration.matchAll(
+        /\bCREATE\s+TABLE\s+(?:public\.)?([a-z_][a-z0-9_]*)/gi
+    )].map((match) => match[1].toLowerCase());
+    assert.deepEqual(
+        [...new Set(createdTables)].sort(),
+        [
+            "pension_account_movements",
+            "pension_ledger",
+            "pension_ledger_cutover_batches",
+            "simulator_payment_confirmations",
+        ].sort()
+    );
+
+    const indexTargets = [...simulatorLedgerMigration.matchAll(
+        /\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+[a-z_][a-z0-9_]*\s+ON\s+(?:public\.)?([a-z_][a-z0-9_]*)/gi
+    )].map((match) => match[1].toLowerCase());
+    assert.deepEqual(
+        [...new Set(indexTargets)].sort(),
+        ["pension_account_movements", "simulator_payment_confirmations"].sort()
+    );
+    assert.doesNotMatch(simulatorLedgerMigration, /\bCREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\b/i);
+
+    const insertedTables = [...simulatorLedgerMigration.matchAll(
+        /\bINSERT\s+INTO\s+(?:public\.)?([a-z_][a-z0-9_]*)/gi
+    )].map((match) => match[1].toLowerCase());
+    assert.deepEqual(
+        [...new Set(insertedTables)].sort(),
+        [
+            "pension_account_movements",
+            "pension_ledger",
+            "pension_ledger_cutover_batches",
+        ].sort()
+    );
+    assert.doesNotMatch(
+        simulatorLedgerMigration,
+        /\b(?:UPDATE\s+(?:public\.)?pension_accounts|DELETE\s+FROM\s+(?:public\.)?(?:pension_accounts|mpesa_payment_attempts|transactions|contributions|mpesa_payment_verifications|mpesa_callback_inbox))\b/i
+    );
+    assert.match(simulatorLedgerMigration, /p\.current_balance/);
+    assert.match(simulatorLedgerMigration, /(?:FROM|CROSS JOIN) public\.pension_accounts p/);
+    assert.match(simulatorLedgerMigration, /'PREPARING'/);
+});
 
 test("fresh and upgrade notification preference and event-key definitions agree", () => {
     assert.equal(
@@ -203,7 +258,10 @@ test("migration dependency graph matches the SQL and notification service querie
     assert.match(dlrMigration, /'delivery_result'/);
     assert.match(dlrMigration, /'provider_message_id'/);
 
-    assert.match(notificationEventService, /FROM notification_preferences/);
+    assert.match(
+        notificationEventService,
+        /LEFT JOIN notification_preferences\s+np ON np\.user_id = u\.user_id/
+    );
     assert.match(notificationEventService, /notification_category, deduplication_key/);
     assert.match(smsNotificationRepository, /notification_preferences/);
     assert.match(smsNotificationRepository, /delivery_status = 'PENDING'/);

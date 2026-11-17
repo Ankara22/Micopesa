@@ -19,7 +19,15 @@ function response() {
     };
 }
 
-function createController(assertPensionLedgerActive) {
+function createController(assertPensionLedgerActive, enforcementSetting = "true") {
+    const environment = {
+        NODE_ENV: "test",
+        MPESA_PAYMENT_PROVIDER: "SIMULATOR",
+        MPESA_SIMULATOR_ENABLED: "true",
+    };
+    if (enforcementSetting !== null) {
+        environment.MPESA_LEDGER_ENFORCEMENT_ENABLED = enforcementSetting;
+    }
     return createMpesaSimulatorController({
         repository: {
             async assertPensionLedgerActive() {
@@ -30,12 +38,7 @@ function createController(assertPensionLedgerActive) {
         providerService: {
             async initiateStkPush() {},
         },
-        environmentProvider: () => ({
-            NODE_ENV: "test",
-            MPESA_PAYMENT_PROVIDER: "SIMULATOR",
-            MPESA_SIMULATOR_ENABLED: "true",
-            MPESA_LEDGER_ENFORCEMENT_ENABLED: "true",
-        }),
+        environmentProvider: () => environment,
     });
 }
 
@@ -63,4 +66,34 @@ test("simulator availability remains enabled when enforced ledger is ACTIVE", as
     assert.equal(res.statusCode, 200);
     assert.equal(res.body.data.payment_enabled, true);
     assert.equal(res.body.data.message_key, "MPESA_PAYMENTS_AVAILABLE");
+});
+
+test("simulator availability fails closed when the ledger is inactive and enforcement is unset", async () => {
+    const controller = createController(async () => {
+        throw Object.assign(new Error("not active"), {
+            code: "PENSION_LEDGER_NOT_ACTIVE",
+        });
+    }, null);
+    const res = response();
+
+    await controller.getPaymentProvider({}, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.data.payment_enabled, false);
+    assert.equal(res.body.data.message_key, "MPESA_LEDGER_NOT_READY");
+});
+
+test("simulator availability still requires an ACTIVE ledger when enforcement is false", async () => {
+    const controller = createController(async () => {
+        throw Object.assign(new Error("not active"), {
+            code: "PENSION_LEDGER_NOT_ACTIVE",
+        });
+    }, "false");
+    const res = response();
+
+    await controller.getPaymentProvider({}, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.data.payment_enabled, false);
+    assert.equal(res.body.data.message_key, "MPESA_LEDGER_NOT_READY");
 });

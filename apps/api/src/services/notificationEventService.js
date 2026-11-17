@@ -1,5 +1,6 @@
 const { createHash } = require("node:crypto");
 const { normalizeKenyanPhone } = require("../utils/kenyanPhone");
+const { getFrontendBaseUrl } = require("./authEmailService");
 const { normalizeRecipient } = require("./communicationDeliveryPolicy");
 const {
     ESSENTIAL_TRANSACTIONAL_EVENT_TYPES,
@@ -20,7 +21,7 @@ const EVENT_MESSAGES = {
     },
     KYC_REJECTED: {
         subject: "Identity verification needs attention",
-        message: "Your identity verification was not approved. Sign in to view next steps.",
+        message: "Your identity verification was not approved. Sign in to review your KYC status and contact your fund administrator about correcting and resubmitting your identity information.",
     },
     RETIREMENT_PLAN_SAVED: {
         subject: "Retirement plan saved",
@@ -42,18 +43,29 @@ function renderTransactionalTemplate(eventType, { simulated = false } = {}) {
     if (simulated && eventType !== "CONTRIBUTION_CONFIRMED") {
         throw new TypeError("Only contribution confirmations can be marked simulated.");
     }
+    const eventTemplate = EVENT_MESSAGES[eventType];
     const template = simulated
         ? {
             subject: "Simulated contribution confirmed",
             message: "Your simulated contribution has been confirmed and added to your account. No real money was transferred.",
         }
-        : EVENT_MESSAGES[eventType];
+        : eventTemplate ? { ...eventTemplate } : null;
     if (!template) throw new TypeError("A supported notification event is required.");
+    if (eventType === "KYC_REJECTED" && !simulated) {
+        template.actionUrl = new URL("/worker/profile#kyc-status", getFrontendBaseUrl()).href;
+        template.actionLabel = "Review KYC status and next steps";
+    }
     const subject = escapeHtml(template.subject);
     const message = escapeHtml(template.message);
+    const action = template.actionUrl
+        ? `\n\n${template.actionLabel}: ${template.actionUrl}`
+        : "";
+    const htmlAction = template.actionUrl
+        ? `<p><a href="${escapeHtml(template.actionUrl)}">${escapeHtml(template.actionLabel)}</a></p>`
+        : "";
     return {
         subject: template.subject,
-        text: template.message,
+        text: `${template.message}${action}`,
         html: [
             "<!doctype html>",
             '<html lang="en"><body style="margin:0;padding:24px;background:#f4f7f6;font-family:Arial,sans-serif;color:#173b35">',
@@ -61,6 +73,7 @@ function renderTransactionalTemplate(eventType, { simulated = false } = {}) {
             '<p style="margin:0 0 16px;color:#087f5b;font-weight:bold">MicoPesa</p>',
             `<h1 style="font-size:20px;line-height:1.4">${subject}</h1>`,
             `<p style="font-size:16px;line-height:1.6">${message}</p>`,
+            htmlAction,
             '<p style="margin-top:24px;color:#52635f">Sign in to MicoPesa for more information.</p>',
             "</main></body></html>",
         ].join(""),

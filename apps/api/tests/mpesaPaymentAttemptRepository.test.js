@@ -50,6 +50,7 @@ function createMockPool({
         fundSnapshots: [],
         attempts: [],
         verifications: [],
+        simulatorInitiations: [],
         nextId: 1,
         nextVerificationId: 1,
         balances: { account_001: 1000 },
@@ -95,6 +96,7 @@ function createMockPool({
                 state.snapshot = {
                     attempts: copy(state.attempts),
                     verifications: copy(state.verifications),
+                    simulatorInitiations: copy(state.simulatorInitiations),
                     createdContributions: copy(state.createdContributions),
                     createdTransactions: copy(state.createdTransactions),
                     fundSnapshots: copy(state.fundSnapshots),
@@ -117,6 +119,7 @@ function createMockPool({
                 if (state.snapshot) {
                     state.attempts = state.snapshot.attempts;
                     state.verifications = state.snapshot.verifications;
+                    state.simulatorInitiations = state.snapshot.simulatorInitiations;
                     state.createdContributions = state.snapshot.createdContributions;
                     state.createdTransactions = state.snapshot.createdTransactions;
                     state.fundSnapshots = state.snapshot.fundSnapshots;
@@ -149,7 +152,7 @@ function createMockPool({
                 normalizedSql.startsWith("UPDATE mpesa_payment_verifications") &&
                 normalizedSql.includes("SET verification_status = CASE")
             ) {
-                const [status, providerCode, description, simulatorOutcome, verificationId] = params;
+                const [status, providerCode, description, verificationId] = params;
                 const verification = state.verifications.find(
                     (item) => item.verification_id === verificationId
                 );
@@ -158,7 +161,6 @@ function createMockPool({
                     verification_status: status,
                     provider_result_code: providerCode,
                     provider_result_description: description,
-                    simulator_outcome: simulatorOutcome,
                     completed_at: new Date().toISOString(),
                 });
 
@@ -197,10 +199,18 @@ function createMockPool({
             }
             if (
                 normalizedSql.includes("FROM mpesa_payment_attempts") &&
-                normalizedSql.includes("WHERE attempt_id = $1")
+                (normalizedSql.includes("WHERE attempt_id = $1") ||
+                    normalizedSql.includes("WHERE a.attempt_id = $1"))
             ) {
                 const attempt = state.attempts.find((item) => item.attempt_id === params[0]);
                 return { rows: attempt ? [copy(attempt)] : [] };
+            }
+            if (normalizedSql.startsWith("SELECT confirmation_id") &&
+                normalizedSql.includes("FROM simulator_payment_confirmations")) {
+                const initiation = state.simulatorInitiations.find(
+                    (item) => item.attempt_id === params[0]
+                );
+                return { rows: initiation ? [copy(initiation)] : [] };
             }
             if (
                 normalizedSql.includes("FROM mpesa_payment_verifications") &&
@@ -313,7 +323,7 @@ function createMockPool({
                         expected_amount: Number(params[4]).toFixed(2),
                         mpesa_phone: params[5],
                         attempt_status: "PENDING",
-                        provider_mode: params[6],
+                        provider_mode: null,
                         checkout_request_id: null,
                         merchant_request_id: null,
                         provider_result_code: null,
@@ -349,7 +359,7 @@ function createMockPool({
                     expected_amount: Number(params[4]).toFixed(2),
                     mpesa_phone: params[5],
                     attempt_status: "PENDING",
-                    provider_mode: params[6],
+                    provider_mode: null,
                     checkout_request_id: null,
                     merchant_request_id: null,
                     provider_result_code: null,
@@ -360,6 +370,36 @@ function createMockPool({
                 };
                 state.attempts.push(attempt);
                 return { rows: [copy(attempt)] };
+            }
+            if (normalizedSql.startsWith("INSERT INTO simulator_payment_confirmations")) {
+                const initiation = {
+                    confirmation_id: `simulator-initiation-${params[0]}`,
+                    attempt_id: params[0],
+                    record_type: "INITIATION",
+                    provider_mode: "SIMULATOR",
+                    checkout_request_id: null,
+                    merchant_request_id: null,
+                    synthetic_reference: null,
+                    initiated_at: "2026-01-01T00:00:00.000Z",
+                };
+                state.simulatorInitiations.push(initiation);
+                const attempt = state.attempts.find((item) => item.attempt_id === params[0]);
+                if (attempt) attempt.provider_mode = "SIMULATOR";
+                return { rows: [copy(initiation)] };
+            }
+            if (normalizedSql.startsWith("UPDATE simulator_payment_confirmations")) {
+                const [checkoutId, merchantId, confirmationId] = params;
+                const initiation = state.simulatorInitiations.find(
+                    (item) => item.confirmation_id === confirmationId
+                );
+                if (initiation) {
+                    Object.assign(initiation, {
+                        checkout_request_id: checkoutId,
+                        merchant_request_id: merchantId,
+                        synthetic_reference: checkoutId,
+                    });
+                }
+                return { rows: [] };
             }
             if (normalizedSql.startsWith("UPDATE mpesa_payment_attempts") &&
                 normalizedSql.includes("SET attempt_status = 'OUTCOME_UNKNOWN'")) {
@@ -1269,4 +1309,32 @@ test("validates request identifiers and bounded provider metadata", async () => 
         repository.createPendingPaymentAttempt(request({ idempotencyKey: "bad key" })),
         { code: "INVALID_PAYMENT_ATTEMPT_INPUT" }
     );
+});
+
+test("verified worker phone lookup normalizes verified numbers and rejects missing or invalid values", async () => {
+    let rows = [{ phone: "0712345678" }];
+    let lastQuery;
+    let lastParameters;
+    const repository = createMpesaPaymentAttemptRepository({
+        async connect() {
+            assert.fail("Phone lookup must not open a transaction");
+        },
+        async query(query, parameters) {
+            lastQuery = query;
+            lastParameters = parameters;
+            return { rows };
+        },
+    });
+
+    assert.equal(await repository.getVerifiedWorkerPhone(workerId), phoneNumber);
+    assert.deepEqual(lastParameters, [workerId]);
+    assert.match(lastQuery, /role = 'WORKER'/);
+    assert.match(lastQuery, /account_status = 'ACTIVE'/);
+    assert.match(lastQuery, /phone_verified_at IS NOT NULL/);
+
+    rows = [];
+    assert.equal(await repository.getVerifiedWorkerPhone(workerId), null);
+
+    rows = [{ phone: "not-a-phone" }];
+    assert.equal(await repository.getVerifiedWorkerPhone(workerId), null);
 });

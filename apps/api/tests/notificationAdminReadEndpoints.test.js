@@ -36,7 +36,12 @@ test("Admin read endpoints return their documented response shapes without dispa
         },
         async listRecipients(search) {
             calls.push(["recipients", search]);
-            return [{ user_id: "worker-1", role: "WORKER" }];
+            return [{
+                user_id: "worker-1",
+                role: "WORKER",
+                sms_recipient_allowed: true,
+                email_recipient_allowed: false,
+            }];
         },
         async isExternalSmsSchemaAvailable() {
             calls.push("external-schema-check");
@@ -95,6 +100,8 @@ test("admin recipient diagnostics distinguish a missing provider opt-in without 
                 sms_enabled: false,
                 email_enabled: true,
                 push_subscription_count: 0,
+                sms_recipient_allowed: true,
+                email_recipient_allowed: false,
             }];
         },
     }, config);
@@ -117,6 +124,8 @@ test("admin recipient diagnostics distinguish a missing provider opt-in without 
     assert.equal(diagnostic.email_delivery_diagnostic.enabled, true);
     assert.equal(diagnostic.email_delivery_diagnostic.reason_code, null);
     assert.equal(diagnostic.email_delivery_diagnostic.provider, "GMAIL");
+    assert.equal(diagnostic.sms_recipient_allowed, true);
+    assert.equal(diagnostic.email_recipient_allowed, false);
     assert.deepEqual(diagnostic.email_delivery_diagnostic.missing_variables, []);
     assert.deepEqual(diagnostic.email_delivery_diagnostic.invalid_variables, []);
     assert.equal(diagnostic.push_delivery_enabled, false);
@@ -267,7 +276,7 @@ test("Admin read endpoint database errors return generic messages and log only s
     assert.doesNotMatch(JSON.stringify(logged), /SQL parameters|private data|recipient search/);
 });
 
-test("recipient lookup returns contact, verification, preference, and delivery flags without contacts", async () => {
+test("recipient lookup reports development allowlist eligibility without returning contacts", async () => {
     let query;
     const repository = createNotificationRepository({
         async query(sql, params) {
@@ -277,6 +286,8 @@ test("recipient lookup returns contact, verification, preference, and delivery f
                     user_id: "worker-1",
                     full_name: "Worker One",
                     role: "WORKER",
+                    delivery_phone: "+254712345678",
+                    delivery_email: "blocked@example.test",
                     phone_registered: true,
                     phone_verified: false,
                     phone_available: false,
@@ -291,6 +302,12 @@ test("recipient lookup returns contact, verification, preference, and delivery f
         },
         async connect() {
             throw new Error("Recipient lookup must not open a write transaction.");
+        },
+    }, {
+        environment: {
+            NODE_ENV: "development",
+            COMMUNICATIONS_DEV_ALLOWED_PHONES: "+254712345678",
+            COMMUNICATIONS_DEV_ALLOWED_EMAILS: "allowed@example.test",
         },
     });
 
@@ -310,7 +327,10 @@ test("recipient lookup returns contact, verification, preference, and delivery f
     assert.equal(recipients[0].email_verified, false);
     assert.equal(recipients[0].email_available, false);
     assert.equal(recipients[0].email_enabled, true);
+    assert.equal(recipients[0].sms_recipient_allowed, true);
+    assert.equal(recipients[0].email_recipient_allowed, false);
     assert.doesNotMatch(JSON.stringify(recipients), /0712345678|worker@example\.test/);
+    assert.doesNotMatch(JSON.stringify(recipients), /blocked@example\.test|delivery_phone|delivery_email/);
 });
 
 test("admin notification history exposes event classification metadata", async () => {

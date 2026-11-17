@@ -4,7 +4,12 @@ async function deleteExpiredPendingRegistrations(pool) {
     return pool.query("DELETE FROM pending_registrations WHERE expires_at <= now()");
 }
 
-function startPendingRegistrationCleanup(pool) {
+function startPendingRegistrationCleanup(pool, {
+    environment = process.env,
+    setIntervalImpl = setInterval,
+} = {}) {
+    if (environment.NODE_ENV === "development") return () => {};
+
     let running = false;
     const cleanup = async () => {
         if (running) return;
@@ -23,7 +28,7 @@ function startPendingRegistrationCleanup(pool) {
             running = false;
         }
     };
-    const timer = setInterval(cleanup, CLEANUP_INTERVAL_MS);
+    const timer = setIntervalImpl(cleanup, CLEANUP_INTERVAL_MS);
     timer.unref();
     return () => clearInterval(timer);
 }

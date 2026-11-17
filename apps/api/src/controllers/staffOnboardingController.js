@@ -2,6 +2,7 @@ const bcrypt = require("bcrypt");
 const crypto = require("node:crypto");
 const pool = require("../db/database");
 const smsService = require("../services/smsService");
+const authEmailService = require("../services/authEmailService");
 const { getTransactionalSmsProvider } = smsService;
 const { writeAuditLog } = require("../utils/auditLog");
 
@@ -91,6 +92,21 @@ function logSmsFailure(error, provider) {
     }));
 }
 
+async function sendStaffVerificationEmail({ userId, email }) {
+    try {
+        await authEmailService.issueEmailToken({
+            userId,
+            email,
+            purpose: "EMAIL_VERIFICATION",
+            invitation: true,
+        });
+        return true;
+    } catch (error) {
+        authEmailService.logEmailDeliveryFailure("EMAIL_VERIFICATION", error);
+        return false;
+    }
+}
+
 async function createStaff(req, res) {
     const fullName = typeof req.body?.full_name === "string" ? req.body.full_name.trim() : "";
     const phone = normalizeKenyanPhone(req.body?.phone);
@@ -144,7 +160,7 @@ async function createStaff(req, res) {
             actionType: "CREATE",
             entityName: "STAFF_ONBOARDING",
             entityId: user.user_id,
-            details: { role, status: "PENDING_SMS" },
+            details: { role, status: "PENDING_EMAIL_VERIFICATION" },
         });
         await client.query("COMMIT");
     } catch (error) {
@@ -174,52 +190,43 @@ async function createStaff(req, res) {
         logSmsFailure(error, smsProvider);
         return res.status(201).json({
             status: "success",
-            message: "Staff account was created but remains inactive because SMS delivery was not accepted. Retry onboarding from the user list.",
-            data: { user, sms_accepted: false },
+            message: "Staff account remains inactive because SMS delivery was not accepted. Retry onboarding from the user list.",
+            data: {
+                user: { ...user, email_verified: false, phone_verified: false },
+                sms_accepted: false,
+                verification_email_accepted: false,
+                account_active: false,
+            },
         });
     }
 
-    try {
-        client = await pool.connect();
-        await client.query("BEGIN");
-        const activated = await client.query(
-            `UPDATE users SET account_status = 'ACTIVE', updated_at = now()
-             WHERE user_id = $1 AND force_password_change = TRUE
-             RETURNING user_id`,
-            [user.user_id]
-        );
-        if (!activated.rows[0]) throw new Error("Onboarding account could not be activated");
-        await writeAuditLog(client, {
-            userId: req.user.userId,
-            actionType: "UPDATE",
-            entityName: "STAFF_ONBOARDING",
-            entityId: user.user_id,
-            details: {
-                role,
-                status: "ACTIVE",
+    const verificationEmailAccepted = await sendStaffVerificationEmail({
+        userId: user.user_id,
+        email,
+    });
+    if (!verificationEmailAccepted) {
+        return res.status(201).json({
+            status: "success",
+            message: "SMS was accepted, but the verification email was not accepted. The account remains inactive; retry onboarding from the user list.",
+            data: {
+                user: { ...user, email_verified: false, phone_verified: false },
                 sms_accepted: true,
-                sms_provider: smsProvider,
-                sms_tracking_id: trackingId,
-                provider_message_id: sms.messageId,
+                verification_email_accepted: false,
+                account_active: false,
             },
         });
-        await client.query("COMMIT");
-        return res.status(201).json({
-            status: "success",
-            message: "Staff account created and SMS accepted by the gateway. Inbox delivery is not confirmed.",
-            data: { user: { ...user, account_status: "ACTIVE" }, sms_accepted: true },
-        });
-    } catch (error) {
-        if (client) await client.query("ROLLBACK").catch(() => {});
-        console.error("Staff account activation failed after SMS acceptance:", error.code || "STAFF_ACTIVATION_FAILED");
-        return res.status(201).json({
-            status: "success",
-            message: "SMS was accepted, but the staff account remains inactive. Retry onboarding to issue new temporary credentials.",
-            data: { user, sms_accepted: true, account_active: false },
-        });
-    } finally {
-        client?.release();
     }
+
+    return res.status(201).json({
+        status: "success",
+        message: "The SMS and verification email were accepted by their providers. The account remains inactive until the staff member verifies the email address.",
+        data: {
+            user: { ...user, email_verified: false, phone_verified: false },
+            sms_accepted: true,
+            verification_email_accepted: true,
+            account_active: false,
+        },
+    });
 }
 
 async function resendStaffOnboarding(req, res) {
@@ -254,7 +261,7 @@ async function resendStaffOnboarding(req, res) {
                  failed_login_attempts = 0, locked_until = NULL, account_status = 'INACTIVE',
                  updated_at = now()
              WHERE user_id = $2 AND role = ANY($3::varchar[]) AND force_password_change = TRUE
-             RETURNING user_id, full_name, phone, role`,
+             RETURNING user_id, full_name, phone, email, pending_email, email_verified, role`,
             [passwordHash, userId, STAFF_ROLES]
         );
         user = result.rows[0];
@@ -269,6 +276,13 @@ async function resendStaffOnboarding(req, res) {
         return res.status(500).json({ status: "error", message: "Unable to retry staff onboarding." });
     } finally {
         client?.release();
+    }
+
+    if (!user.email_verified && !user.pending_email) {
+        return res.status(409).json({
+            status: "error",
+            message: "A pending staff email address is not available. The account remains inactive and needs administrator review.",
+        });
     }
 
     let sms;
@@ -288,6 +302,37 @@ async function resendStaffOnboarding(req, res) {
         });
     }
 
+    let verificationEmailAccepted = user.email_verified === true;
+    if (user.pending_email) {
+        verificationEmailAccepted = await sendStaffVerificationEmail({
+            userId: user.user_id,
+            email: user.pending_email,
+        });
+        if (!verificationEmailAccepted) {
+            return res.status(502).json({
+                status: "error",
+                message: "SMS was accepted, but the verification email was not accepted. The account remains inactive; retry onboarding later.",
+                data: {
+                    sms_accepted: true,
+                    verification_email_accepted: false,
+                    account_active: false,
+                },
+            });
+        }
+    }
+
+    if (!user.email_verified) {
+        return res.status(200).json({
+            status: "success",
+            message: "The SMS and verification email were accepted by their providers. The account remains inactive until the staff member verifies the email address.",
+            data: {
+                sms_accepted: true,
+                verification_email_accepted: true,
+                account_active: false,
+            },
+        });
+    }
+
     let activationClient;
     try {
         activationClient = await pool.connect();
@@ -295,6 +340,7 @@ async function resendStaffOnboarding(req, res) {
         const activated = await activationClient.query(
             `UPDATE users SET account_status = 'ACTIVE', updated_at = now()
              WHERE user_id = $1 AND force_password_change = TRUE
+               AND email_verified IS TRUE AND account_status = 'INACTIVE'
              RETURNING user_id`,
             [user.user_id]
         );
@@ -308,6 +354,7 @@ async function resendStaffOnboarding(req, res) {
                 role: user.role,
                 status: "ACTIVE",
                 sms_accepted: true,
+                email_verified: true,
                 sms_provider: smsProvider,
                 sms_tracking_id: trackingId,
                 provider_message_id: sms.messageId,
@@ -316,14 +363,24 @@ async function resendStaffOnboarding(req, res) {
         await activationClient.query("COMMIT");
         return res.status(200).json({
             status: "success",
-            message: "New temporary credentials were accepted by the SMS gateway. Inbox delivery is not confirmed.",
+            message: "The SMS provider accepted the new temporary credentials. The account is active; email verification is complete and phone verification remains separate.",
+            data: {
+                sms_accepted: true,
+                verification_email_accepted: true,
+                account_active: true,
+            },
         });
     } catch (error) {
         await activationClient.query("ROLLBACK").catch(() => {});
-        console.error("Staff retry activation failed after SMS acceptance:", error.code || "STAFF_ACTIVATION_FAILED");
+        console.error("Staff retry activation failed after provider acceptance:", error.code || "STAFF_ACTIVATION_FAILED");
         return res.status(502).json({
             status: "error",
-            message: "SMS was accepted, but the account remains inactive. Retry onboarding later.",
+            message: "The onboarding messages were accepted, but the account remains inactive. Retry onboarding later.",
+            data: {
+                sms_accepted: true,
+                verification_email_accepted: true,
+                account_active: false,
+            },
         });
     } finally {
         activationClient?.release();

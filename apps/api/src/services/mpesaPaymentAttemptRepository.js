@@ -183,7 +183,13 @@ function createMpesaPaymentAttemptRepository(
         const result = await queryable.query(
             `SELECT a.attempt_id, a.account_id, a.contribution_id, a.transaction_id,
                     a.idempotency_key, a.expected_amount, a.mpesa_phone, a.attempt_status,
-                    a.checkout_request_id, a.merchant_request_id, a.provider_mode,
+                    a.checkout_request_id, a.merchant_request_id,
+                    CASE WHEN EXISTS (
+                        SELECT 1
+                        FROM simulator_payment_confirmations s
+                        WHERE s.attempt_id = a.attempt_id
+                          AND s.record_type = 'INITIATION'
+                    ) THEN 'SIMULATOR' ELSE NULL END AS provider_mode,
                     a.provider_result_code,
                     a.provider_result_description, a.created_at, a.updated_at,
                     a.provider_accepted_at,
@@ -201,7 +207,13 @@ function createMpesaPaymentAttemptRepository(
         const result = await queryable.query(
             `SELECT a.attempt_id, a.account_id, a.contribution_id, a.transaction_id,
                     a.idempotency_key, a.expected_amount, a.mpesa_phone, a.attempt_status,
-                    a.checkout_request_id, a.merchant_request_id, a.provider_mode,
+                    a.checkout_request_id, a.merchant_request_id,
+                    CASE WHEN EXISTS (
+                        SELECT 1
+                        FROM simulator_payment_confirmations s
+                        WHERE s.attempt_id = a.attempt_id
+                          AND s.record_type = 'INITIATION'
+                    ) THEN 'SIMULATOR' ELSE NULL END AS provider_mode,
                     a.provider_result_code,
                     a.provider_result_description, a.created_at, a.updated_at,
                     a.provider_accepted_at,
@@ -220,32 +232,26 @@ function createMpesaPaymentAttemptRepository(
         const result = await databasePool.query(
             `SELECT a.attempt_id, a.contribution_id, t.transaction_id, t.amount,
                     a.attempt_status, t.transaction_status, c.contribution_status,
-                    CASE WHEN a.provider_mode = 'SIMULATOR'
+                    CASE WHEN simulator_initiation.attempt_id IS NOT NULL
                          THEN a.checkout_request_id ELSE NULL END AS checkout_request_id,
-                    CASE WHEN a.provider_mode = 'SIMULATOR'
-                         THEN 'SIMULATED'
-                         WHEN a.provider_mode = 'DARAJA' THEN 'DARAJA'
-                         ELSE 'UNRESOLVED' END AS payment_provider,
+                    CASE WHEN simulator_initiation.attempt_id IS NOT NULL
+                         THEN 'SIMULATED' ELSE 'UNRESOLVED' END AS payment_provider,
                     t.mpesa_result_description,
                     latest_verification.verification_status AS latest_verification_status,
                     latest_verification.provider_result_description AS verification_description,
-                    CASE WHEN a.provider_mode = 'SIMULATOR' THEN
-                        CASE
-                            WHEN latest_verification.verification_status = 'VERIFIED_SUCCESS' THEN 'SUCCESS'
-                            WHEN latest_verification.verification_status = 'VERIFIED_FAILURE' THEN 'FAILED'
-                            WHEN latest_verification.verification_status = 'UNVERIFIED'
-                             AND latest_verification.provider_result_description LIKE 'SIMULATED: Payment is still pending%'
-                                THEN 'PENDING'
-                            WHEN latest_verification.verification_status IN ('UNVERIFIED', 'INCONSISTENT') THEN 'UNKNOWN'
-                            ELSE NULL
-                        END
-                    ELSE NULL END AS payment_outcome,
+                    latest_simulator_confirmation.outcome AS payment_outcome,
                     (
                         t.transaction_status = 'COMPLETED'
                         AND c.contribution_status = 'COMPLETED'
                         AND t.mpesa_result_code = 0
                         AND t.completed_at IS NOT NULL
-                        AND a.attempt_status IN ('PROMPT_ACCEPTED', 'OUTCOME_UNKNOWN', 'SETTLED')
+                        AND a.attempt_status = 'SETTLED'
+                        AND EXISTS (
+                            SELECT 1
+                            FROM pension_account_movements m
+                            WHERE m.payment_attempt_id = a.attempt_id
+                              AND m.movement_type = 'CONTRIBUTION_SETTLEMENT'
+                        )
                     ) AS settlement_confirmed,
                     t.mpesa_receipt AS receipt_reference,
                     CASE
@@ -253,7 +259,13 @@ function createMpesaPaymentAttemptRepository(
                          AND c.contribution_status = 'COMPLETED'
                          AND t.mpesa_result_code = 0
                          AND t.completed_at IS NOT NULL
-                         AND a.attempt_status IN ('PROMPT_ACCEPTED', 'OUTCOME_UNKNOWN', 'SETTLED')
+                         AND a.attempt_status = 'SETTLED'
+                         AND EXISTS (
+                             SELECT 1
+                             FROM pension_account_movements m
+                             WHERE m.payment_attempt_id = a.attempt_id
+                               AND m.movement_type = 'CONTRIBUTION_SETTLEMENT'
+                         )
                         THEN t.completed_at
                         ELSE NULL
                     END AS settled_at
@@ -267,6 +279,17 @@ function createMpesaPaymentAttemptRepository(
               AND c.transaction_id = a.transaction_id
               AND c.channel = 'MPESA'
              JOIN pension_accounts p ON p.account_id = a.account_id
+             LEFT JOIN simulator_payment_confirmations simulator_initiation
+               ON simulator_initiation.attempt_id = a.attempt_id
+              AND simulator_initiation.record_type = 'INITIATION'
+             LEFT JOIN LATERAL (
+                 SELECT outcome
+                 FROM simulator_payment_confirmations
+                 WHERE attempt_id = a.attempt_id
+                   AND record_type = 'CONFIRMATION'
+                 ORDER BY confirmed_at DESC, confirmation_id DESC
+                 LIMIT 1
+             ) latest_simulator_confirmation ON TRUE
              LEFT JOIN LATERAL (
                  SELECT verification_status, provider_result_description
                  FROM mpesa_payment_verifications
@@ -315,32 +338,26 @@ function createMpesaPaymentAttemptRepository(
         const result = await databasePool.query(
             `SELECT a.attempt_id, a.contribution_id, t.transaction_id, t.amount,
                     a.attempt_status, t.transaction_status, c.contribution_status,
-                    CASE WHEN a.provider_mode = 'SIMULATOR'
+                    CASE WHEN simulator_initiation.attempt_id IS NOT NULL
                          THEN a.checkout_request_id ELSE NULL END AS checkout_request_id,
-                    CASE WHEN a.provider_mode = 'SIMULATOR'
-                         THEN 'SIMULATED'
-                         WHEN a.provider_mode = 'DARAJA' THEN 'DARAJA'
-                         ELSE 'UNRESOLVED' END AS payment_provider,
+                    CASE WHEN simulator_initiation.attempt_id IS NOT NULL
+                         THEN 'SIMULATED' ELSE 'UNRESOLVED' END AS payment_provider,
                     t.mpesa_result_description,
                     latest_verification.verification_status AS latest_verification_status,
                     latest_verification.provider_result_description AS verification_description,
-                    CASE WHEN a.provider_mode = 'SIMULATOR' THEN
-                        CASE
-                            WHEN latest_verification.verification_status = 'VERIFIED_SUCCESS' THEN 'SUCCESS'
-                            WHEN latest_verification.verification_status = 'VERIFIED_FAILURE' THEN 'FAILED'
-                            WHEN latest_verification.verification_status = 'UNVERIFIED'
-                             AND latest_verification.provider_result_description LIKE 'SIMULATED: Payment is still pending%'
-                                THEN 'PENDING'
-                            WHEN latest_verification.verification_status IN ('UNVERIFIED', 'INCONSISTENT') THEN 'UNKNOWN'
-                            ELSE NULL
-                        END
-                    ELSE NULL END AS payment_outcome,
+                    latest_simulator_confirmation.outcome AS payment_outcome,
                     (
                         t.transaction_status = 'COMPLETED'
                         AND c.contribution_status = 'COMPLETED'
                         AND t.mpesa_result_code = 0
                         AND t.completed_at IS NOT NULL
-                        AND a.attempt_status IN ('PROMPT_ACCEPTED', 'OUTCOME_UNKNOWN', 'SETTLED')
+                        AND a.attempt_status = 'SETTLED'
+                        AND EXISTS (
+                            SELECT 1
+                            FROM pension_account_movements m
+                            WHERE m.payment_attempt_id = a.attempt_id
+                              AND m.movement_type = 'CONTRIBUTION_SETTLEMENT'
+                        )
                     ) AS settlement_confirmed,
                     t.mpesa_receipt AS receipt_reference,
                     CASE
@@ -348,7 +365,13 @@ function createMpesaPaymentAttemptRepository(
                          AND c.contribution_status = 'COMPLETED'
                          AND t.mpesa_result_code = 0
                          AND t.completed_at IS NOT NULL
-                         AND a.attempt_status IN ('PROMPT_ACCEPTED', 'OUTCOME_UNKNOWN', 'SETTLED')
+                         AND a.attempt_status = 'SETTLED'
+                         AND EXISTS (
+                             SELECT 1
+                             FROM pension_account_movements m
+                             WHERE m.payment_attempt_id = a.attempt_id
+                               AND m.movement_type = 'CONTRIBUTION_SETTLEMENT'
+                         )
                         THEN t.completed_at
                         ELSE NULL
                     END AS settled_at
@@ -362,6 +385,17 @@ function createMpesaPaymentAttemptRepository(
               AND c.transaction_id = a.transaction_id
               AND c.channel = 'MPESA'
              JOIN pension_accounts p ON p.account_id = a.account_id
+             LEFT JOIN simulator_payment_confirmations simulator_initiation
+               ON simulator_initiation.attempt_id = a.attempt_id
+              AND simulator_initiation.record_type = 'INITIATION'
+             LEFT JOIN LATERAL (
+                 SELECT outcome
+                 FROM simulator_payment_confirmations
+                 WHERE attempt_id = a.attempt_id
+                   AND record_type = 'CONFIRMATION'
+                 ORDER BY confirmed_at DESC, confirmation_id DESC
+                 LIMIT 1
+             ) latest_simulator_confirmation ON TRUE
              LEFT JOIN LATERAL (
                  SELECT verification_status, provider_result_description
                  FROM mpesa_payment_verifications
@@ -381,7 +415,13 @@ function createMpesaPaymentAttemptRepository(
         const result = await client.query(
             `SELECT a.attempt_id, a.account_id, a.contribution_id, a.transaction_id,
                     a.idempotency_key, a.expected_amount, a.mpesa_phone, a.attempt_status,
-                    a.checkout_request_id, a.merchant_request_id, a.provider_mode,
+                    a.checkout_request_id, a.merchant_request_id,
+                    CASE WHEN EXISTS (
+                        SELECT 1
+                        FROM simulator_payment_confirmations s
+                        WHERE s.attempt_id = a.attempt_id
+                          AND s.record_type = 'INITIATION'
+                    ) THEN 'SIMULATOR' ELSE NULL END AS provider_mode,
                     a.provider_result_code,
                     a.provider_result_description, a.created_at, a.updated_at,
                     a.provider_accepted_at, p.user_id
@@ -575,12 +615,12 @@ function createMpesaPaymentAttemptRepository(
             const attemptResult = await client.query(
                 `INSERT INTO mpesa_payment_attempts
                     (account_id, contribution_id, transaction_id, idempotency_key,
-                     expected_amount, mpesa_phone, attempt_status, provider_mode)
-                 VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', $7)
+                     expected_amount, mpesa_phone, attempt_status)
+                 VALUES ($1, $2, $3, $4, $5, $6, 'PENDING')
                  ON CONFLICT (idempotency_key) DO NOTHING
                  RETURNING attempt_id, account_id, contribution_id, transaction_id,
                            idempotency_key, expected_amount, mpesa_phone, attempt_status,
-                           checkout_request_id, merchant_request_id, provider_mode,
+                           checkout_request_id, merchant_request_id,
                            provider_result_code,
                            provider_result_description, created_at, updated_at,
                            provider_accepted_at`,
@@ -591,7 +631,6 @@ function createMpesaPaymentAttemptRepository(
                     request.idempotencyKey,
                     request.expectedAmount,
                     request.phoneNumber,
-                    request.providerMode,
                 ]
             );
             if (!attemptResult.rows[0]) {
@@ -612,10 +651,19 @@ function createMpesaPaymentAttemptRepository(
                 return { attempt: concurrentAttempt, created: false };
             }
 
+            if (request.providerMode === "SIMULATOR") {
+                await client.query(
+                    `INSERT INTO simulator_payment_confirmations
+                        (attempt_id, record_type, provider_mode)
+                     VALUES ($1, 'INITIATION', 'SIMULATOR')`,
+                    [attemptResult.rows[0].attempt_id]
+                );
+            }
+
             await client.query("COMMIT");
             transactionStarted = false;
             return {
-                attempt: attemptResult.rows[0],
+                attempt: { ...attemptResult.rows[0], provider_mode: request.providerMode },
                 contribution,
                 created: true,
                 fundAllocations: fundShares,
@@ -737,12 +785,12 @@ function createMpesaPaymentAttemptRepository(
             const inserted = await client.query(
                 `INSERT INTO mpesa_payment_attempts
                     (account_id, contribution_id, transaction_id, idempotency_key,
-                     expected_amount, mpesa_phone, attempt_status, provider_mode)
-                 VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', $7)
+                     expected_amount, mpesa_phone, attempt_status)
+                 VALUES ($1, $2, $3, $4, $5, $6, 'PENDING')
                  ON CONFLICT (idempotency_key) DO NOTHING
                  RETURNING attempt_id, account_id, contribution_id, transaction_id,
                            idempotency_key, expected_amount, mpesa_phone, attempt_status,
-                           checkout_request_id, merchant_request_id, provider_mode,
+                           checkout_request_id, merchant_request_id,
                            provider_result_code,
                            provider_result_description, created_at, updated_at,
                            provider_accepted_at`,
@@ -753,7 +801,6 @@ function createMpesaPaymentAttemptRepository(
                     request.idempotencyKey,
                     expectedAmount,
                     request.phoneNumber,
-                    request.providerMode,
                 ]
             );
             if (!inserted.rows[0]) {
@@ -773,9 +820,20 @@ function createMpesaPaymentAttemptRepository(
                 transactionStarted = false;
                 return { attempt: concurrentAttempt, created: false };
             }
+            if (request.providerMode === "SIMULATOR") {
+                await client.query(
+                    `INSERT INTO simulator_payment_confirmations
+                        (attempt_id, record_type, provider_mode)
+                     VALUES ($1, 'INITIATION', 'SIMULATOR')`,
+                    [inserted.rows[0].attempt_id]
+                );
+            }
             await client.query("COMMIT");
             transactionStarted = false;
-            return { attempt: inserted.rows[0], created: true };
+            return {
+                attempt: { ...inserted.rows[0], provider_mode: request.providerMode },
+                created: true,
+            };
         } catch (error) {
             if (transactionStarted) {
                 await client.query("ROLLBACK");
@@ -883,6 +941,50 @@ function createMpesaPaymentAttemptRepository(
                     "Provider acceptance cannot be recorded from the current payment attempt state.",
                     "PAYMENT_ATTEMPT_NOT_PENDING",
                     409
+                );
+            }
+
+            const simulatorInitiation = await client.query(
+                `SELECT confirmation_id, checkout_request_id, merchant_request_id
+                 FROM simulator_payment_confirmations
+                 WHERE attempt_id = $1
+                   AND record_type = 'INITIATION'
+                   AND provider_mode = 'SIMULATOR'
+                 FOR UPDATE`,
+                [normalizedAttemptId]
+            );
+            if (simulatorInitiation.rows[0]) {
+                if (
+                    !/^SIM[A-F0-9]{22}$/.test(checkoutId) ||
+                    merchantId !== `SIMM${checkoutId.slice(3, 24)}`
+                ) {
+                    throw createRepositoryError(
+                        "Simulator request identifiers are invalid.",
+                        "PAYMENT_PROVIDER_MISMATCH",
+                        409
+                    );
+                }
+                const recorded = simulatorInitiation.rows[0];
+                if (
+                    (recorded.checkout_request_id &&
+                        recorded.checkout_request_id !== checkoutId) ||
+                    (recorded.merchant_request_id &&
+                        recorded.merchant_request_id !== merchantId)
+                ) {
+                    throw createRepositoryError(
+                        "Simulator request identifiers conflict with the initiation record.",
+                        "PAYMENT_PROVIDER_ID_CONFLICT",
+                        409
+                    );
+                }
+                await client.query(
+                    `UPDATE simulator_payment_confirmations
+                     SET checkout_request_id = $1,
+                         merchant_request_id = $2,
+                         synthetic_reference = $1
+                     WHERE confirmation_id = $3
+                       AND record_type = 'INITIATION'`,
+                    [checkoutId, merchantId, recorded.confirmation_id]
                 );
             }
             await client.query("COMMIT");
@@ -1019,10 +1121,28 @@ function createMpesaPaymentAttemptRepository(
                         callback_result_code, callback_amount_matches,
                         callback_phone_matches, callback_receipt,
                         provider_result_code, provider_result_description,
-                        verification_status
+                        verification_status,
+                        (
+                            SELECT s.outcome
+                            FROM simulator_payment_confirmations s
+                            WHERE s.attempt_id = mpesa_payment_verifications.attempt_id
+                              AND s.verification_id = mpesa_payment_verifications.verification_id
+                              AND s.record_type = 'CONFIRMATION'
+                            LIMIT 1
+                        ) AS simulator_outcome
                  FROM mpesa_payment_verifications
                  WHERE attempt_id = $1
-                   AND verification_status IN ('VERIFIED_SUCCESS', 'VERIFIED_FAILURE')
+                   AND (
+                       verification_status IN ('VERIFIED_SUCCESS', 'VERIFIED_FAILURE')
+                       OR EXISTS (
+                           SELECT 1
+                           FROM simulator_payment_confirmations s
+                           WHERE s.attempt_id = mpesa_payment_verifications.attempt_id
+                             AND s.verification_id = mpesa_payment_verifications.verification_id
+                             AND s.record_type = 'CONFIRMATION'
+                             AND s.outcome = 'SUCCESS'
+                       )
+                   )
                    AND (
                        $2 <> 'CALLBACK'
                        OR (
@@ -1189,56 +1309,146 @@ function createMpesaPaymentAttemptRepository(
                 400
             );
         }
-        const result = await databasePool.query(
-            `UPDATE mpesa_payment_verifications
-             SET verification_status = CASE
-                     WHEN $1 = 'VERIFIED_SUCCESS'
-                      AND verification_source = 'CALLBACK'
-                      AND EXISTS (
-                          SELECT 1
-                          FROM mpesa_payment_attempts a
-                          JOIN transactions t ON t.transaction_id = a.transaction_id
-                          WHERE a.attempt_id = mpesa_payment_verifications.attempt_id
-                            AND t.transaction_status = 'COMPLETED'
-                            AND t.mpesa_receipt IS NOT NULL
-                            AND t.mpesa_receipt IS DISTINCT FROM mpesa_payment_verifications.callback_receipt
-                      )
-                     THEN 'INCONSISTENT'
-                     ELSE $1
-                 END,
-                 provider_result_code = $2,
-                 provider_result_description = $3,
-                 simulator_outcome = $4,
-                 completed_at = now(),
-                 updated_at = now()
-             WHERE verification_id = $5
-               AND verification_status = 'PROCESSING'
-             RETURNING verification_id, attempt_id, verification_source,
-                       checkout_request_id, merchant_request_id,
-                       callback_result_code, callback_amount_matches,
-                       callback_phone_matches, callback_receipt,
-                       verification_status, provider_result_code,
-                       provider_result_description, provider_mode, simulator_outcome,
-                       created_at, completed_at`,
-            [verificationStatus, resultCode, resultDescription, simulatorOutcome, Number(verificationId)]
-        );
-        if (!result.rows[0]) {
+        if (simulatorOutcome === "SUCCESS") {
             throw createRepositoryError(
-                "Verification evidence is no longer processing.",
-                "VERIFICATION_NOT_PROCESSING",
+                "Successful simulator evidence must be recorded atomically with settlement.",
+                "SIMULATOR_SETTLEMENT_REQUIRED",
                 409
             );
         }
-        return result.rows[0];
+        if (
+            (simulatorOutcome === "FAILED" && verificationStatus !== "VERIFIED_FAILURE") ||
+            (["PENDING", "UNKNOWN"].includes(simulatorOutcome) &&
+                !["UNVERIFIED", "INCONSISTENT"].includes(verificationStatus))
+        ) {
+            throw createRepositoryError(
+                "Simulator outcome does not match the verification status.",
+                "INVALID_VERIFICATION_INPUT",
+                400
+            );
+        }
+
+        const client = await databasePool.connect();
+        let transactionStarted = false;
+        try {
+            await client.query("BEGIN");
+            transactionStarted = true;
+            const result = await client.query(
+                `UPDATE mpesa_payment_verifications
+                 SET verification_status = CASE
+                         WHEN $1 = 'VERIFIED_SUCCESS'
+                          AND verification_source = 'CALLBACK'
+                          AND EXISTS (
+                              SELECT 1
+                              FROM mpesa_payment_attempts a
+                              JOIN transactions t ON t.transaction_id = a.transaction_id
+                              WHERE a.attempt_id = mpesa_payment_verifications.attempt_id
+                                AND t.transaction_status = 'COMPLETED'
+                                AND t.mpesa_receipt IS NOT NULL
+                                AND t.mpesa_receipt IS DISTINCT FROM mpesa_payment_verifications.callback_receipt
+                          )
+                         THEN 'INCONSISTENT'
+                         ELSE $1
+                     END,
+                     provider_result_code = $2,
+                     provider_result_description = $3,
+                     completed_at = now(),
+                     updated_at = now()
+                 WHERE verification_id = $4
+                   AND verification_status = 'PROCESSING'
+                 RETURNING verification_id, attempt_id, verification_source,
+                           checkout_request_id, merchant_request_id,
+                           callback_result_code, callback_amount_matches,
+                           callback_phone_matches, callback_receipt,
+                           verification_status, provider_result_code,
+                           provider_result_description, created_at, completed_at`,
+                [verificationStatus, resultCode, resultDescription, Number(verificationId)]
+            );
+            const evidence = result.rows[0];
+            if (!evidence) {
+                throw createRepositoryError(
+                    "Verification evidence is no longer processing.",
+                    "VERIFICATION_NOT_PROCESSING",
+                    409
+                );
+            }
+            if (simulatorOutcome !== null) {
+                const initiationResult = await client.query(
+                    `SELECT confirmation_id, synthetic_reference,
+                            checkout_request_id, merchant_request_id
+                     FROM simulator_payment_confirmations
+                     WHERE attempt_id = $1
+                       AND record_type = 'INITIATION'
+                       AND provider_mode = 'SIMULATOR'
+                     FOR UPDATE`,
+                    [evidence.attempt_id]
+                );
+                const initiation = initiationResult.rows[0];
+                if (
+                    !initiation?.synthetic_reference ||
+                    initiation.checkout_request_id !== evidence.checkout_request_id ||
+                    initiation.merchant_request_id !== evidence.merchant_request_id
+                ) {
+                    throw createRepositoryError(
+                        "Simulator verification has no matching persisted initiation evidence.",
+                        "PAYMENT_PROVIDER_MISMATCH",
+                        409
+                    );
+                }
+                await client.query(
+                    `INSERT INTO simulator_payment_confirmations (
+                         attempt_id, verification_id, record_type, provider_mode,
+                         outcome, checkout_request_id, merchant_request_id,
+                         synthetic_reference, confirmed_at
+                     )
+                     VALUES ($1, $2, 'CONFIRMATION', 'SIMULATOR',
+                             $3, $4, $5, $6, $7)`,
+                    [
+                        evidence.attempt_id,
+                        evidence.verification_id,
+                        simulatorOutcome,
+                        evidence.checkout_request_id,
+                        evidence.merchant_request_id,
+                        initiation.synthetic_reference,
+                        evidence.completed_at,
+                    ]
+                );
+            }
+            await client.query("COMMIT");
+            transactionStarted = false;
+            return evidence;
+        } catch (error) {
+            if (transactionStarted) await client.query("ROLLBACK");
+            throw error;
+        } finally {
+            client.release();
+        }
     }
 
-    async function settleVerifiedPayment({ attemptId, verificationId }, {
+    async function settleVerifiedPayment({
+        attemptId,
+        verificationId,
+        simulatorConfirmation = null,
+    }, {
         environmentProvider: readinessEnvironmentProvider = environmentProvider,
     } = {}) {
         const normalizedAttemptId = requireIdentifier(attemptId, "Payment attempt ID");
         const normalizedVerificationId = Number(verificationId);
         if (!Number.isSafeInteger(normalizedVerificationId) || normalizedVerificationId <= 0) {
             throw createRepositoryError("Verification ID is invalid.", "INVALID_VERIFICATION_INPUT", 400);
+        }
+        if (simulatorConfirmation !== null &&
+            (simulatorConfirmation?.outcome !== "SUCCESS" ||
+                simulatorConfirmation?.providerResultCode !== "0" ||
+                typeof simulatorConfirmation?.providerResultDescription !== "string" ||
+                !/^SIMULATED: .*no real money was transferred\.$/i.test(
+                    simulatorConfirmation.providerResultDescription
+                ))) {
+            throw createRepositoryError(
+                "Successful simulator settlement requires explicit simulated confirmation evidence.",
+                "PAYMENT_NOT_VERIFIED",
+                409
+            );
         }
 
         const client = await databasePool.connect();
@@ -1249,10 +1459,17 @@ function createMpesaPaymentAttemptRepository(
 
             const attemptResult = await client.query(
                 `SELECT attempt_id, account_id, contribution_id, transaction_id,
-                        expected_amount, mpesa_phone, attempt_status, provider_mode,
-                        checkout_request_id, merchant_request_id
+                        expected_amount, mpesa_phone, attempt_status,
+                        checkout_request_id, merchant_request_id, created_at,
+                        CASE WHEN EXISTS (
+                            SELECT 1
+                            FROM simulator_payment_confirmations s
+                            WHERE s.attempt_id = mpesa_payment_attempts.attempt_id
+                              AND s.record_type = 'INITIATION'
+                        ) THEN 'SIMULATOR' ELSE NULL END AS provider_mode
                  FROM mpesa_payment_attempts
-                 WHERE attempt_id = $1`,
+                 WHERE attempt_id = $1
+                 FOR UPDATE`,
                 [normalizedAttemptId]
             );
             const attemptReference = attemptResult.rows[0];
@@ -1318,16 +1535,7 @@ function createMpesaPaymentAttemptRepository(
                 );
             }
 
-            const lockedAttemptResult = await client.query(
-                `SELECT attempt_id, account_id, contribution_id, transaction_id,
-                        expected_amount, mpesa_phone, attempt_status, provider_mode,
-                        checkout_request_id, merchant_request_id
-                 FROM mpesa_payment_attempts
-                 WHERE attempt_id = $1
-                 FOR UPDATE`,
-                [normalizedAttemptId]
-            );
-            const attempt = lockedAttemptResult.rows[0];
+            const attempt = attemptReference;
             if (!attempt ||
                 attempt.account_id !== attemptReference.account_id ||
                 attempt.contribution_id !== attemptReference.contribution_id ||
@@ -1339,20 +1547,63 @@ function createMpesaPaymentAttemptRepository(
                 );
             }
 
+            const simulatorInitiationResult = await client.query(
+                `SELECT confirmation_id, provider_mode, checkout_request_id,
+                        merchant_request_id, synthetic_reference, initiated_at
+                 FROM simulator_payment_confirmations
+                 WHERE attempt_id = $1
+                   AND record_type = 'INITIATION'
+                 FOR UPDATE`,
+                [normalizedAttemptId]
+            );
+            const simulatorInitiation = simulatorInitiationResult.rows[0] || null;
+            const existingMovementResult = await client.query(
+                `SELECT movement_id, movement_type, amount, provider_mode,
+                        simulator_confirmation_id, payment_callback_id
+                 FROM pension_account_movements
+                 WHERE payment_attempt_id = $1
+                 FOR UPDATE`,
+                [normalizedAttemptId]
+            );
+            const existingMovement = existingMovementResult.rows[0] || null;
+            if (
+                attempt.attempt_status === "SETTLED" &&
+                existingMovement?.movement_type === "CONTRIBUTION_SETTLEMENT" &&
+                existingMovement.provider_mode === "SIMULATOR" &&
+                existingMovement.simulator_confirmation_id &&
+                linked.transaction_status === "COMPLETED" &&
+                linked.contribution_status === "COMPLETED"
+            ) {
+                await client.query("COMMIT");
+                transactionStarted = false;
+                return {
+                    attempt_id: normalizedAttemptId,
+                    alreadySettled: true,
+                    contribution_status: linked.contribution_status,
+                    transaction_status: linked.transaction_status,
+                    provider_mode: "SIMULATOR",
+                };
+            }
+
             const evidenceResult = await client.query(
                 `SELECT verification_id, attempt_id, verification_source,
                        checkout_request_id, merchant_request_id,
                        callback_fingerprint, callback_result_code,
                        callback_amount_matches, callback_phone_matches, callback_receipt,
                        provider_result_code, provider_result_description,
-                       verification_status, provider_mode, simulator_outcome
+                       verification_status, completed_at
                  FROM mpesa_payment_verifications
                  WHERE verification_id = $1 AND attempt_id = $2
                  FOR UPDATE`,
                 [normalizedVerificationId, normalizedAttemptId]
             );
             const evidence = evidenceResult.rows[0];
-            if (!evidence || !["VERIFIED_SUCCESS", "VERIFIED_FAILURE"].includes(evidence.verification_status)) {
+            const simulatorSuccessRequested =
+                simulatorConfirmation?.outcome === "SUCCESS";
+            if (!evidence ||
+                (!["VERIFIED_SUCCESS", "VERIFIED_FAILURE"].includes(evidence.verification_status) &&
+                    !(simulatorSuccessRequested &&
+                        evidence.verification_status === "PROCESSING"))) {
                 throw createRepositoryError(
                     "Payment has no definitive provider verification evidence.",
                     "PAYMENT_NOT_VERIFIED",
@@ -1364,8 +1615,14 @@ function createMpesaPaymentAttemptRepository(
                 !attempt.merchant_request_id ||
                 evidence.checkout_request_id !== attempt.checkout_request_id ||
                 evidence.merchant_request_id !== attempt.merchant_request_id ||
-                !attempt.provider_mode ||
-                evidence.provider_mode !== attempt.provider_mode
+                (simulatorSuccessRequested &&
+                    (!simulatorInitiation ||
+                        simulatorInitiation.provider_mode !== "SIMULATOR" ||
+                        simulatorInitiation.checkout_request_id !== attempt.checkout_request_id ||
+                        simulatorInitiation.merchant_request_id !== attempt.merchant_request_id ||
+                        simulatorInitiation.synthetic_reference !== attempt.checkout_request_id ||
+                        !/^SIM[A-F0-9]{22}$/.test(attempt.checkout_request_id) ||
+                        attempt.created_at < simulatorInitiation.initiated_at))
             ) {
                 throw createRepositoryError(
                     "Payment attempt has no matching persisted provider evidence.",
@@ -1389,7 +1646,7 @@ function createMpesaPaymentAttemptRepository(
                 );
             }
 
-            if (evidence.verification_status === "VERIFIED_SUCCESS") {
+            if (evidence.verification_status === "VERIFIED_SUCCESS" || simulatorSuccessRequested) {
                 const callbackVerified =
                     evidence.verification_source === "CALLBACK" &&
                     evidence.callback_result_code === "0" &&
@@ -1402,10 +1659,19 @@ function createMpesaPaymentAttemptRepository(
                     evidence.callback_result_code === null &&
                     evidence.callback_amount_matches === null &&
                     evidence.callback_phone_matches === null &&
-                    evidence.callback_receipt === null;
-                if (!callbackVerified && !queryVerified || evidence.provider_result_code !== "0") {
+                    evidence.callback_receipt === null &&
+                    evidence.callback_fingerprint === null;
+                const successfulResultCode = simulatorSuccessRequested
+                    ? simulatorConfirmation.providerResultCode
+                    : evidence.provider_result_code;
+                if (
+                    (simulatorSuccessRequested
+                        ? !queryVerified || evidence.verification_status !== "PROCESSING"
+                        : !callbackVerified && !queryVerified) ||
+                    successfulResultCode !== "0"
+                ) {
                     throw createRepositoryError(
-                        "Verified success evidence does not match an allowed callback or query-only evidence path.",
+                        "Successful evidence does not match an allowed callback or simulator path.",
                         "PAYMENT_NOT_VERIFIED",
                         409
                     );
@@ -1414,14 +1680,18 @@ function createMpesaPaymentAttemptRepository(
                 let callbackEvidenceId = null;
                 let verifiedReceipt = null;
                 let simulatorConfirmationId = null;
-                if (attempt.provider_mode === "DARAJA") {
-                    if (evidence.simulator_outcome !== null) {
+                let settlementProviderMode = null;
+                let settlementDescription = evidence.provider_result_description;
+                let ledgerReadinessChecked = false;
+                if (callbackVerified) {
+                    if (simulatorInitiation) {
                         throw createRepositoryError(
-                            "Simulator evidence cannot verify a Daraja attempt.",
+                            "Simulator attempts cannot settle from Daraja callback evidence.",
                             "PAYMENT_PROVIDER_MISMATCH",
                             409
                         );
                     }
+                    settlementProviderMode = "DARAJA";
                     if (callbackVerified) {
                         const callbackResult = await client.query(
                             `SELECT callback_id, callback_receipt
@@ -1458,42 +1728,73 @@ function createMpesaPaymentAttemptRepository(
                             );
                         }
                     }
-                } else if (attempt.provider_mode === "SIMULATOR") {
-                    if (!queryVerified ||
-                        evidence.simulator_outcome !== "SUCCESS" ||
-                        !/^SIM[A-F0-9]{22}$/.test(attempt.checkout_request_id) ||
-                        !/^SIMULATED: .*no real money was transferred\.$/i.test(
-                            evidence.provider_result_description || ""
-                        )) {
+                } else if (simulatorSuccessRequested) {
+                    if (!simulatorInitiation ||
+                        simulatorInitiation.provider_mode !== "SIMULATOR" ||
+                        !queryVerified ||
+                        !/^SIM[A-F0-9]{22}$/.test(attempt.checkout_request_id)) {
                         throw createRepositoryError(
                             "Simulator success requires explicit synthetic confirmation evidence.",
                             "PAYMENT_PROVIDER_MISMATCH",
                             409
                         );
                     }
+                    settlementDescription = simulatorConfirmation.providerResultDescription;
+                    await enforcePensionLedgerReadiness(client, readinessEnvironmentProvider);
+                    ledgerReadinessChecked = true;
+                    const completedSimulatorVerification = await client.query(
+                        `UPDATE mpesa_payment_verifications
+                         SET verification_status = 'UNVERIFIED',
+                             provider_result_code = '0',
+                             provider_result_description = $1,
+                             completed_at = now(),
+                             updated_at = now()
+                         WHERE verification_id = $2
+                           AND attempt_id = $3
+                           AND verification_status = 'PROCESSING'
+                         RETURNING completed_at`,
+                        [
+                            simulatorConfirmation.providerResultDescription,
+                            normalizedVerificationId,
+                            normalizedAttemptId,
+                        ]
+                    );
+                    const completedAt = completedSimulatorVerification.rows[0]?.completed_at;
+                    if (!completedAt) {
+                        throw createRepositoryError(
+                            "Simulator verification could not be completed.",
+                            "PAYMENT_NOT_VERIFIED",
+                            409
+                        );
+                    }
                     const simulatorEvidence = await client.query(
-                        `SELECT confirmation_id
-                         FROM simulator_payment_confirmations
-                         WHERE attempt_id = $1
-                           AND verification_id = $2
-                           AND synthetic_reference = $3
-                           AND outcome = 'SUCCESS'
-                         FOR UPDATE`,
+                        `INSERT INTO simulator_payment_confirmations (
+                             attempt_id, verification_id, record_type, provider_mode,
+                             outcome, checkout_request_id, merchant_request_id,
+                             synthetic_reference, confirmed_at
+                         )
+                         VALUES ($1, $2, 'CONFIRMATION', 'SIMULATOR',
+                                 'SUCCESS', $3, $4, $5, $6)
+                         RETURNING confirmation_id`,
                         [
                             normalizedAttemptId,
                             normalizedVerificationId,
                             attempt.checkout_request_id,
+                            attempt.merchant_request_id,
+                            attempt.checkout_request_id,
+                            completedAt,
                         ]
                     );
                     simulatorConfirmationId =
                         simulatorEvidence.rows[0]?.confirmation_id ?? null;
                     if (!simulatorConfirmationId) {
                         throw createRepositoryError(
-                            "Simulator confirmation record is missing.",
+                            "Simulator confirmation record could not be persisted.",
                             "PAYMENT_NOT_VERIFIED",
                             409
                         );
                     }
+                    settlementProviderMode = "SIMULATOR";
                 } else {
                     throw createRepositoryError(
                         "Unresolved payment provider cannot settle.",
@@ -1505,7 +1806,8 @@ function createMpesaPaymentAttemptRepository(
                 if (
                     linked.transaction_status === "COMPLETED" &&
                     linked.contribution_status === "COMPLETED" &&
-                    ["PROMPT_ACCEPTED", "OUTCOME_UNKNOWN", "SETTLED"].includes(attempt.attempt_status) &&
+                    attempt.attempt_status === "SETTLED" &&
+                    existingMovement?.movement_type === "CONTRIBUTION_SETTLEMENT" &&
                     linked.transaction_checkout_request_id === attempt.checkout_request_id &&
                     linked.transaction_phone === attempt.mpesa_phone &&
                     String(linked.transaction_result_code) === "0"
@@ -1575,7 +1877,9 @@ function createMpesaPaymentAttemptRepository(
                     }
                 }
 
-                await enforcePensionLedgerReadiness(client, readinessEnvironmentProvider);
+                if (!ledgerReadinessChecked) {
+                    await enforcePensionLedgerReadiness(client, readinessEnvironmentProvider);
+                }
 
                 const updatedTransaction = await client.query(
                     `UPDATE transactions
@@ -1594,7 +1898,7 @@ function createMpesaPaymentAttemptRepository(
                         verifiedReceipt,
                         attempt.checkout_request_id,
                         attempt.mpesa_phone,
-                        evidence.provider_result_description,
+                        settlementDescription,
                         attempt.transaction_id,
                     ]
                 );
@@ -1624,18 +1928,18 @@ function createMpesaPaymentAttemptRepository(
                     );
                 }
 
-                const settledAttempt = await client.query(
-                    `UPDATE mpesa_payment_attempts
-                     SET attempt_status = 'SETTLED', updated_at = now()
-                     WHERE attempt_id = $1
-                       AND attempt_status IN ('PROMPT_ACCEPTED', 'OUTCOME_UNKNOWN')
-                     RETURNING attempt_id`,
-                    [normalizedAttemptId]
+                const balanceUpdate = await client.query(
+                    `UPDATE pension_accounts
+                     SET current_balance = current_balance + $2::numeric
+                     WHERE account_id = $1
+                       AND account_status = 'ACTIVE'
+                     RETURNING current_balance`,
+                    [attempt.account_id, centsToDecimal(expectedCents)]
                 );
-                if (!settledAttempt.rows[0]) {
+                if (!balanceUpdate.rows[0]) {
                     throw createRepositoryError(
-                        "Payment attempt could not be marked settled.",
-                        "PAYMENT_SETTLEMENT_CONFLICT",
+                        "Pension account balance could not be updated.",
+                        "PAYMENT_ACCOUNT_MISMATCH",
                         409
                     );
                 }
@@ -1653,9 +1957,7 @@ function createMpesaPaymentAttemptRepository(
                             'mpesa-payment-settlement', $10
                      FROM pension_ledger l
                      WHERE l.singleton_key IS TRUE AND l.status = 'ACTIVE'
-                     ON CONFLICT (contribution_id)
-                         WHERE movement_type = 'CONTRIBUTION_SETTLEMENT'
-                     DO NOTHING
+                     ON CONFLICT DO NOTHING
                      RETURNING movement_id`,
                     [
                         attempt.account_id,
@@ -1667,7 +1969,7 @@ function createMpesaPaymentAttemptRepository(
                         normalizedVerificationId,
                         callbackEvidenceId,
                         simulatorConfirmationId,
-                        attempt.provider_mode,
+                        settlementProviderMode,
                     ]
                 );
                 if (!movementResult.rows[0]) {
@@ -1677,16 +1979,18 @@ function createMpesaPaymentAttemptRepository(
                         409
                     );
                 }
-                const balanceResult = await client.query(
-                    `SELECT current_balance
-                     FROM pension_accounts
-                     WHERE account_id = $1`,
-                    [attempt.account_id]
+                const settledAttempt = await client.query(
+                    `UPDATE mpesa_payment_attempts
+                     SET attempt_status = 'SETTLED', updated_at = now()
+                     WHERE attempt_id = $1
+                       AND attempt_status IN ('PROMPT_ACCEPTED', 'OUTCOME_UNKNOWN')
+                     RETURNING attempt_id`,
+                    [normalizedAttemptId]
                 );
-                if (!balanceResult.rows[0]) {
+                if (!settledAttempt.rows[0]) {
                     throw createRepositoryError(
-                        "Pension account balance could not be read after ledger posting.",
-                        "PAYMENT_ACCOUNT_MISMATCH",
+                        "Payment attempt could not be marked settled.",
+                        "PAYMENT_SETTLEMENT_CONFLICT",
                         409
                     );
                 }
@@ -1695,13 +1999,16 @@ function createMpesaPaymentAttemptRepository(
                 return {
                     attempt_id: normalizedAttemptId,
                     alreadySettled: false,
-                    account_balance: balanceResult.rows[0].current_balance,
+                    account_balance: balanceUpdate.rows[0].current_balance,
                     contribution_id: linked.contribution_id,
                     contribution_status: "COMPLETED",
                     transaction_status: "COMPLETED",
                     user_id: linked.user_id,
-                    verification_status: evidence.verification_status,
-                    provider_mode: attempt.provider_mode,
+                    verification_status: simulatorSuccessRequested
+                        ? "UNVERIFIED"
+                        : evidence.verification_status,
+                    ...(simulatorSuccessRequested ? { simulated_outcome: "SUCCESS" } : {}),
+                    provider_mode: settlementProviderMode,
                 };
             }
 
@@ -1718,6 +2025,64 @@ function createMpesaPaymentAttemptRepository(
                 throw createRepositoryError(
                     "Payment failure is not definitively verified.",
                     "PAYMENT_NOT_VERIFIED",
+                    409
+                );
+            }
+            if (simulatorInitiation) {
+                const simulatorFailure = await client.query(
+                    `SELECT confirmation_id
+                     FROM simulator_payment_confirmations
+                     WHERE attempt_id = $1
+                       AND verification_id = $2
+                       AND record_type = 'CONFIRMATION'
+                       AND outcome = 'FAILED'
+                       AND synthetic_reference = $3
+                     FOR UPDATE`,
+                    [
+                        normalizedAttemptId,
+                        normalizedVerificationId,
+                        attempt.checkout_request_id,
+                    ]
+                );
+                if (!simulatorFailure.rows[0]) {
+                    throw createRepositoryError(
+                        "Simulator failure has no matching persisted confirmation evidence.",
+                        "PAYMENT_NOT_VERIFIED",
+                        409
+                    );
+                }
+            } else if (evidence.verification_source === "CALLBACK") {
+                const callbackFailure = await client.query(
+                    `SELECT callback_id
+                     FROM mpesa_callback_inbox
+                     WHERE callback_fingerprint = $1
+                       AND attempt_id = $2
+                       AND verification_id = $3
+                       AND callback_status = 'VERIFIED'
+                       AND checkout_request_id = $4
+                       AND merchant_request_id = $5
+                       AND callback_result_code = $6
+                     FOR UPDATE`,
+                    [
+                        evidence.callback_fingerprint,
+                        normalizedAttemptId,
+                        normalizedVerificationId,
+                        attempt.checkout_request_id,
+                        attempt.merchant_request_id,
+                        failureCode,
+                    ]
+                );
+                if (!callbackFailure.rows[0]) {
+                    throw createRepositoryError(
+                        "Daraja failure has no matching durable callback evidence.",
+                        "PAYMENT_NOT_VERIFIED",
+                        409
+                    );
+                }
+            } else {
+                throw createRepositoryError(
+                    "Unresolved provider failure cannot change the payment attempt.",
+                    "PAYMENT_PROVIDER_MISMATCH",
                     409
                 );
             }

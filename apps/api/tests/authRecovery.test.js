@@ -34,6 +34,8 @@ const adminSettingsRows = [
     { setting_key: "require_otp_on_withdrawal", setting_value: "true" },
 ];
 
+authEmailService.enforceRequestLimits = async () => {};
+
 function response() {
     return {
         statusCode: null,
@@ -245,22 +247,27 @@ test("password-reset requests return the same public response for missing, unver
 
 test("password-reset rate limits apply before account lookup", async () => {
     let lookedUpAccount = false;
-    authEmailService.enforceRequestLimits = async () => {
-        const error = new Error("Too many requests. Please try again later.");
-        error.status = 429;
-        throw error;
-    };
-    pool.query = async () => {
-        lookedUpAccount = true;
-        return { rows: [] };
-    };
-    const res = response();
-    await authController.requestPasswordReset({
-        body: { email: "person@example.com" },
-        ip: "127.0.0.1",
-    }, res);
-    assert.equal(res.statusCode, 429);
-    assert.equal(lookedUpAccount, false);
+    const previousEnforceRequestLimits = authEmailService.enforceRequestLimits;
+    try {
+        authEmailService.enforceRequestLimits = async () => {
+            const error = new Error("Too many requests. Please try again later.");
+            error.status = 429;
+            throw error;
+        };
+        pool.query = async () => {
+            lookedUpAccount = true;
+            return { rows: [] };
+        };
+        const res = response();
+        await authController.requestPasswordReset({
+            body: { email: "person@example.com" },
+            ip: "127.0.0.1",
+        }, res);
+        assert.equal(res.statusCode, 429);
+        assert.equal(lookedUpAccount, false);
+    } finally {
+        authEmailService.enforceRequestLimits = previousEnforceRequestLimits;
+    }
 });
 
 test("expired and reused reset tokens are rejected without changing the password", async () => {
@@ -449,6 +456,33 @@ test("expired administrator email-verification tokens are rejected", async () =>
         assert.match(res.body.message, /invalid or expired/i);
     } finally {
         pool.connect = originalConnectForExpiry;
+    }
+});
+
+test("email-verification token attempts are rate-limited using a hash rather than the raw token", async () => {
+    const token = "rate-limited-email-verification-token-long-enough";
+    const originalLimits = authEmailService.enforceRequestLimits;
+    const originalConnectForRateLimit = pool.connect;
+    authEmailService.enforceRequestLimits = async (input) => {
+        assert.equal(input.action, "EMAIL_VERIFICATION_VALIDATE");
+        assert.equal(input.email, authEmailService.hashOpaque(token));
+        const error = new Error("Too many requests");
+        error.status = 429;
+        throw error;
+    };
+    pool.connect = async () => {
+        assert.fail("A rate-limited verification request must not query tokens");
+    };
+
+    try {
+        const res = response();
+        await authController.verifyEmail({ body: { token }, ip: "127.0.0.1" }, res);
+        assert.equal(res.statusCode, 429);
+        assert.equal(res.body.message, "Too many requests");
+        assert.doesNotMatch(JSON.stringify(res.body), new RegExp(token));
+    } finally {
+        authEmailService.enforceRequestLimits = originalLimits;
+        pool.connect = originalConnectForRateLimit;
     }
 });
 

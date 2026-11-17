@@ -6,9 +6,10 @@ const mocks = vi.hoisted(() => ({
     createStaffAccount: vi.fn(),
     deleteUser: vi.fn(),
     listUsers: vi.fn(),
+    resendStaffOnboarding: vi.fn(),
     refetch: vi.fn(),
     setData: vi.fn(),
-    toast: { success: vi.fn(), error: vi.fn() },
+    toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
     updateUserStatus: vi.fn(),
     useAuth: vi.fn(),
 }));
@@ -17,6 +18,7 @@ vi.mock("../../services/adminService", () => ({
     createStaffAccount: mocks.createStaffAccount,
     deleteUser: mocks.deleteUser,
     listUsers: mocks.listUsers,
+    resendStaffOnboarding: mocks.resendStaffOnboarding,
     updateUserStatus: mocks.updateUserStatus,
 }));
 vi.mock("../../context/AuthContext", () => ({ useAuth: mocks.useAuth }));
@@ -29,6 +31,8 @@ vi.mock("../../hooks/useApi", () => ({
             phone: "07000000002",
             role: "WORKER",
             account_status: "ACTIVE",
+            email_verified: false,
+            phone_verified_at: null,
         }],
         error: null,
         loading: false,
@@ -47,15 +51,20 @@ describe("UserManagement deletion confirmation", () => {
         mocks.deleteUser.mockResolvedValue({ message: "User deleted permanently" });
         mocks.createStaffAccount.mockResolvedValue({
             status: "success",
-            message: "Staff account created and SMS accepted.",
-            data: { sms_accepted: true },
+            message: "Messages accepted; the account remains inactive until email verification.",
+            data: {
+                sms_accepted: true,
+                verification_email_accepted: true,
+                account_active: false,
+            },
         });
         mocks.refetch.mockResolvedValue([]);
     });
 
-    it("creates staff with the selected role and refreshes the account list", async () => {
+    it("shows staff email and phone verification status and reports pending email verification", async () => {
         render(<UserManagement />);
 
+        expect(screen.getByText("Email pending; phone pending")).toBeInTheDocument();
         fireEvent.change(screen.getByLabelText("Full name"), { target: { value: "New Staff" } });
         fireEvent.change(screen.getByLabelText("Phone number"), { target: { value: "+254 712 345 678" } });
         fireEvent.change(screen.getByLabelText("Email address"), { target: { value: "staff@example.test" } });
@@ -71,7 +80,34 @@ describe("UserManagement deletion confirmation", () => {
             });
             expect(mocks.refetch).toHaveBeenCalledOnce();
         });
-        expect(mocks.toast.success).toHaveBeenCalledWith("Staff account created and SMS accepted.");
+        expect(mocks.toast.info).toHaveBeenCalledWith(
+            "Messages accepted; the account remains inactive until email verification.",
+        );
+    });
+
+    it("does not report staff onboarding as complete when email dispatch failed", async () => {
+        mocks.createStaffAccount.mockResolvedValueOnce({
+            status: "success",
+            message: "SMS was accepted, but the verification email was not accepted.",
+            data: {
+                sms_accepted: true,
+                verification_email_accepted: false,
+                account_active: false,
+            },
+        });
+        render(<UserManagement />);
+        fireEvent.change(screen.getByLabelText("Full name"), { target: { value: "New Staff" } });
+        fireEvent.change(screen.getByLabelText("Phone number"), { target: { value: "+254 712 345 678" } });
+        fireEvent.change(screen.getByLabelText("Email address"), { target: { value: "staff@example.test" } });
+        fireEvent.click(screen.getByRole("button", { name: "Create account" }));
+
+        await waitFor(() => {
+            expect(mocks.toast.error).toHaveBeenCalledWith(
+                "SMS was accepted, but the verification email was not accepted.",
+            );
+        });
+        expect(mocks.toast.success).not.toHaveBeenCalled();
+        expect(mocks.toast.info).not.toHaveBeenCalled();
     });
 
     it("requires typing DELETE and refreshes the list only after successful deletion", async () => {

@@ -263,11 +263,11 @@ test("legacy single-recipient admin queue rejects opt-out without inserting noti
     assert.equal(state.records.length, 0);
 });
 
-test("admin role notification queue can override optional preferences for verified contacts", async () => {
+test("admin role notification queue respects disabled optional preferences", async () => {
     const { pool, state } = createQueuePool({ smsEnabled: false, emailEnabled: false });
     const repository = createNotificationRepository(pool);
 
-    const results = await repository.queueRoleNotifications({
+    await assert.rejects(() => repository.queueRoleNotifications({
         senderId: "admin-1",
         senderRole: "ADMIN",
         userId: "worker-1",
@@ -276,14 +276,11 @@ test("admin role notification queue can override optional preferences for verifi
         subject: "MicoPesa update",
         requestId: "4c3b9f30-7cb7-4b2f-83d1-1f24c9b2b1d5",
         category: "ANNOUNCEMENT",
+    }), {
+        code: "NOTIFICATION_PREFERENCE_DISABLED",
+        statusCode: 422,
     });
-
-    assert.deepEqual(results.map(({ notification_type, delivery_status }) =>
-        [notification_type, delivery_status]), [
-        ["SMS", "PENDING"],
-        ["EMAIL", "PENDING"],
-    ]);
-    assert.equal(state.records.length, 2);
+    assert.equal(state.records.length, 0);
 });
 
 test("admin multi-recipient queue reports invalid and unverified contacts as skipped", async () => {
@@ -1522,6 +1519,74 @@ test("email and push failures do not prevent another channel from succeeding", a
         ["email-1", "FAILED", "EMAIL_PROVIDER_REJECTED"],
         ["push-1", "PROVIDER_ACCEPTED"],
         ["sms-1", "PROVIDER_ACCEPTED"],
+    ]);
+});
+
+test("SMS rejection does not prevent email acceptance in the same batch", async () => {
+    const updates = [];
+    const rows = [
+        {
+            notification_id: "sms-rejected",
+            notification_type: "SMS",
+            recipient_phone: "+254712345678",
+            message: "Body",
+            delivery_status: "PENDING",
+        },
+        {
+            notification_id: "email-accepted",
+            notification_type: "EMAIL",
+            recipient_email: "worker@example.test",
+            email_subject: "Subject",
+            message: "Body",
+            delivery_status: "PENDING",
+        },
+    ];
+    const dispatcher = createSmsDeliveryDispatcher({
+        repository: {
+            async isClaimEligible() { return true; },
+            async claimBatch(_batchSize, channels) {
+                assert.deepEqual(channels, ["SMS", "EMAIL"]);
+                return rows;
+            },
+            async markProviderAccepted(row) {
+                updates.push([row.notification_id, "PROVIDER_ACCEPTED"]);
+            },
+            async markFailed(row, code) {
+                updates.push([row.notification_id, "FAILED", code]);
+            },
+            async markUnknown(row, code) {
+                updates.push([row.notification_id, "UNKNOWN", code]);
+            },
+            async retryRejected(row, options) {
+                updates.push([row.notification_id, "RETRY", options.errorCode]);
+            },
+        },
+        environment: {
+            NODE_ENV: "production",
+            AT_ENVIRONMENT: "production",
+            SMS_DISPATCHER_ENABLED: "true",
+            AT_USERNAME: "production",
+            AT_API_KEY: "mock",
+            NOTIFICATION_DISPATCHER_ENABLED: "true",
+            EMAIL_NOTIFICATIONS_ENABLED: "true",
+            GMAIL_USER: "sender@example.test",
+            GMAIL_APP_PASSWORD: "abcdefghijklmnop",
+        },
+        async sendSms() {
+            throw Object.assign(new Error("Provider rejected SMS"), {
+                code: "SMS_PROVIDER_REJECTED",
+            });
+        },
+        async sendEmail() {
+            return { accepted: true, status: "PROVIDER_ACCEPTED" };
+        },
+        logger: { error() {} },
+    });
+
+    assert.equal(await dispatcher.runOnce(), 2);
+    assert.deepEqual(updates.sort((left, right) => left[0].localeCompare(right[0])), [
+        ["email-accepted", "PROVIDER_ACCEPTED"],
+        ["sms-rejected", "FAILED", "SMS_PROVIDER_REJECTED"],
     ]);
 });
 

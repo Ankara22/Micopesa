@@ -22,6 +22,32 @@ const MAX_POLL_ATTEMPTS = 40;
 const terminalAttemptStatuses = new Set(["FAILED", "CANCELLED", "TIMED_OUT"]);
 const LAST_STATUS_REFERENCE_KEY = "micopesa.mpesa.lastPaymentAttempt";
 const PAYMENT_IDEMPOTENCY_KEY = "micopesa.mpesa.paymentIdempotencyKey";
+const initiationErrorKeysByCode = {
+    MPESA_VERIFIED_PHONE_REQUIRED: "worker.depositModal.verifiedPhoneRequired",
+    MPESA_ALLOCATION_INVALID: "worker.depositModal.allocationInvalid",
+    MPESA_ACCOUNT_NOT_AVAILABLE: "worker.depositModal.accountUnavailable",
+    MPESA_CONTRIBUTION_NOT_ELIGIBLE: "worker.depositModal.contributionNotEligible",
+    MPESA_IDEMPOTENCY_CONFLICT: "worker.depositModal.idempotencyConflict",
+    MPESA_PROVIDER_MISMATCH: "worker.depositModal.providerMismatch",
+    MPESA_SIMULATOR_UNAVAILABLE: "worker.depositModal.paymentDisabled",
+    MPESA_SIMULATOR_FORBIDDEN: "worker.depositModal.startForbidden",
+    MPESA_LEDGER_NOT_READY: "worker.depositModal.ledgerNotReady",
+    MPESA_REQUEST_CONFLICT: "worker.depositModal.requestConflict",
+    MPESA_REQUEST_NOT_FOUND: "worker.depositModal.requestNotFound",
+    MPESA_INVALID_REQUEST: "worker.depositModal.invalidRequest",
+    MPESA_INITIATION_UNAVAILABLE: "worker.depositModal.initiationUnavailable",
+};
+const preDispatchErrorCodes = new Set([
+    "MPESA_VERIFIED_PHONE_REQUIRED",
+    "MPESA_ALLOCATION_INVALID",
+    "MPESA_ACCOUNT_NOT_AVAILABLE",
+    "MPESA_CONTRIBUTION_NOT_ELIGIBLE",
+    "MPESA_PROVIDER_MISMATCH",
+    "MPESA_SIMULATOR_UNAVAILABLE",
+    "MPESA_SIMULATOR_FORBIDDEN",
+    "MPESA_LEDGER_NOT_READY",
+    "MPESA_INVALID_REQUEST",
+]);
 
 function getAttemptStatus(payment) {
     return payment?.attempt_status ?? payment?.payment_status;
@@ -70,6 +96,7 @@ function DepositModal({ open, onClose, onCompleted }) {
     const [missingAttemptForKey, setMissingAttemptForKey] = useState(false);
     const submissionInProgressRef = useRef(false);
     const statusCheckInProgressRef = useRef(false);
+    const simulatorConfirmationInProgressRef = useRef(false);
     const idempotencyKeyRef = useRef(null);
     const completedTransactionRef = useRef(null);
     const callbacksRef = useRef({ onCompleted });
@@ -355,8 +382,10 @@ function DepositModal({ open, onClose, onCompleted }) {
                 }
             })
             .catch((error) => {
-                const rejectedBeforeDispatch = [400, 401, 403, 404, 409, 422, 429, 503]
-                    .includes(error?.status);
+                const messageKey = error?.data?.message_key;
+                const rejectedBeforeDispatch = [400, 401, 403, 422, 429]
+                    .includes(error?.status) ||
+                    preDispatchErrorCodes.has(messageKey);
                 if (!rejectedBeforeDispatch) {
                     setSubmissionUnknown(true);
                     setPollMessageKey("worker.depositModal.unknownSubmissionDetails");
@@ -368,11 +397,12 @@ function DepositModal({ open, onClose, onCompleted }) {
                 } catch {
                     setPollMessageKey("worker.depositModal.statusRecoveryUnavailable");
                 }
-                setStartErrorKey(error?.status === 403
+                const startMessageKey = initiationErrorKeysByCode[messageKey];
+                setStartErrorKey(startMessageKey || (error?.status === 403
                     ? "worker.depositModal.startForbidden"
                     : error?.status === 503
                         ? "worker.depositModal.paymentDisabled"
-                        : "worker.depositModal.startPaymentError");
+                        : "worker.depositModal.startPaymentError"));
             })
             .finally(() => {
                 submissionInProgressRef.current = false;
@@ -385,9 +415,14 @@ function DepositModal({ open, onClose, onCompleted }) {
         setPollMessageKey("");
         if (
             payment?.simulated &&
-            payment.payment_outcome === "PENDING" &&
+            ["PENDING", "UNKNOWN"].includes(payment.payment_outcome) &&
             typeof payment.attempt_id === "string"
         ) {
+            if (
+                statusCheckInProgressRef.current ||
+                simulatorConfirmationInProgressRef.current
+            ) return;
+            simulatorConfirmationInProgressRef.current = true;
             setCheckingStatus(true);
             try {
                 const latest = await confirmSimulatedPayment(payment.attempt_id);
@@ -413,6 +448,7 @@ function DepositModal({ open, onClose, onCompleted }) {
                             : "worker.depositModal.pollingError";
                 setPollMessageKey(messageKey);
             } finally {
+                simulatorConfirmationInProgressRef.current = false;
                 setCheckingStatus(false);
             }
             return;
@@ -603,8 +639,11 @@ function DepositModal({ open, onClose, onCompleted }) {
                                         </p>
                                     )}
                                     <p>
-                                        {pending && t(outcomeUnknown
-                                            ? "worker.depositModal.outcomeUnknownDetails"
+                                        {pending && t(payment.simulated &&
+                                            payment.payment_outcome === "UNKNOWN"
+                                            ? "worker.depositModal.simulatorUnknownDetails"
+                                            : outcomeUnknown
+                                                ? "worker.depositModal.outcomeUnknownDetails"
                                             : payment.simulated && payment.payment_outcome === "PENDING"
                                                 ? "worker.depositModal.simulatorPendingDetails"
                                             : promptAccepted
@@ -658,12 +697,16 @@ function DepositModal({ open, onClose, onCompleted }) {
                                                 variant="secondary"
                                                 size="sm"
                                                 loading={checkingStatus}
+                                                disabled={checkingStatus}
                                                 onClick={handleManualStatusCheck}
                                             >
                                                 {t(payment.simulated &&
                                                     payment.payment_outcome === "PENDING"
                                                     ? "worker.depositModal.retrySimulatorConfirmation"
-                                                    : "worker.depositModal.checkStatus")}
+                                                    : payment.simulated &&
+                                                        payment.payment_outcome === "UNKNOWN"
+                                                        ? "worker.depositModal.retrySimulatorVerification"
+                                                        : "worker.depositModal.checkStatus")}
                                             </Button>
                                         </div>
                                     )}

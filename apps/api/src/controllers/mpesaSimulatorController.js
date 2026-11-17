@@ -31,6 +31,75 @@ function writeSanitizedDiagnostic(diagnostic) {
     }
 }
 
+function getPublicFailure(error, statusCode) {
+    if (error?.code === "PAYMENT_ALLOCATION_INVALID") {
+        return {
+            messageKey: "MPESA_ALLOCATION_INVALID",
+            message: "Set valid allocations across active funds totaling 100% before starting a contribution. No payment was started.",
+        };
+    }
+    if (error?.code === "PAYMENT_ACCOUNT_NOT_FOUND") {
+        return {
+            messageKey: "MPESA_ACCOUNT_NOT_AVAILABLE",
+            message: "An active pension account is required to start a payment. No payment was started.",
+        };
+    }
+    if (
+        error?.code === "PAYMENT_CONTRIBUTION_NOT_FOUND" ||
+        error?.code === "PAYMENT_CONTRIBUTION_NOT_ELIGIBLE"
+    ) {
+        return {
+            messageKey: "MPESA_CONTRIBUTION_NOT_ELIGIBLE",
+            message: "This contribution is not eligible for a new payment attempt. Check its status before retrying.",
+        };
+    }
+    if (error?.code === "IDEMPOTENCY_KEY_CONFLICT") {
+        return {
+            messageKey: "MPESA_IDEMPOTENCY_CONFLICT",
+            message: "This request key is already associated with a different payment request. Check payment status before retrying.",
+        };
+    }
+    if (error?.code === "PAYMENT_PROVIDER_CONFIGURATION_ERROR") {
+        return statusCode === 409
+            ? {
+                messageKey: "MPESA_PROVIDER_MISMATCH",
+                message: "The requested payment method does not match the simulator configured on this server. No payment was started.",
+            }
+            : {
+                messageKey: "MPESA_SIMULATOR_UNAVAILABLE",
+                message: "The payment simulator is unavailable in this environment. No payment was started.",
+            };
+    }
+    if (String(error?.code || "").startsWith("PENSION_LEDGER_")) {
+        return {
+            messageKey: "MPESA_LEDGER_NOT_READY",
+            message: "Payments are unavailable until the pension ledger is verified as active. No payment was started.",
+        };
+    }
+    if (statusCode === 409) {
+        return {
+            messageKey: "MPESA_REQUEST_CONFLICT",
+            message: "The payment request conflicts with the current account or attempt state. Check payment status before retrying.",
+        };
+    }
+    return {
+        messageKey: statusCode === 403
+            ? "MPESA_SIMULATOR_FORBIDDEN"
+            : statusCode === 404
+                ? "MPESA_REQUEST_NOT_FOUND"
+                : statusCode === 400
+                    ? "MPESA_INVALID_REQUEST"
+                    : "MPESA_INITIATION_UNAVAILABLE",
+        message: statusCode === 403
+            ? "The payment simulator cannot run in this environment."
+            : statusCode === 404
+                ? "The requested payment or active account could not be found."
+                : statusCode === 400
+                    ? "The payment request is invalid. No payment was started."
+                    : "Payment initiation could not be completed. Check contribution history before retrying.",
+    };
+}
+
 function createMpesaSimulatorController({
     repository = paymentAttemptRepository,
     providerService = simulatorProviderService,
@@ -48,6 +117,16 @@ function createMpesaSimulatorController({
         environmentProvider,
         assertPensionLedgerActive: repository.assertPensionLedgerActive,
     });
+
+    async function assertSimulatorLedgerReady() {
+        if (typeof repository.assertPensionLedgerActive !== "function") {
+            const error = new Error("Pension ledger readiness could not be established.");
+            error.code = "PENSION_LEDGER_READINESS_UNAVAILABLE";
+            error.statusCode = 503;
+            throw error;
+        }
+        await repository.assertPensionLedgerActive();
+    }
 
     function requireWorker(req, res) {
         if (req.user?.role !== "WORKER" || typeof req.user.userId !== "string") {
@@ -103,6 +182,7 @@ function createMpesaSimulatorController({
         const diagnostic = {
             category: diagnosticCategory(error, statusCode),
             code: typeof error?.code === "string" ? error.code : null,
+            statusCode,
             message: safeErrorMessage(error?.message),
             constraint: typeof error?.constraint === "string" ? error.constraint : null,
             table: typeof error?.table === "string" ? error.table : null,
@@ -123,19 +203,16 @@ function createMpesaSimulatorController({
     }
 
     function sendFailure(res, error, req) {
-        const statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : 503;
+        const statusCode = Number.isInteger(error?.statusCode) &&
+            error.statusCode >= 400 && error.statusCode <= 599
+            ? error.statusCode
+            : 503;
         logFailure(error, req, statusCode);
+        const publicFailure = getPublicFailure(error, statusCode);
         return res.status(statusCode).json({
             status: "error",
-            message: statusCode === 404
-                ? "Payment attempt was not found for this account"
-                : statusCode === 409
-                    ? "The configured payment provider does not match this request"
-                    : statusCode === 400
-                        ? "Invalid simulated payment request"
-                        : statusCode === 403
-                            ? "The payment simulator cannot run in this environment"
-                            : "The payment simulator is unavailable",
+            message: publicFailure.message,
+            message_key: publicFailure.messageKey,
         });
     }
 
@@ -191,7 +268,11 @@ function createMpesaSimulatorController({
                 }
                 if (paymentEnabled) {
                     try {
-                        await assertLedgerReady();
+                        if (configuration.provider === "SIMULATOR") {
+                            await assertSimulatorLedgerReady();
+                        } else {
+                            await assertLedgerReady();
+                        }
                     } catch (error) {
                         paymentEnabled = false;
                         messageKey = error?.code === "PENSION_LEDGER_ENFORCEMENT_CONFIG_INVALID"
@@ -228,11 +309,27 @@ function createMpesaSimulatorController({
             if (!requireWorker(req, res)) return undefined;
             try {
                 assertSimulatorRequest(req.body?.provider, environmentProvider());
+                if (typeof repository.getVerifiedWorkerPhone !== "function") {
+                    return res.status(503).json({
+                        status: "error",
+                        message: "A verified profile phone is required to initiate a payment.",
+                        message_key: "MPESA_VERIFIED_PHONE_REQUIRED",
+                    });
+                }
+                const phoneNumber = await repository.getVerifiedWorkerPhone(req.user.userId);
+                if (!phoneNumber) {
+                    return res.status(409).json({
+                        status: "error",
+                        message: "A verified profile phone is required to initiate a payment.",
+                        message_key: "MPESA_VERIFIED_PHONE_REQUIRED",
+                    });
+                }
+                await assertSimulatorLedgerReady();
                 const input = {
                     workerId: req.user.userId,
                     idempotencyKey: req.body?.idempotencyKey,
                     amount: req.body?.amount,
-                    phoneNumber: req.body?.phoneNumber,
+                    phoneNumber,
                 };
                 const pending = req.body?.contributionId
                     ? await orchestrationService.retryWorkerPayment({

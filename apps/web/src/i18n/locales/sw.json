@@ -156,7 +156,7 @@
       "invalidCredentials": "Imeshindikana kukuingiza. Kagua taarifa zako au ujaribu tena baadaye.",
       "genericError": "Imeshindikana kuingia kwa sasa. Tafadhali jaribu tena.",
       "verificationRequestError": "Imeshindikana kutuma ombi kwa sasa. Tafadhali jaribu tena.",
-      "verificationRequestAccepted": "Ikiwa anwani hii inalingana na akaunti inayosubiri uthibitishaji, maelekezo yanaweza kutumwa."
+      "verificationRequestAccepted": "Ikiwa anwani hii inalingana na akaunti au usajili unaostahili, maelekezo ya uthibitishaji yanaweza kutumwa."
     },
     "register": {
       "eyebrow": "Anza hapa",
@@ -205,17 +205,15 @@
       "submitting": "Inafungua akaunti…",
       "create": "Fungua akaunti",
       "verificationInstructions": "Maelekezo ya kuthibitisha barua pepe",
-      "checkInbox": "Ikiwa tunaweza kukamilisha usajili wako, tutatuma maelekezo ya uthibitishaji. Ikiwa hujapokea barua pepe, tafadhali wasiliana na usaidizi.",
+      "checkInbox": "Ikiwa tunaweza kukamilisha usajili wako, maelekezo ya uthibitishaji yanaweza kutumwa. Usipopokea barua pepe, omba nyingine hapa chini.",
       "setPasswordAfterVerification": "Utaweka nenosiri baada ya kufungua kiungo cha uthibitishaji.",
       "continueSignIn": "Endelea kuingia",
       "alreadyRegistered": "Tayari umesajiliwa?",
       "signIn": "Ingia",
-      "deliveryFailed": "Akaunti yako imefunguliwa, lakini barua pepe ya uthibitishaji haikutumwa. Jaribu tena hapa chini; huhitaji kujisajili upya.",
-      "emailSent": "Barua pepe ya uthibitishaji imetumwa. Angalia kikasha pokezi na barua taka. Ikiwa hujaipokea, omba itumwe tena hapa chini.",
       "requesting": "Inatuma ombi…",
       "resend": "Tuma tena barua pepe ya uthibitishaji",
       "verificationRequestError": "Imeshindikana kutuma ombi kwa sasa. Tafadhali jaribu tena.",
-      "verificationRequestAccepted": "Ikiwa anwani hii inalingana na akaunti inayosubiri uthibitishaji, maelekezo yanaweza kutumwa."
+      "verificationRequestAccepted": "Ikiwa anwani hii inalingana na akaunti au usajili unaostahili, maelekezo ya uthibitishaji yanaweza kutumwa."
     },
     "forgot": {
       "eyebrow": "Urejeshaji wa akaunti",
@@ -250,6 +248,7 @@
       "submitting": "Inakamilisha usajili…",
       "completeRegistration": "Thibitisha barua pepe na ufungue akaunti",
       "success": "Anwani ya barua pepe imethibitishwa.",
+      "staffSuccess": "Anwani yako ya barua pepe imethibitishwa na akaunti yako imewezeshwa. Ingia kwa kutumia nenosiri la muda lililotumwa kwa SMS, kisha libadilishe utakapoombwa. Uthibitishaji wa simu ni hatua tofauti.",
       "returnSignIn": "Rudi kuingia"
     },
     "reset": {
@@ -428,6 +427,7 @@
       "invalidAmount": "Weka kiasi kizima cha shilingi za Kenya kilicho zaidi ya sifuri.",
       "runSimulation": "Endesha malipo ya kuigiza",
       "retrySimulatorConfirmation": "Jaribu tena uthibitishaji wa kuigiza",
+      "retrySimulatorVerification": "Jaribu tena kuthibitisha malipo ya kuigiza",
       "bankMethod": "Uhamisho wa benki / Paybill",
       "awaitingProvider": "Inasubiri uthibitisho wa mtoa huduma...",
       "awaitingPin": "Inasubiri uweke PIN...",
@@ -459,11 +459,21 @@
       "promptConfirmationPending": "M-Pesa bado haijathibitisha kama ombi limetumwa. Malipo yako bado yanasubiri; usijaribu tena kwa sasa.",
       "sendingPrompt": "Ombi la STK Push linatumwa kwenye simu yako.",
       "startPaymentError": "Imeshindikana kuanzisha malipo ya M-Pesa.",
+      "allocationInvalid": "Mgao wako kwenye hazina zinazotumika lazima ufikie 100.00% kamili. Sasisha Mgao Wangu wa Hazina kabla ya kujaribu tena. Hakuna malipo yaliyoanzishwa.",
+      "accountUnavailable": "Akaunti hai ya pensheni inahitajika kuanzisha malipo. Hakuna malipo yaliyoanzishwa.",
+      "contributionNotEligible": "Mchango huu haustahili jaribio jipya la malipo. Kagua hali yake kabla ya kujaribu tena.",
+      "idempotencyConflict": "Ufunguo huu wa ombi tayari unahusishwa na ombi tofauti la malipo. Kagua hali ya malipo kabla ya kujaribu tena.",
+      "providerMismatch": "Njia ya malipo iliyoombwa hailingani na simulator iliyosanidiwa kwenye seva hii. Hakuna malipo yaliyoanzishwa.",
+      "requestConflict": "Ombi la malipo linakinzana na hali ya sasa ya akaunti au jaribio. Kagua hali ya malipo kabla ya kujaribu tena.",
+      "requestNotFound": "Malipo yaliyoombwa au akaunti hai haikupatikana.",
+      "invalidRequest": "Ombi la malipo si sahihi. Hakuna malipo yaliyoanzishwa.",
+      "initiationUnavailable": "Ombi la kuanzisha malipo halikukamilika. Kagua historia ya michango kabla ya kujaribu tena.",
       "promptAcceptedHeading": "Ombi la malipo limekubaliwa",
       "outcomeUnknownHeading": "Hali ya malipo haijathibitishwa",
       "simulatorPendingHeading": "Malipo ya kuigiza yanasubiri",
       "promptAcceptedDetails": "Mtoa huduma amekubali ombi, lakini hii haimaanishi kuwa malipo yamefaulu. Kamilisha hatua ya PIN na usubiri uthibitisho. Salio lako halijabadilika.",
       "outcomeUnknownDetails": "Hatukuweza kuthibitisha matokeo ya malipo. Usitume ombi lingine. Kagua hali hapa au historia ya michango; salio hubadilika baada ya malipo kukamilishwa.",
+      "simulatorUnknownDetails": "Uigaji bado haujatoa matokeo ya mwisho. Jaribio hili lililopo bado linathibitishwa. Usianzishe malipo mengine. Jaribu tena uthibitishaji hapa; salio halitaongezwa hadi mafanikio ya kuigiza yathibitishwe na kukamilishwa.",
       "simulatorPendingDetails": "Uigaji uliosanidiwa bado haujatoa matokeo ya mwisho. Hakuna salio lililoongezwa. Tumia kitufe cha kujaribu tena kukagua; hakuna malipo halisi yanayosubiri.",
       "unknownSubmissionDetails": "Hatukuweza kuthibitisha kama ombi lako lilifika kwa huduma ya malipo, na hatukupokea nambari ya kulifuatilia. Usilitume tena kwa sasa. Kagua hali yake kwa kutumia ufunguo wa ombi uliohifadhiwa.",
       "statusUpdating": "Rekodi za malipo na mchango bado hazilingani. Hali ya mafanikio haitaonyeshwa hadi uthibitisho ukamilike.",
@@ -861,7 +871,7 @@
       },
       "kycAccess": {
         "pending": "Ukaguzi wako wa KYC unasubiri. Salio, michango, mifuko na uondoaji wa fedha havipatikani hadi uthibitishaji ukamilike.",
-        "rejected": "KYC yako imekataliwa. Salio, michango, mifuko na uondoaji wa fedha havipatikani hadi akaunti yako ithibitishwe."
+        "rejected": "KYC yako imekataliwa. Kagua hali yako hapa na uwasiliane na msimamizi wa hazina yako kuhusu kurekebisha na kuwasilisha upya taarifa za utambulisho. Salio, michango, mifuko na uondoaji wa fedha havipatikani hadi uthibitishaji ukamilike."
       },
       "accountRole": "Jukumu la akaunti",
       "accountStatus": "Hali ya akaunti",
@@ -1396,6 +1406,7 @@
     "emailUnverified": "Barua pepe iliyosajiliwa haijathibitishwa",
     "emailPreferenceDisabled": "Barua pepe imezimwa katika mapendeleo ya arifa ya mtumiaji huyu",
     "emailProviderDisabled": "Utumaji wa barua pepe umezimwa katika mipangilio ya mfumo",
+    "developmentRecipientNotAllowed": "Mpokeaji huyu hajaruhusiwa kwenye orodha ya wapokeaji wa mazingira ya maendeleo",
     "pushUnavailable": "Hakuna usajili wa arifa ya programu",
     "providerConfigurationMissing": "Mipangilio ya mtoa huduma haipo: {{variables}}",
     "providerConfigurationInvalid": "Mipangilio ya mtoa huduma si sahihi: {{variables}}",

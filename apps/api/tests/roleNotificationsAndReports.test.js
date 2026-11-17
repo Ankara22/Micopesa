@@ -136,22 +136,25 @@ function createRolePool({
     };
 }
 
-test("optional notifications respect disabled channel preferences", async () => {
+test("optional notifications respect disabled channel preferences for administrators", async () => {
     const { pool, state } = createRolePool({ smsEnabled: false, emailEnabled: false });
     const repository = createNotificationRepository(pool);
 
-    await assert.rejects(() => repository.queueRoleNotifications({
-        senderId: "admin-1",
-        senderRole: "ADMIN",
-        userId: "recipient-1",
-        channels: ["SMS"],
-        message: "General announcement",
-        requestId: REQUEST_ID,
-        category: "ANNOUNCEMENT",
-    }), {
-        code: "NOTIFICATION_PREFERENCE_DISABLED",
-        statusCode: 422,
-    });
+    for (const channel of ["SMS", "EMAIL"]) {
+        await assert.rejects(() => repository.queueRoleNotifications({
+            senderId: "admin-1",
+            senderRole: "ADMIN",
+            userId: "recipient-1",
+            channels: [channel],
+            message: "General announcement",
+            subject: channel === "EMAIL" ? "General announcement" : null,
+            requestId: REQUEST_ID,
+            category: "ANNOUNCEMENT",
+        }), {
+            code: "NOTIFICATION_PREFERENCE_DISABLED",
+            statusCode: 422,
+        });
+    }
 
     assert.equal(state.notifications.length, 0);
 });
@@ -324,6 +327,40 @@ test("admin announcements queue for multiple recipients with recipient-scoped id
         ...input,
         userIds: ["recipient-1"],
     }), { code: "NOTIFICATION_IDEMPOTENCY_CONFLICT", statusCode: 409 });
+});
+
+test("optional admin notifications skip disabled channels for multiple recipients", async () => {
+    const { pool, state } = createRolePool({
+        scopeFundId: null,
+        recipientIds: ["recipient-1", "recipient-2"],
+        smsEnabled: false,
+        emailEnabled: false,
+    });
+    const repository = createNotificationRepository(pool);
+
+    const results = await repository.queueRoleNotifications({
+        senderId: "admin-1",
+        senderRole: "ADMIN",
+        userIds: ["recipient-1", "recipient-2"],
+        category: "ANNOUNCEMENT",
+        channels: ["SMS", "EMAIL"],
+        message: "Service update",
+        subject: "Service update",
+        requestId: REQUEST_ID,
+    });
+
+    assert.deepEqual(
+        results.map(({ recipient_user_id, notification_type, delivery_status, last_error_code }) =>
+            [recipient_user_id, notification_type, delivery_status, last_error_code]
+        ).sort(),
+        [
+            ["recipient-1", "EMAIL", "SKIPPED", "NOTIFICATION_PREFERENCE_DISABLED"],
+            ["recipient-1", "SMS", "SKIPPED", "NOTIFICATION_PREFERENCE_DISABLED"],
+            ["recipient-2", "EMAIL", "SKIPPED", "NOTIFICATION_PREFERENCE_DISABLED"],
+            ["recipient-2", "SMS", "SKIPPED", "NOTIFICATION_PREFERENCE_DISABLED"],
+        ]
+    );
+    assert.equal(state.notifications.length, 0);
 });
 
 test("recipient search and audit views are scoped and never return unmasked contacts", async () => {
@@ -559,7 +596,8 @@ test("report generation rejects a fund outside the caller scope before querying 
         const query = calls.find(([sql]) => sql.includes("WITH report_data AS"));
         assert.match(query[0], /mpesa_payment_verifications/);
         assert.match(query[0], /bool_or\(verification_status = 'VERIFIED_SUCCESS'\)/);
-        assert.match(query[0], /CASE a\.provider_mode/);
+        assert.match(query[0], /CASE simulator_initiation\.provider_mode/);
+        assert.doesNotMatch(query[0], /a\.provider_mode|v\.simulator_outcome/);
         assert.doesNotMatch(query[0], /checkout_request_id LIKE 'SIM%'/);
         assert.match(query[0], /pension_account_movements/);
         assert.match(query[0], /transaction_status::text = \$9/);
@@ -728,14 +766,19 @@ test("regulator recipient lookup returns only recipients in active assigned fund
         async connect() {
             throw new Error("Not expected");
         },
-    });
+    }, { environment: { NODE_ENV: "production" } });
 
     const assigned = await repository.listRoleRecipients({
         senderId: "regulator-1",
         senderRole: "REGULATOR",
         search: "Worker",
     });
-    assert.deepEqual(assigned, [{ user_id: "worker-1", scope_fund_id: "fund-1" }]);
+    assert.deepEqual(assigned, [{
+        user_id: "worker-1",
+        scope_fund_id: "fund-1",
+        sms_recipient_allowed: true,
+        email_recipient_allowed: true,
+    }]);
     assert.equal(assigned.some(({ user_id }) => user_id === "worker-2"), false);
     assert.match(queries[0].sql, /FROM regulator_fund_assignments/);
     assert.match(queries[0].sql, /regulator_user_id = \$1 AND active = TRUE/);
@@ -763,7 +806,7 @@ test("changing a supplied fund identifier cannot bypass regulator recipient scop
         async connect() {
             throw new Error("Not expected");
         },
-    });
+    }, { environment: { NODE_ENV: "production" } });
 
     const result = await repository.listRoleRecipients({
         senderId: "regulator-1",
@@ -771,7 +814,12 @@ test("changing a supplied fund identifier cannot bypass regulator recipient scop
         fundId: "unassigned-fund",
     });
 
-    assert.deepEqual(result, [{ user_id: "assigned-worker", scope_fund_id: "fund-1" }]);
+    assert.deepEqual(result, [{
+        user_id: "assigned-worker",
+        scope_fund_id: "fund-1",
+        sms_recipient_allowed: true,
+        email_recipient_allowed: true,
+    }]);
     assert.deepEqual(queries[0].params, ["regulator-1", null]);
     assert.equal(JSON.stringify(queries[0].params).includes("unassigned-fund"), false);
 });

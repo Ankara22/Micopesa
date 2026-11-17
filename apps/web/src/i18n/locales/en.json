@@ -156,7 +156,7 @@
       "invalidCredentials": "We couldn't sign you in. Check your details or try again later.",
       "genericError": "Unable to sign in right now. Please try again.",
       "verificationRequestError": "Unable to submit the request right now. Please try again.",
-      "verificationRequestAccepted": "If an unverified email-login account matches this address, verification instructions can be sent."
+      "verificationRequestAccepted": "If an eligible account or registration matches this address, verification instructions can be sent."
     },
     "register": {
       "eyebrow": "Get started",
@@ -205,17 +205,15 @@
       "submitting": "Creating account…",
       "create": "Create account",
       "verificationInstructions": "Email verification instructions",
-      "checkInbox": "If we can complete your registration, verification instructions will be sent. If you did not receive an email, please contact support.",
+      "checkInbox": "If we can complete your registration, verification instructions may be sent. If you do not receive an email, request another below.",
       "setPasswordAfterVerification": "You will choose your password after opening the verification link.",
       "continueSignIn": "Continue to sign in",
       "alreadyRegistered": "Already registered?",
       "signIn": "Sign in",
-      "deliveryFailed": "Your account was created, but the verification email was not sent. Retry below; you do not need to register again.",
-      "emailSent": "Verification email sent. Check your inbox and spam folder. If it does not arrive, request another message below.",
       "requesting": "Requesting…",
       "resend": "Resend verification email",
       "verificationRequestError": "Unable to submit the request right now. Please try again.",
-      "verificationRequestAccepted": "If an unverified email-login account matches this address, verification instructions can be sent."
+      "verificationRequestAccepted": "If an eligible account or registration matches this address, verification instructions can be sent."
     },
     "forgot": {
       "eyebrow": "Account recovery",
@@ -250,6 +248,7 @@
       "submitting": "Completing registration…",
       "completeRegistration": "Verify email and create account",
       "success": "Email address verified successfully.",
+      "staffSuccess": "Your email address is verified and your account is active. Sign in with the temporary password sent by SMS, then change it when prompted. Phone verification remains separate.",
       "returnSignIn": "Return to sign in"
     },
     "reset": {
@@ -428,6 +427,7 @@
       "invalidAmount": "Enter a positive whole amount in Kenyan shillings.",
       "runSimulation": "Run simulated payment",
       "retrySimulatorConfirmation": "Retry simulated confirmation",
+      "retrySimulatorVerification": "Retry simulated verification",
       "bankMethod": "Bank transfer / Paybill",
       "awaitingProvider": "Awaiting provider confirmation...",
       "awaitingPin": "Awaiting PIN entry...",
@@ -459,11 +459,21 @@
       "promptConfirmationPending": "M-Pesa has not confirmed whether the prompt was sent. Your deposit remains pending; do not retry yet.",
       "sendingPrompt": "Sending STK Push prompt to your phone.",
       "startPaymentError": "Could not start the M-Pesa payment.",
+      "allocationInvalid": "Your active fund allocations must total exactly 100.00%. Update My Funds & Allocation before retrying. No payment was started.",
+      "accountUnavailable": "An active pension account is required to start a payment. No payment was started.",
+      "contributionNotEligible": "This contribution is not eligible for a new payment attempt. Check its status before retrying.",
+      "idempotencyConflict": "This request key is already associated with a different payment request. Check payment status before retrying.",
+      "providerMismatch": "The requested payment method does not match the simulator configured on this server. No payment was started.",
+      "requestConflict": "The payment request conflicts with the current account or attempt state. Check payment status before retrying.",
+      "requestNotFound": "The requested payment or active account could not be found.",
+      "invalidRequest": "The payment request is invalid. No payment was started.",
+      "initiationUnavailable": "Payment initiation could not be completed. Check contribution history before retrying.",
       "promptAcceptedHeading": "Payment request accepted",
       "outcomeUnknownHeading": "Payment confirmation unknown",
       "simulatorPendingHeading": "Simulated payment pending",
       "promptAcceptedDetails": "The provider accepted the request, but this does not mean the payment succeeded. Complete the PIN prompt and wait for confirmation. Your balance has not changed.",
       "outcomeUnknownDetails": "We could not confirm the payment outcome. Do not send another request. Check the status here or review your contribution history; your balance changes only after settlement.",
+      "simulatorUnknownDetails": "The simulator has not produced a final outcome. This existing attempt is still being verified. Do not start another deposit. Retry verification here; no balance is credited unless simulated SUCCESS is verified and settlement completes.",
       "simulatorPendingDetails": "The configured simulator has not produced a final outcome. No balance has been credited. Use the retry button to re-check; no real payment is pending.",
       "unknownSubmissionDetails": "We could not confirm whether your request reached the payment service, and no status reference was returned. Do not submit it again yet. Check its status using the saved request key.",
       "statusUpdating": "The payment and contribution records do not yet agree. No success is shown while confirmation is pending.",
@@ -861,7 +871,7 @@
       },
       "kycAccess": {
         "pending": "Your KYC review is pending. Balances, contributions, funds and withdrawals are unavailable until verification is complete.",
-        "rejected": "Your KYC was rejected. Balances, contributions, funds and withdrawals remain unavailable until your account is verified."
+        "rejected": "Your KYC was rejected. Review your status here and contact your fund administrator about correcting and resubmitting your identity information. Balances, contributions, funds and withdrawals remain unavailable until verification is complete."
       },
       "accountRole": "Account role",
       "accountStatus": "Account status",
@@ -1396,6 +1406,7 @@
     "emailUnverified": "Registered email address is not verified",
     "emailPreferenceDisabled": "Email is disabled in this user's notification preferences",
     "emailProviderDisabled": "Email delivery is disabled by system configuration",
+    "developmentRecipientNotAllowed": "This recipient is not authorized by the development delivery allowlist",
     "pushUnavailable": "No registered push subscription",
     "providerConfigurationMissing": "Provider configuration is missing: {{variables}}",
     "providerConfigurationInvalid": "Provider configuration is invalid: {{variables}}",

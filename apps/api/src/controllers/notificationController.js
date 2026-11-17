@@ -57,6 +57,11 @@ function createNotificationController({
     }
 
     function withDeliveryDiagnostics(recipient, includeConfigurationDetails = false) {
+        const {
+            sms_recipient_allowed,
+            email_recipient_allowed,
+            ...publicRecipient
+        } = recipient;
         const availability = getNotificationChannelAvailabilityMap(environment);
         const diagnostics = {
             sms_delivery_enabled: availability.sms.enabled,
@@ -67,9 +72,11 @@ function createNotificationController({
             diagnostics.sms_delivery_diagnostic = availability.sms;
             diagnostics.email_delivery_diagnostic = availability.email;
             diagnostics.push_delivery_diagnostic = availability.push;
+            diagnostics.sms_recipient_allowed = sms_recipient_allowed;
+            diagnostics.email_recipient_allowed = email_recipient_allowed;
         }
         return {
-            ...recipient,
+            ...publicRecipient,
             ...diagnostics,
         };
     }

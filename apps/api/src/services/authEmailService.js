@@ -42,11 +42,17 @@ function getFrontendBaseUrl() {
         error.invalidVariables = ["FRONTEND_BASE_URL"];
         throw error;
     }
+    const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    const isLocalhost = hostname === "localhost" ||
+        hostname.endsWith(".localhost") ||
+        hostname === "::1" ||
+        /^127(?:\.\d{1,3}){3}$/.test(hostname);
     if (
         (process.env.NODE_ENV === "production" && url.protocol !== "https:") ||
         !["http:", "https:"].includes(url.protocol) ||
         url.username ||
-        url.password
+        url.password ||
+        (process.env.NODE_ENV === "production" && isLocalhost)
     ) {
         const error = new Error("Frontend URL configuration must be a trusted HTTP(S) base URL");
         error.code = "EMAIL_LINK_CONFIGURATION_INVALID";
@@ -153,6 +159,27 @@ function textToHtml(text) {
     return `<p>${escaped.replace(/\r?\n/g, "<br>")}</p>`;
 }
 
+function actionEmailHtml({ heading, message, link, actionLabel, footer }) {
+    const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (character) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        "\"": "&quot;",
+        "'": "&#39;",
+    })[character]);
+    return [
+        "<!doctype html>",
+        '<html lang="en"><body style="margin:0;padding:24px;background:#f4f7f6;font-family:Arial,sans-serif;color:#173b35">',
+        '<main style="max-width:560px;margin:0 auto;padding:24px;background:#fff;border-radius:12px">',
+        '<p style="margin:0 0 16px;color:#087f5b;font-weight:bold">MicoPesa</p>',
+        `<h1 style="font-size:20px;line-height:1.4">${escapeHtml(heading)}</h1>`,
+        `<p style="font-size:16px;line-height:1.6">${escapeHtml(message)}</p>`,
+        `<p><a href="${escapeHtml(link)}">${escapeHtml(actionLabel)}</a></p>`,
+        `<p style="font-size:14px;line-height:1.6">${escapeHtml(footer)}</p>`,
+        "</main></body></html>",
+    ].join("");
+}
+
 async function sendEmail({ to, subject, text, html, purpose = "GENERAL" }) {
     if (
         typeof to !== "string" ||
@@ -214,9 +241,12 @@ async function sendEmail({ to, subject, text, html, purpose = "GENERAL" }) {
     });
 }
 
-async function issueEmailToken({ userId, email, purpose }) {
+async function issueEmailToken({ userId, email, purpose, invitation = false }) {
     if (!Object.hasOwn(TOKEN_EXPIRY_MINUTES, purpose)) {
         throw new Error("Unsupported email token purpose");
+    }
+    if (invitation && purpose !== "EMAIL_VERIFICATION") {
+        throw new Error("Staff invitations require an email-verification token");
     }
     if (process.env.MICOPESA_TEST_MODE === "true" && !isCaptureModeRequested()) {
         throw Object.assign(new Error("Test mode requires local email capture."), {
@@ -238,6 +268,19 @@ async function issueEmailToken({ userId, email, purpose }) {
     const link = new URL(verification ? "/verify-email" : "/reset-password", frontendBaseUrl);
     link.searchParams.set("token", token);
     if (verification) link.searchParams.set("flow", "email-verification");
+    const heading = invitation
+        ? "Complete your MicoPesa staff onboarding"
+        : verification ? "Verify your MicoPesa email" : "Reset your MicoPesa password";
+    const actionLabel = verification ? "Verify email address" : "Reset password";
+    const intro = invitation
+        ? "An administrator created a MicoPesa staff account for you. Verify this email address to complete onboarding. Your temporary password was submitted to the SMS provider separately; delivery to your phone is not confirmed. You will be asked to change it at first sign-in."
+        : verification
+            ? "Verify your email address to complete your MicoPesa account setup."
+            : "Use the link below to reset your MicoPesa password.";
+    const footer = verification
+        ? "This link expires in 30 minutes. If you did not request this, you can ignore this email."
+        : "This link expires in 30 minutes.";
+    const text = `${intro}\n\n${actionLabel}: ${link.href}\n\n${footer}`;
     await pool.query(
         `UPDATE auth_tokens SET consumed_at = now()
          WHERE user_id = $1 AND purpose = $2 AND consumed_at IS NULL`,
@@ -250,11 +293,17 @@ async function issueEmailToken({ userId, email, purpose }) {
     );
     return sendEmail({
         to: email,
-        subject: verification ? "Verify your MicoPesa email" : "Reset your MicoPesa password",
+        subject: invitation ? "Complete your MicoPesa staff onboarding"
+            : verification ? "Verify your MicoPesa email" : "Reset your MicoPesa password",
         purpose,
-        text: verification
-            ? `Verify your email address using this link (expires in 30 minutes): ${link.href}`
-            : `Reset your password using this link (expires in 30 minutes): ${link.href}`,
+        text,
+        html: actionEmailHtml({
+            heading,
+            message: intro,
+            link: link.href,
+            actionLabel,
+            footer,
+        }),
     });
 }
 
@@ -277,12 +326,60 @@ async function sendPendingRegistrationEmail({ email, token }) {
     const link = new URL("/verify-email", frontendBaseUrl);
     link.searchParams.set("token", token);
     link.searchParams.set("flow", "registration");
+    const message = "Complete your MicoPesa registration by verifying your email address.";
+    const footer = "This link expires in 30 minutes. If you did not request this, you can ignore this email.";
     return sendEmail({
         to: email,
         subject: "Complete your MicoPesa registration",
         purpose: "REGISTRATION_VERIFICATION",
-        text: `Complete your MicoPesa registration using this link (expires in 30 minutes):\n${link.href}\n\nIf you did not request this, ignore this email.`,
+        text: `${message}\n\nVerify email address: ${link.href}\n\n${footer}`,
+        html: actionEmailHtml({
+            heading: "Complete your MicoPesa registration",
+            message,
+            link: link.href,
+            actionLabel: "Verify email address",
+            footer,
+        }),
     });
+}
+
+async function resendPendingRegistrationEmail({ email }) {
+    const token = crypto.randomBytes(32).toString("base64url");
+    const tokenHash = hashOpaque(token);
+    const client = await pool.connect();
+    let transactionStarted = false;
+    try {
+        await client.query("BEGIN");
+        transactionStarted = true;
+        const pending = await client.query(
+            `SELECT pending_registration_id
+             FROM pending_registrations
+             WHERE lower(email) = lower($1) AND expires_at > now()
+             FOR UPDATE`,
+            [email]
+        );
+        if (!pending.rows[0]) {
+            await client.query("ROLLBACK");
+            transactionStarted = false;
+            return { accepted: false };
+        }
+        await client.query(
+            `UPDATE pending_registrations
+             SET token_hash = $1, expires_at = now() + interval '30 minutes'
+             WHERE pending_registration_id = $2`,
+            [tokenHash, pending.rows[0].pending_registration_id]
+        );
+        await client.query("COMMIT");
+        transactionStarted = false;
+    } catch (error) {
+        if (transactionStarted) await client.query("ROLLBACK").catch(() => {});
+        throw error;
+    } finally {
+        client.release();
+    }
+
+    await module.exports.sendPendingRegistrationEmail({ email, token });
+    return { accepted: true };
 }
 
 async function enforceRateLimit({ scope, action, key, limit, windowMinutes = 60 }) {
@@ -332,10 +429,12 @@ module.exports = {
     enforceRequestLimits,
     getEmailConfiguration,
     getEmailProvider,
+    getFrontendBaseUrl,
     hashOpaque,
     hashRateKey,
     issueEmailToken,
     logEmailDeliveryFailure,
+    resendPendingRegistrationEmail,
     safeSmtpMessage,
     sendPendingRegistrationEmail,
     sendEmail,

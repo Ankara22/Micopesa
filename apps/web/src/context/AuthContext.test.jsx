@@ -35,6 +35,7 @@ function SessionProbe() {
     } = useAuth();
     const [profileResult, setProfileResult] = React.useState("");
     const [loginOutcome, setLoginOutcome] = React.useState("");
+    const [registerOutcome, setRegisterOutcome] = React.useState("");
     const [logoutOutcome, setLogoutOutcome] = React.useState("");
 
     async function attemptLogin(identifier) {
@@ -56,6 +57,18 @@ function SessionProbe() {
         setLogoutOutcome(String(await logout()));
     }
 
+    async function registerWorker() {
+        const result = await register(
+            "New Worker",
+            "new@example.com",
+            "07000000001",
+            "OTHER_INFORMAL_WORKER",
+            "12345678",
+            "1990-04-15",
+        );
+        setRegisterOutcome(String(result.success));
+    }
+
     return (
         <div>
             <span data-testid="user-id">{user?.user_id || "signed-out"}</span>
@@ -69,19 +82,11 @@ function SessionProbe() {
             <span>Login session: {loginSessionId}</span>
             <span data-testid="profile-result">{profileResult}</span>
             <span data-testid="login-outcome">{loginOutcome}</span>
+            <span data-testid="register-outcome">{registerOutcome}</span>
             <span data-testid="logout-outcome">{logoutOutcome}</span>
             <button onClick={() => attemptLogin("account-a")}>Sign in as A</button>
             <button onClick={() => attemptLogin("account-b")}>Sign in as B</button>
-            <button onClick={() => register(
-                "New Worker",
-                "new@example.com",
-                "07000000001",
-                "OTHER_INFORMAL_WORKER",
-                "12345678",
-                "1990-04-15",
-            )}>
-                Register new worker
-            </button>
+            <button onClick={registerWorker}>Register new worker</button>
             <button onClick={loadProfile}>Load profile</button>
             <button onClick={signOut}>Sign out</button>
         </div>
@@ -154,7 +159,10 @@ describe("AuthContext session-bound profile synchronization", () => {
             if (url === "/api/auth/logout") return Promise.resolve({});
             if (url === "/api/auth/register") {
                 return Promise.resolve({
-                    data: { data: { user: { user_id: "new-user", role: "WORKER", email_verified: false } } },
+                    data: {
+                        status: "accepted",
+                        data: { user: { user_id: "new-user", role: "WORKER", email_verified: false } },
+                    },
                 });
             }
             const isAccountB = payload.identifier === "account-b";
@@ -181,7 +189,26 @@ describe("AuthContext session-bound profile synchronization", () => {
             date_of_birth: "1990-04-15",
         }));
         expect(screen.getByTestId("user-id")).toHaveTextContent("signed-out");
+        expect(screen.getByTestId("register-outcome")).toHaveTextContent("true");
         expect(localStorage.getItem("micopesa_token")).toBeNull();
+    });
+
+    it("does not expose registration email delivery outcomes", async () => {
+        apiMocks.post.mockResolvedValueOnce({
+            data: {
+                status: "accepted",
+                message: "If we can complete your registration, we will send verification instructions to the provided email address.",
+            },
+        });
+        renderProbe();
+        fireEvent.click(screen.getByRole("button", { name: "Register new worker" }));
+
+        await waitFor(() => {
+            expect(screen.getByTestId("register-outcome")).toHaveTextContent(
+                "true",
+            );
+        });
+        expect(screen.getByTestId("user-id")).toHaveTextContent("signed-out");
     });
 
     it("sends the identifier/password contract and preserves server failure status", async () => {

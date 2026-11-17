@@ -190,13 +190,21 @@ function createMpesaPaymentVerificationService({
     async function settleEvidence(attemptId, verification) {
         if (
             !verification?.verification_id ||
-            !["VERIFIED_SUCCESS", "VERIFIED_FAILURE"].includes(verification.verification_status)
+            (!["VERIFIED_SUCCESS", "VERIFIED_FAILURE"].includes(verification.verification_status) &&
+                verification.simulator_outcome !== "SUCCESS")
         ) {
             return null;
         }
         return atPaymentStage("payment_settlement", () => settlementService.settleVerifiedPayment({
             attemptId,
             verificationId: verification.verification_id,
+            ...(verification.simulator_outcome === "SUCCESS" ? {
+                simulatorConfirmation: {
+                    outcome: "SUCCESS",
+                    providerResultCode: verification.provider_result_code,
+                    providerResultDescription: verification.provider_result_description,
+                },
+            } : {}),
         }));
     }
 
@@ -210,12 +218,20 @@ function createMpesaPaymentVerificationService({
     async function verifyClaim(claim, callback = null, selectedProviderService = providerService) {
         const isSimulatorConfirmation = selectedProviderService === simulatorProviderService;
         if (!claim.claimed) {
+            if (claim.verification?.verification_status === "PROCESSING") {
+                return {
+                    duplicate: true,
+                    verification_id: claim.verification.verification_id ?? null,
+                    verification_status: "PROCESSING",
+                    settlement: null,
+                };
+            }
             if (
                 callback?.callbackId &&
                 claim.verification?.verification_id &&
-                ["VERIFIED_SUCCESS", "VERIFIED_FAILURE"].includes(
+                (["VERIFIED_SUCCESS", "VERIFIED_FAILURE"].includes(
                     claim.verification.verification_status
-                )
+                ) || claim.verification.simulator_outcome === "SUCCESS")
             ) {
                 await callbackInboxRepository.markVerified(
                     callback.callbackId,
@@ -287,15 +303,34 @@ function createMpesaPaymentVerificationService({
         }
 
         const verificationStatus = evaluateVerification(claim.attempt, callback, providerResult);
+        if (
+            isSimulatorConfirmation &&
+            verificationStatus === "VERIFIED_SUCCESS" &&
+            providerResult.resultCode === "0"
+        ) {
+            const evidence = {
+                verification_id: claim.verification.verification_id,
+                verification_status: "PROCESSING",
+                provider_result_code: providerResult.resultCode,
+                provider_result_description: providerResult.resultDescription,
+                simulator_outcome: "SUCCESS",
+            };
+            const settlement = await settleEvidence(claim.attempt.attempt_id, evidence);
+            return {
+                duplicate: false,
+                verification_id: evidence.verification_id,
+                verification_status: settlement?.verification_status || "UNVERIFIED",
+                outcome: "SUCCESS",
+                settlement,
+            };
+        }
         const evidence = await completeVerification({
             verificationId: claim.verification.verification_id,
             verificationStatus,
             providerResultCode: providerResult.resultCode,
             providerResultDescription: providerResult.resultDescription,
             ...(isSimulatorConfirmation ? {
-                simulatorOutcome: verificationStatus === "VERIFIED_SUCCESS"
-                    ? "SUCCESS"
-                    : verificationStatus === "VERIFIED_FAILURE"
+                simulatorOutcome: verificationStatus === "VERIFIED_FAILURE"
                         ? "FAILED"
                         : "UNKNOWN",
             } : {}),
@@ -346,7 +381,11 @@ function createMpesaPaymentVerificationService({
                 verification_status: "UNVERIFIED",
             };
         }
-        if (attempt.provider_mode !== "DARAJA") {
+        if (
+            attempt.provider_mode === "SIMULATOR" ||
+            attempt.checkout_request_id?.startsWith("SIM") ||
+            attempt.merchant_request_id?.startsWith("SIMM")
+        ) {
             await callbackInboxRepository.markRejected(
                 storedCallback.callback_id,
                 "PROVIDER_MODE_UNRESOLVED_OR_SIMULATOR"

@@ -278,6 +278,86 @@ describe("DepositModal", () => {
         expect(await screen.findByText("Deposit successful.")).toBeInTheDocument();
     });
 
+    it("reconciles an unknown simulator attempt without creating another attempt", async () => {
+        const unknownPayment = {
+            attempt_id: "attempt-sim-unknown",
+            transaction_id: "transaction-sim-unknown",
+            amount: 2500,
+            attempt_status: "OUTCOME_UNKNOWN",
+            transaction_status: "PENDING",
+            contribution_status: "PENDING",
+            settlement_confirmed: false,
+            settled_at: null,
+            receipt_reference: null,
+            payment_provider: "SIMULATED",
+            payment_outcome: "UNKNOWN",
+        };
+        let resolveConfirmation;
+        getPaymentProvider.mockResolvedValue({
+            provider: "SIMULATOR",
+            environment: "simulator",
+            payment_enabled: true,
+            message_key: "MPESA_PAYMENTS_AVAILABLE",
+        });
+        initiateStkPush.mockResolvedValue({
+            ...unknownPayment,
+            simulated: true,
+            no_real_money_transferred: true,
+        });
+        getStkPushStatus.mockResolvedValue(unknownPayment);
+        confirmSimulatedPayment.mockImplementation(() => new Promise((resolve) => {
+            resolveConfirmation = resolve;
+        }));
+
+        render(
+            <ToastProvider>
+                <DepositModal open onClose={vi.fn()} />
+            </ToastProvider>,
+        );
+
+        fireEvent.change(await screen.findByLabelText("Amount (KES)"), {
+            target: { value: "2500" },
+        });
+        fireEvent.click(screen.getByLabelText("I confirm this is my verified M-Pesa phone number."));
+        fireEvent.click(screen.getByRole("button", { name: "Run simulated payment" }));
+
+        expect(await screen.findByText("Payment confirmation unknown")).toBeInTheDocument();
+        expect(await screen.findByText(
+            "The simulator has not produced a final outcome. This existing attempt is still being verified. Do not start another deposit. Retry verification here; no balance is credited unless simulated SUCCESS is verified and settlement completes.",
+        )).toBeInTheDocument();
+        const storedIdempotencyKey = window.sessionStorage.getItem(
+            "micopesa.mpesa.paymentIdempotencyKey",
+        );
+        expect(storedIdempotencyKey).toBeTruthy();
+
+        const retryButton = screen.getByRole("button", { name: "Retry simulated verification" });
+        await waitFor(() => expect(retryButton).not.toBeDisabled());
+        fireEvent.click(retryButton);
+        await waitFor(() => {
+            expect(confirmSimulatedPayment).toHaveBeenCalledTimes(1);
+        });
+        expect(confirmSimulatedPayment).toHaveBeenCalledWith("attempt-sim-unknown");
+        expect(retryButton).toBeDisabled();
+        fireEvent.click(retryButton);
+        expect(confirmSimulatedPayment).toHaveBeenCalledTimes(1);
+        expect(initiateStkPush).toHaveBeenCalledTimes(1);
+        expect(getStkPushStatusByIdempotencyKey).not.toHaveBeenCalled();
+
+        resolveConfirmation({
+            ...unknownPayment,
+            simulated: true,
+            no_real_money_transferred: true,
+            verification_status: "UNVERIFIED",
+        });
+        await waitFor(() => {
+            expect(screen.getByText("Payment confirmation unknown")).toBeInTheDocument();
+        });
+        expect(window.sessionStorage.getItem("micopesa.mpesa.paymentIdempotencyKey"))
+            .toBe(storedIdempotencyKey);
+        expect(getMyBalance).not.toHaveBeenCalled();
+        expect(screen.queryByText("Deposit successful.")).not.toBeInTheDocument();
+    });
+
     it("reports a failed simulator outcome without marking it as a deposit", async () => {
         const failedPayment = {
             attempt_id: "attempt-sim-failed",
@@ -346,6 +426,37 @@ describe("DepositModal", () => {
         expect(initiateStkPush).not.toHaveBeenCalled();
     });
 
+    it("explains invalid fund allocations without claiming a payment was started", async () => {
+        getPaymentProvider.mockResolvedValue({
+            provider: "SIMULATOR",
+            environment: "simulator",
+            payment_enabled: true,
+            message_key: "MPESA_PAYMENTS_AVAILABLE",
+        });
+        initiateStkPush.mockRejectedValue({
+            status: 409,
+            data: { message_key: "MPESA_ALLOCATION_INVALID" },
+        });
+
+        render(
+            <ToastProvider>
+                <DepositModal open onClose={vi.fn()} />
+            </ToastProvider>,
+        );
+
+        fireEvent.change(await screen.findByLabelText("Amount (KES)"), {
+            target: { value: "2500" },
+        });
+        fireEvent.click(screen.getByLabelText("I confirm this is my verified M-Pesa phone number."));
+        fireEvent.click(screen.getByRole("button", { name: "Run simulated payment" }));
+
+        expect(await screen.findByRole("alert")).toHaveTextContent(
+            "Your active fund allocations must total exactly 100.00%. Update My Funds & Allocation before retrying. No payment was started.",
+        );
+        expect(confirmSimulatedPayment).not.toHaveBeenCalled();
+        expect(getStkPushStatus).not.toHaveBeenCalled();
+    });
+
     it("offers a safe retry when the verified phone profile cannot be loaded", async () => {
         getMyProfile
             .mockRejectedValueOnce(new Error("sensitive profile details"))
@@ -406,7 +517,10 @@ describe("DepositModal", () => {
             payment_enabled: true,
             message_key: "MPESA_PAYMENTS_AVAILABLE",
         });
-        initiateStkPush.mockRejectedValue({ status: null });
+        initiateStkPush.mockRejectedValue({
+            status: 503,
+            data: { message_key: "MPESA_INITIATION_UNAVAILABLE" },
+        });
 
         render(
             <ToastProvider>
@@ -422,6 +536,8 @@ describe("DepositModal", () => {
 
         expect(await screen.findByText("Payment confirmation unknown")).toBeInTheDocument();
         expect(initiateStkPush).toHaveBeenCalledTimes(1);
+        expect(window.sessionStorage.getItem("micopesa.mpesa.paymentIdempotencyKey"))
+            .toBeTruthy();
         expect(getStkPushStatusByIdempotencyKey).not.toHaveBeenCalled();
         expect(confirmSimulatedPayment).not.toHaveBeenCalled();
     });

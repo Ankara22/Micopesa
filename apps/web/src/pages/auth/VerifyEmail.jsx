@@ -20,6 +20,7 @@ function VerifyEmail() {
         success: false,
         error: !token || !hasValidFlow,
         registrationUnavailable: false,
+        nextStep: null,
     }));
     const [password, setPassword] = useState("");
     const [confirmPassword, setConfirmPassword] = useState("");
@@ -30,12 +31,13 @@ function VerifyEmail() {
         if (state.submitting) return;
         setState((current) => ({ ...current, submitting: true }));
         try {
-            await verifyEmail(token);
+            const result = await verifyEmail(token);
             setState({
                 submitting: false,
                 success: true,
                 error: false,
                 registrationUnavailable: false,
+                nextStep: result.next_step || null,
             });
         } catch {
             setState({
@@ -69,6 +71,7 @@ function VerifyEmail() {
                 success: true,
                 error: false,
                 registrationUnavailable: false,
+                nextStep: null,
             });
         } catch (error) {
             if (error.response?.data?.code === "REGISTRATION_COMPLETION_UNAVAILABLE") {
@@ -102,7 +105,13 @@ function VerifyEmail() {
                 {state.registrationUnavailable && (
                     <div className="auth-error" role="alert">{t("auth.verify.registrationUnavailable")}</div>
                 )}
-                {state.success && <div className="auth-success" role="status">{t("auth.verify.success")}</div>}
+                {state.success && (
+                    <div className="auth-success" role="status">
+                        {state.nextStep === "STAFF_SIGN_IN"
+                            ? t("auth.verify.staffSuccess")
+                            : t("auth.verify.success")}
+                    </div>
+                )}
                 {isExistingVerification && token && !state.success && !state.error && (
                     <form className="auth-form" onSubmit={handleEmailVerification} noValidate aria-busy={state.submitting}>
                         <p className="auth-subtitle">{t("auth.verify.emailVerificationDescription")}</p>

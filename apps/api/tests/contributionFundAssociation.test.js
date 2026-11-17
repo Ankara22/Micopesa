@@ -93,16 +93,14 @@ function installDatabase(state) {
                     .filter(({ account_id }) => account_id === ACCOUNT_A)
                     .map((contribution) => {
                         const attempt = state.paymentAttempts.find(
-                            ({ transaction_id }) => transaction_id === contribution.transaction_id
+                            ({ transaction_id, account_id }) =>
+                                transaction_id === contribution.transaction_id &&
+                                (!account_id || account_id === contribution.account_id)
                         );
                         return {
                             ...contribution,
+                            provider_mode: attempt?.provider_mode ?? null,
                             checkout_request_id: attempt?.checkout_request_id ?? null,
-                            payment_provider: attempt?.provider_mode === "SIMULATOR"
-                                ? "SIMULATED"
-                                : attempt?.provider_mode === "DARAJA"
-                                    ? "DARAJA"
-                                    : "UNRESOLVED",
                             fund_allocations: state.shares.filter(({ contribution_id }) =>
                                 contribution_id === contribution.contribution_id
                             ),
@@ -297,9 +295,10 @@ test("contribution history succeeds without unapplied provider classification me
 
         assert.equal(response.status, 200);
         assert.match(historyQuery, /FROM mpesa_payment_attempts/);
-        assert.doesNotMatch(historyQuery, /provider_mode/);
+        assert.match(historyQuery, /provider_mode/);
+        assert.match(historyQuery, /to_jsonb\(attempt\)/);
         assert.match(historyQuery, /ORDER BY c\.created_at DESC/);
-        assert.equal(body.data[0].checkout_request_id, `SIM${"A".repeat(22)}`);
+        assert.equal(body.data[0].checkout_request_id, null);
         assert.equal(body.data[0].payment_provider, "UNRESOLVED");
         assert.equal(body.data[0].amount, "250.00");
         assert.equal(body.data[0].contribution_status, "COMPLETED");
@@ -346,10 +345,149 @@ test("contribution history works when optional payment metadata is absent", asyn
         assert.equal(response.status, 200);
         assert.equal(body.data.length, 1);
         assert.match(historyQuery, /LEFT JOIN LATERAL/);
-        assert.doesNotMatch(historyQuery, /provider_mode/);
+        assert.match(historyQuery, /provider_mode/);
         assert.equal(body.data[0].checkout_request_id, null);
         assert.equal(body.data[0].payment_provider, "UNRESOLVED");
         assert.deepEqual(body.data[0].fund_allocations, []);
+    } finally {
+        await api.close();
+    }
+});
+
+test("contribution history distinguishes simulator, Daraja, and unresolved provider records", async () => {
+    const state = createState();
+    state.contributions = [
+        {
+            contribution_id: "CONTRIBUTION-SIMULATOR",
+            transaction_id: "TRANSACTION-SIMULATOR",
+            account_id: ACCOUNT_A,
+            amount: "100.00",
+            channel: "MPESA",
+            contribution_status: "COMPLETED",
+            created_at: "2026-10-28T10:00:00.000Z",
+        },
+        {
+            contribution_id: "CONTRIBUTION-DARAJA",
+            transaction_id: "TRANSACTION-DARAJA",
+            account_id: ACCOUNT_A,
+            amount: "200.00",
+            channel: "MPESA",
+            contribution_status: "COMPLETED",
+            mpesa_receipt: "QAB123XYZ",
+            created_at: "2026-10-28T11:00:00.000Z",
+        },
+        {
+            contribution_id: "CONTRIBUTION-LEGACY",
+            transaction_id: "TRANSACTION-LEGACY",
+            account_id: ACCOUNT_A,
+            amount: "300.00",
+            channel: "MPESA",
+            contribution_status: "COMPLETED",
+            created_at: "2026-10-28T12:00:00.000Z",
+        },
+    ];
+    state.paymentAttempts = [
+        {
+            transaction_id: "TRANSACTION-SIMULATOR",
+            account_id: ACCOUNT_A,
+            provider_mode: "SIMULATOR",
+            checkout_request_id: `SIM${"A".repeat(22)}`,
+        },
+        {
+            transaction_id: "TRANSACTION-DARAJA",
+            account_id: ACCOUNT_A,
+            provider_mode: "DARAJA",
+            checkout_request_id: "ws_CO_DARAJA_CHECKOUT",
+        },
+    ];
+    const api = await createApi(state);
+    try {
+        const response = await api.request("/api/accounts/my-contributions", { method: "GET" });
+        const body = await response.json();
+        const byId = new Map(body.data.map((row) => [row.contribution_id, row]));
+
+        assert.equal(response.status, 200);
+        assert.equal(
+            byId.get("CONTRIBUTION-SIMULATOR").payment_provider,
+            "SIMULATED"
+        );
+        assert.equal(
+            byId.get("CONTRIBUTION-SIMULATOR").checkout_request_id,
+            `SIM${"A".repeat(22)}`
+        );
+        assert.equal(byId.get("CONTRIBUTION-DARAJA").payment_provider, "DARAJA");
+        assert.equal(byId.get("CONTRIBUTION-DARAJA").checkout_request_id, null);
+        assert.equal(byId.get("CONTRIBUTION-DARAJA").mpesa_receipt, "QAB123XYZ");
+        assert.equal(byId.get("CONTRIBUTION-LEGACY").payment_provider, "UNRESOLVED");
+        assert.equal(byId.get("CONTRIBUTION-LEGACY").checkout_request_id, null);
+    } finally {
+        await api.close();
+    }
+});
+
+test("contribution history distinguishes simulator, Daraja, and unresolved provider records", async () => {
+    const state = createState();
+    state.contributions = [
+        {
+            contribution_id: "CONTRIBUTION-SIMULATOR",
+            transaction_id: "TRANSACTION-SIMULATOR",
+            account_id: ACCOUNT_A,
+            amount: "100.00",
+            channel: "MPESA",
+            contribution_status: "COMPLETED",
+            created_at: "2026-10-28T10:00:00.000Z",
+        },
+        {
+            contribution_id: "CONTRIBUTION-DARAJA",
+            transaction_id: "TRANSACTION-DARAJA",
+            account_id: ACCOUNT_A,
+            amount: "200.00",
+            channel: "MPESA",
+            contribution_status: "COMPLETED",
+            mpesa_receipt: "QAB123XYZ",
+            created_at: "2026-10-28T11:00:00.000Z",
+        },
+        {
+            contribution_id: "CONTRIBUTION-LEGACY",
+            transaction_id: "TRANSACTION-LEGACY",
+            account_id: ACCOUNT_A,
+            amount: "300.00",
+            channel: "MPESA",
+            contribution_status: "COMPLETED",
+            created_at: "2026-10-28T12:00:00.000Z",
+        },
+    ];
+    state.paymentAttempts = [
+        {
+            transaction_id: "TRANSACTION-SIMULATOR",
+            account_id: ACCOUNT_A,
+            provider_mode: "SIMULATOR",
+            checkout_request_id: `SIM${"A".repeat(22)}`,
+        },
+        {
+            transaction_id: "TRANSACTION-DARAJA",
+            account_id: ACCOUNT_A,
+            provider_mode: "DARAJA",
+            checkout_request_id: "ws_CO_DARAJA_CHECKOUT",
+        },
+    ];
+    const api = await createApi(state);
+    try {
+        const response = await api.request("/api/accounts/my-contributions", { method: "GET" });
+        const body = await response.json();
+        const byId = new Map(body.data.map((row) => [row.contribution_id, row]));
+
+        assert.equal(response.status, 200);
+        assert.equal(byId.get("CONTRIBUTION-SIMULATOR").payment_provider, "SIMULATED");
+        assert.equal(
+            byId.get("CONTRIBUTION-SIMULATOR").checkout_request_id,
+            `SIM${"A".repeat(22)}`
+        );
+        assert.equal(byId.get("CONTRIBUTION-DARAJA").payment_provider, "DARAJA");
+        assert.equal(byId.get("CONTRIBUTION-DARAJA").checkout_request_id, null);
+        assert.equal(byId.get("CONTRIBUTION-DARAJA").mpesa_receipt, "QAB123XYZ");
+        assert.equal(byId.get("CONTRIBUTION-LEGACY").payment_provider, "UNRESOLVED");
+        assert.equal(byId.get("CONTRIBUTION-LEGACY").checkout_request_id, null);
     } finally {
         await api.close();
     }

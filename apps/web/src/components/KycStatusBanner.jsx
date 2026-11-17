@@ -7,6 +7,7 @@ function KycStatusBanner({ status }) {
     const statusKey = status.toLowerCase();
     return (
         <aside
+            id="kyc-status"
             className={`kyc-status-banner kyc-status-banner--${statusKey}`}
             role={status === "REJECTED" ? "alert" : "note"}
         >

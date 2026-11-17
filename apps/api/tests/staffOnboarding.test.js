@@ -1,8 +1,10 @@
-const { after, test } = require("node:test");
+const { after, beforeEach, test } = require("node:test");
 const assert = require("node:assert/strict");
 const bcrypt = require("bcrypt");
 const pool = require("../src/db/database");
 const smsService = require("../src/services/smsService");
+const authEmailService = require("../src/services/authEmailService");
+const staffRoutes = require("../src/routes/staffOnboardingRoutes");
 const {
     createStaff,
     resendStaffOnboarding,
@@ -14,11 +16,27 @@ const originalConnect = pool.connect;
 const originalHash = bcrypt.hash;
 const originalSendSms = smsService.sendSms;
 const originalSmsProvider = process.env.TRANSACTIONAL_SMS_PROVIDER;
+const originalIssueEmailToken = authEmailService.issueEmailToken;
+const emailInvitations = [];
+
+authEmailService.issueEmailToken = async (input) => {
+    emailInvitations.push(input);
+    return { messageId: "mock-verification-email" };
+};
+
+beforeEach(() => {
+    emailInvitations.length = 0;
+    authEmailService.issueEmailToken = async (input) => {
+        emailInvitations.push(input);
+        return { messageId: "mock-verification-email" };
+    };
+});
 
 after(() => {
     pool.connect = originalConnect;
     bcrypt.hash = originalHash;
     smsService.sendSms = originalSendSms;
+    authEmailService.issueEmailToken = originalIssueEmailToken;
     if (originalSmsProvider === undefined) delete process.env.TRANSACTIONAL_SMS_PROVIDER;
     else process.env.TRANSACTIONAL_SMS_PROVIDER = originalSmsProvider;
 });
@@ -83,7 +101,7 @@ test("requires valid phone and email before hashing, persistence, or onboarding 
     assert.equal(sends, 0);
 });
 
-test("creates staff with a temporary password, activates only after SMS acceptance, and audits the actor", async () => {
+test("creates staff with separate email verification and temporary-password onboarding", async () => {
     const calls = [];
     let active = false;
     let smsRequest;
@@ -128,10 +146,6 @@ test("creates staff with a temporary password, activates only after SMS acceptan
                 assert.equal(values[0], "A".repeat(25));
                 return { rows: [] };
             }
-            if (query.includes("UPDATE users SET account_status = 'ACTIVE'")) {
-                active = true;
-                return { rows: [{ user_id: "A".repeat(25) }] };
-            }
             if (query.includes("INSERT INTO audit_logs")) return { rows: [] };
             assert.fail(`Unexpected query: ${query}`);
         },
@@ -151,8 +165,18 @@ test("creates staff with a temporary password, activates only after SMS acceptan
 
     assert.equal(res.statusCode, 201);
     assert.equal(res.body.data.sms_accepted, true);
-    assert.equal(res.body.data.user.account_status, "ACTIVE");
-    assert.equal(active, true);
+    assert.equal(res.body.data.verification_email_accepted, true);
+    assert.equal(res.body.data.account_active, false);
+    assert.equal(res.body.data.user.account_status, "INACTIVE");
+    assert.equal(res.body.data.user.email_verified, false);
+    assert.equal(res.body.data.user.phone_verified, false);
+    assert.equal(active, false);
+    assert.deepEqual(emailInvitations, [{
+        userId: "A".repeat(25),
+        email: "staff@example.test",
+        purpose: "EMAIL_VERIFICATION",
+        invitation: true,
+    }]);
     const createUser = calls.find(({ query }) => query.includes("INSERT INTO users"));
     assert.deepEqual(createUser.values.slice(0, 3), [
         "New Staff",
@@ -162,16 +186,15 @@ test("creates staff with a temporary password, activates only after SMS acceptan
     assert.ok(createUser.query.includes("pending_email"));
     assert.ok(calls.some(({ query }) => query.includes("INSERT INTO notification_preferences")));
     const createAudit = calls.find(({ query, values }) =>
-        query.includes("INSERT INTO audit_logs") &&
-        values[2] === "STAFF_ONBOARDING" &&
-        values[4]?.includes('"sms_provider"')
+        query.includes("INSERT INTO audit_logs") && values[2] === "STAFF_ONBOARDING"
     );
     assert.ok(createAudit);
     assert.equal(createAudit.values[0], "ADMIN-USER-12345678901234567890");
     const auditDetails = JSON.parse(createAudit.values[4]);
-    assert.equal(auditDetails.sms_provider, smsRequest.provider);
-    assert.equal(auditDetails.sms_tracking_id, smsRequest.trackingId);
-    assert.equal(auditDetails.provider_message_id, "provider-message-1");
+    assert.equal(auditDetails.status, "PENDING_EMAIL_VERIFICATION");
+    assert.equal(auditDetails.sms_accepted, undefined);
+    assert.equal(smsRequest.provider, "MOBILE_SASA");
+    assert.match(smsRequest.trackingId, /^[0-9a-f-]{36}$/i);
     assert.equal(JSON.stringify(res.body).includes("temporary-password-hash"), false);
     assert.equal(JSON.stringify(res.body).includes("staff@example.test"), false);
 });
@@ -232,8 +255,11 @@ test("leaves a staff account inactive when the SMS provider rejects onboarding",
         }, res);
         assert.equal(res.statusCode, 201);
         assert.equal(res.body.data.sms_accepted, false);
+        assert.equal(res.body.data.verification_email_accepted, false);
+        assert.equal(res.body.data.account_active, false);
         assert.match(res.body.message, /remains inactive/i);
         assert.equal(insertCount, 1);
+        assert.equal(emailInvitations.length, 0);
         assert.equal(infoLogs[0].event, "admin.staff_onboarding.sms_attempt_started");
         assert.equal(infoLogs[0].provider, "MOBILE_SASA");
         assert.deepEqual(loggedFailure, {
@@ -251,6 +277,68 @@ test("leaves a staff account inactive when the SMS provider rejects onboarding",
         assert.doesNotMatch(JSON.stringify([...infoLogs, loggedFailure]), /userId|B{25}|provider rejection|temporary-password|\+254/);
     } finally {
         console.error = originalConsoleError;
+        console.info = originalConsoleInfo;
+    }
+});
+
+test("keeps a staff account inactive when the verification email is rejected", async () => {
+    const loggedFailures = [];
+    const originalLogFailure = authEmailService.logEmailDeliveryFailure;
+    const originalConsoleInfo = console.info;
+    authEmailService.issueEmailToken = async () => {
+        throw Object.assign(new Error("synthetic delivery failure"), {
+            code: "EMAIL_SMTP_DELIVERY_FAILED",
+        });
+    };
+    authEmailService.logEmailDeliveryFailure = (purpose, error) => {
+        loggedFailures.push({ purpose, code: error.code });
+    };
+    console.info = () => {};
+    bcrypt.hash = async () => "temporary-password-hash";
+    smsService.sendSms = async () => ({ accepted: true, messageId: "sms-accepted" });
+    process.env.TRANSACTIONAL_SMS_PROVIDER = "MOBILE_SASA";
+    pool.connect = async () => ({
+        async query(query) {
+            if (query === "BEGIN" || query === "COMMIT" || query === "ROLLBACK") return { rows: [] };
+            if (query.includes("INSERT INTO users")) {
+                return { rows: [{
+                    user_id: "D".repeat(25),
+                    full_name: "New Staff",
+                    phone: "+254712345678",
+                    role: "REGULATOR",
+                    account_status: "INACTIVE",
+                }] };
+            }
+            if (query.includes("INSERT INTO notification_preferences")) return { rows: [] };
+            if (query.includes("INSERT INTO audit_logs")) return { rows: [] };
+            assert.fail(`Unexpected query: ${query}`);
+        },
+        release() {},
+    });
+
+    try {
+        const res = response();
+        await createStaff({
+            user: { userId: "admin" },
+            body: {
+                full_name: "New Staff",
+                phone: "+254712345678",
+                email: "staff@example.test",
+                role: "REGULATOR",
+            },
+        }, res);
+
+        assert.equal(res.statusCode, 201);
+        assert.equal(res.body.data.sms_accepted, true);
+        assert.equal(res.body.data.verification_email_accepted, false);
+        assert.equal(res.body.data.account_active, false);
+        assert.equal(res.body.data.user.account_status, "INACTIVE");
+        assert.deepEqual(loggedFailures, [{
+            purpose: "EMAIL_VERIFICATION",
+            code: "EMAIL_SMTP_DELIVERY_FAILED",
+        }]);
+    } finally {
+        authEmailService.logEmailDeliveryFailure = originalLogFailure;
         console.info = originalConsoleInfo;
     }
 });
@@ -273,7 +361,6 @@ test("development onboarding delivers to allowlisted registered staff phones", a
     const originalHash = bcrypt.hash;
     const originalConnect = pool.connect;
     const previousSendSms = smsService.sendSms;
-    let active = false;
     let providerRequests = 0;
     const sentPhones = [];
     process.env.NODE_ENV = "development";
@@ -316,10 +403,6 @@ test("development onboarding delivers to allowlisted registered staff phones", a
                     };
                 }
                 if (query.includes("INSERT INTO notification_preferences")) return { rows: [] };
-                if (query.includes("UPDATE users SET account_status = 'ACTIVE'")) {
-                    active = true;
-                    return { rows: [{ user_id: "A".repeat(25) }] };
-                }
                 if (query.includes("INSERT INTO audit_logs")) return { rows: [] };
                 assert.fail(`Unexpected query: ${query}`);
             },
@@ -340,11 +423,11 @@ test("development onboarding delivers to allowlisted registered staff phones", a
             },
         }, accepted);
         assert.equal(accepted.body.data.sms_accepted, true);
-        assert.equal(active, true);
+        assert.equal(accepted.body.data.verification_email_accepted, true);
+        assert.equal(accepted.body.data.account_active, false);
         assert.equal(providerRequests, 1);
         assert.deepEqual(sentPhones, ["+254712345678"]);
 
-        active = false;
         installDatabaseMock();
         const secondAccepted = response();
         await createStaff({
@@ -357,7 +440,8 @@ test("development onboarding delivers to allowlisted registered staff phones", a
             },
         }, secondAccepted);
         assert.equal(secondAccepted.body.data.sms_accepted, true);
-        assert.equal(active, true);
+        assert.equal(secondAccepted.body.data.verification_email_accepted, true);
+        assert.equal(secondAccepted.body.data.account_active, false);
         assert.equal(providerRequests, 2);
         assert.deepEqual(sentPhones, ["+254712345678", "+254711111111"]);
     } finally {
@@ -407,7 +491,7 @@ test("does not send a duplicate onboarding SMS when staff creation conflicts", a
     assert.equal(smsCalls, 0);
 });
 
-test("reissues credentials for a pending staff account without creating a duplicate user", async () => {
+test("reissues staff credentials and verification link without activating an unverified account", async () => {
     const queries = [];
     process.env.TRANSACTIONAL_SMS_PROVIDER = "MOBILE_SASA";
     bcrypt.hash = async () => "replacement-password-hash";
@@ -427,6 +511,9 @@ test("reissues credentials for a pending staff account without creating a duplic
                         user_id: "C".repeat(25),
                         full_name: "New Staff",
                         phone: "+254712345678",
+                        email: null,
+                        pending_email: "staff@example.test",
+                        email_verified: false,
                         role: "REGULATOR",
                     }],
                 };
@@ -444,7 +531,42 @@ test("reissues credentials for a pending staff account without creating a duplic
     }, res);
 
     assert.equal(res.statusCode, 200);
+    assert.equal(res.body.data.sms_accepted, true);
+    assert.equal(res.body.data.verification_email_accepted, true);
+    assert.equal(res.body.data.account_active, false);
     assert.equal(queries.some((query) => query.includes("INSERT INTO users")), false);
     assert.ok(queries.some((query) => query.includes("failed_login_attempts = 0")));
-    assert.match(res.body.message, /Inbox delivery is not confirmed/);
+    assert.match(res.body.message, /remains inactive until the staff member verifies/i);
+    assert.deepEqual(emailInvitations, [{
+        userId: "C".repeat(25),
+        email: "staff@example.test",
+        purpose: "EMAIL_VERIFICATION",
+        invitation: true,
+    }]);
+});
+
+test("staff onboarding routes remain authenticated and administrator-only", () => {
+    const createRoute = staffRoutes.stack.find((layer) =>
+        layer.route?.path === "/" && layer.route.methods.post
+    );
+    const resendRoute = staffRoutes.stack.find((layer) =>
+        layer.route?.path === "/:userId/resend" && layer.route.methods.post
+    );
+    for (const route of [createRoute, resendRoute]) {
+        assert.ok(route);
+        assert.equal(route.route.stack[0].name, "requireAuth");
+        assert.equal(typeof route.route.stack[1].handle, "function");
+        for (const role of ["WORKER", "FUND_MANAGER", "REGULATOR"]) {
+            const denied = response();
+            route.route.stack[1].handle({ user: { role } }, denied, () => {
+                assert.fail(`${role} must not reach staff onboarding`);
+            });
+            assert.equal(denied.statusCode, 403);
+        }
+        let adminReached = false;
+        route.route.stack[1].handle({ user: { role: "ADMIN" } }, response(), () => {
+            adminReached = true;
+        });
+        assert.equal(adminReached, true);
+    }
 });

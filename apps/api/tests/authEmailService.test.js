@@ -245,7 +245,7 @@ test("authentication verification and reset templates can select Mobile Sasa", a
 
 test("verification email links use the configured frontend origin without sending email", async () => {
     process.env.EMAIL_PROVIDER = "GMAIL";
-    process.env.FRONTEND_BASE_URL = "http://localhost:4178";
+    process.env.FRONTEND_BASE_URL = "http://localhost:5173";
     let outgoingMessage;
     nodemailer.createTransport = () => ({
         sendMail: async (message) => {
@@ -265,11 +265,61 @@ test("verification email links use the configured frontend origin without sendin
     assert.ok(urlMatch);
     assert.doesNotMatch(urlMatch[0], /[.,)\]}!?]$/);
     const verificationUrl = new URL(urlMatch[0]);
-    assert.equal(verificationUrl.origin, "http://localhost:4178");
+    assert.equal(verificationUrl.origin, "http://localhost:5173");
     assert.equal(verificationUrl.pathname, "/verify-email");
     assert.ok(verificationUrl.searchParams.get("token"));
     assert.equal(verificationUrl.searchParams.get("flow"), "email-verification");
     assert.equal([...verificationUrl.searchParams.keys()].join(","), "token,flow");
+    const htmlLink = outgoingMessage.html.match(/href="([^"]+)"/);
+    assert.ok(htmlLink);
+    assert.equal(htmlLink[1].replace(/&amp;/g, "&"), verificationUrl.href);
+});
+
+test("staff invitations use an actionable email-verification link without changing the phone state", async () => {
+    let outgoingMessage;
+    const statements = [];
+    pool.query = async (query, values) => {
+        statements.push({ query, values });
+        return { rows: [] };
+    };
+    nodemailer.createTransport = () => ({
+        sendMail: async (message) => {
+            outgoingMessage = message;
+            return { accepted: ["staff@example.test"], rejected: [], messageId: "mock-invitation" };
+        },
+    });
+    console.info = () => {};
+
+    await authEmailService.issueEmailToken({
+        userId: "mock-staff",
+        email: "staff@example.test",
+        purpose: "EMAIL_VERIFICATION",
+        invitation: true,
+    });
+
+    const textLink = outgoingMessage.text.match(/Verify email address: (https?:\/\/\S+)/)?.[1];
+    assert.ok(textLink);
+    assert.match(outgoingMessage.subject, /staff onboarding/i);
+    assert.match(outgoingMessage.text, /submitted to the SMS provider separately/i);
+    assert.match(outgoingMessage.text, /delivery to your phone is not confirmed/i);
+    assert.match(outgoingMessage.text, /change it at first sign-in/i);
+    assert.equal(
+        outgoingMessage.html.match(/href="([^"]+)"/)[1].replace(/&amp;/g, "&"),
+        textLink,
+    );
+    const tokenInsert = statements.find(({ query }) => query.includes("INSERT INTO auth_tokens"));
+    assert.ok(tokenInsert);
+    assert.equal(tokenInsert.values[1], "EMAIL_VERIFICATION");
+    assert.notEqual(tokenInsert.values[3], new URL(textLink).searchParams.get("token"));
+});
+
+test("production email links reject localhost frontends", async () => {
+    process.env.NODE_ENV = "production";
+    process.env.FRONTEND_BASE_URL = "http://localhost:5173";
+    await assert.rejects(authEmailService.sendPendingRegistrationEmail({
+        email: "worker@example.test",
+        token: "mock-registration-token",
+    }), { code: "EMAIL_LINK_CONFIGURATION_INVALID" });
 });
 
 test("resending verification replaces prior active email tokens", async () => {
@@ -313,9 +363,9 @@ test("resending verification replaces prior active email tokens", async () => {
     );
 });
 
-test("pending registration email uses one field-neutral verification message", async () => {
+test("pending registration email uses a matching HTML and text verification link", async () => {
     process.env.EMAIL_PROVIDER = "GMAIL";
-    process.env.FRONTEND_BASE_URL = "http://localhost:4178";
+    process.env.FRONTEND_BASE_URL = "http://localhost:5173";
     let outgoingMessage;
     nodemailer.createTransport = () => ({
         sendMail: async (message) => {
@@ -330,19 +380,23 @@ test("pending registration email uses one field-neutral verification message", a
         token: "mock-registration-token",
     });
 
-    const urlLine = outgoingMessage.text.split(/\r?\n/).find((line) => line.startsWith("http://"));
-    assert.ok(urlLine);
-    assert.equal(urlLine, urlLine.trim());
-    assert.doesNotMatch(urlLine, /[.,)\]}!?]$/);
-    const url = new URL(urlLine);
-    assert.equal(url.origin, "http://localhost:4178");
+    const textLink = outgoingMessage.text.match(/Verify email address: (https?:\/\/\S+)/)?.[1];
+    assert.ok(textLink);
+    assert.equal(textLink, textLink.trim());
+    assert.doesNotMatch(textLink, /[.,)\]}!?]$/);
+    const url = new URL(textLink);
+    assert.equal(url.origin, "http://localhost:5173");
     assert.equal(url.pathname, "/verify-email");
     assert.equal(url.searchParams.get("token"), "mock-registration-token");
     assert.equal(url.searchParams.get("flow"), "registration");
     assert.equal([...url.searchParams.keys()].join(","), "token,flow");
-    assert.equal(outgoingMessage.text.split(/\r?\n/)[1], url.href);
+    assert.equal(outgoingMessage.text.split(/\r?\n/)[2], `Verify email address: ${url.href}`);
     assert.equal(outgoingMessage.subject, "Complete your MicoPesa registration");
-    assert.match(outgoingMessage.text, /If you did not request this, ignore this email/);
+    assert.match(outgoingMessage.text, /If you did not request this, you can ignore this email/);
+    assert.equal(
+        outgoingMessage.html.match(/href="([^"]+)"/)[1].replace(/&amp;/g, "&"),
+        url.href
+    );
     assert.doesNotMatch(outgoingMessage.text, /National ID|date of birth|phone|12345678/i);
     assert.equal(queryCount, 0);
 });
@@ -375,7 +429,7 @@ test("local capture stores registration verification without invoking an email p
     captureDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "micopesa-email-capture-test-"));
     process.env.MICOPESA_EMAIL_CAPTURE = "true";
     process.env.MICOPESA_EMAIL_CAPTURE_DIR = captureDirectory;
-    process.env.FRONTEND_BASE_URL = "http://localhost:4178";
+    process.env.FRONTEND_BASE_URL = "http://localhost:5173";
     delete process.env.GMAIL_USER;
     delete process.env.GMAIL_APP_PASSWORD;
     process.env.EMAIL_PROVIDER = "MOBILE_SASA";
@@ -404,7 +458,7 @@ test("local capture stores registration verification without invoking an email p
     assert.equal(records[0].to, "worker@example.test");
     assert.equal(records[0].purpose, "REGISTRATION_VERIFICATION");
     const link = new URL(records[0].text.match(/https?:\/\/\S+/)[0].replace(/\.$/, ""));
-    assert.equal(link.origin, "http://localhost:4178");
+    assert.equal(link.origin, "http://localhost:5173");
     assert.equal(link.pathname, "/verify-email");
     assert.equal(link.searchParams.get("token"), "local-registration-token");
     assert.equal(link.searchParams.get("flow"), "registration");

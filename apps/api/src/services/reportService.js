@@ -291,8 +291,11 @@ const REPORT_SQL = {
         LEFT JOIN contribution_fund_allocations cfa
           ON cfa.contribution_id = c.contribution_id AND cfa.account_id = c.account_id
         LEFT JOIN LATERAL (
-            SELECT a.provider_mode
+            SELECT s.provider_mode
             FROM mpesa_payment_attempts a
+            LEFT JOIN simulator_payment_confirmations s
+              ON s.attempt_id = a.attempt_id
+             AND s.record_type = 'INITIATION'
             WHERE a.transaction_id = c.transaction_id
             ORDER BY a.created_at DESC, a.attempt_id DESC
             LIMIT 1
@@ -341,8 +344,11 @@ const REPORT_SQL = {
         LEFT JOIN contribution_fund_allocations cfa
           ON cfa.contribution_id = c.contribution_id AND cfa.account_id = c.account_id
         LEFT JOIN LATERAL (
-            SELECT a.provider_mode
+            SELECT s.provider_mode
             FROM mpesa_payment_attempts a
+            LEFT JOIN simulator_payment_confirmations s
+              ON s.attempt_id = a.attempt_id
+             AND s.record_type = 'INITIATION'
             WHERE a.transaction_id = c.transaction_id
             ORDER BY a.created_at DESC, a.attempt_id DESC
             LIMIT 1
@@ -356,31 +362,41 @@ const REPORT_SQL = {
                (v.has_verified_success IS TRUE
                     AND c.contribution_status = 'COMPLETED'
                     AND t.transaction_status = 'COMPLETED'
-                    AND (EXISTS (
+                    AND a.attempt_status = 'SETTLED'
+                    AND EXISTS (
                         SELECT 1 FROM pension_account_movements m
                         WHERE m.payment_attempt_id = a.attempt_id
                           AND m.movement_type = 'CONTRIBUTION_SETTLEMENT'
-                    ) OR a.created_at < COALESCE(
-                        (SELECT activated_at FROM pension_ledger WHERE singleton_key IS TRUE),
-                        '-infinity'::timestamptz
-                    ))) AS settlement_confirmed,
+                    )) AS settlement_confirmed,
                t.mpesa_receipt, t.completed_at AS settled_at, u.user_id AS filter_user_id,
                NULL::text AS fund_id,
-               CASE a.provider_mode WHEN 'SIMULATOR' THEN 'SIMULATED'
-                    WHEN 'DARAJA' THEN 'MPESA' ELSE 'UNRESOLVED' END AS channel,
-               CASE a.provider_mode WHEN 'SIMULATOR' THEN 'SIMULATED'
-                    WHEN 'DARAJA' THEN 'DARAJA' ELSE 'UNRESOLVED' END AS payment_provider,
+               CASE simulator_initiation.provider_mode WHEN 'SIMULATOR' THEN 'SIMULATED'
+                    ELSE 'UNRESOLVED' END AS channel,
+               CASE simulator_initiation.provider_mode WHEN 'SIMULATOR' THEN 'SIMULATED'
+                    ELSE 'UNRESOLVED' END AS payment_provider,
                NULL::text AS category, NULL::text AS delivery_status
         FROM mpesa_payment_attempts a
         JOIN contributions c ON c.contribution_id = a.contribution_id
         JOIN transactions t ON t.transaction_id = a.transaction_id
         JOIN pension_accounts pa ON pa.account_id = a.account_id
         JOIN users u ON u.user_id = pa.user_id
+        LEFT JOIN simulator_payment_confirmations simulator_initiation
+          ON simulator_initiation.attempt_id = a.attempt_id
+         AND simulator_initiation.record_type = 'INITIATION'
         LEFT JOIN LATERAL (
             SELECT (array_agg(verification_status
                         ORDER BY created_at DESC, verification_id DESC))[1]
                         AS latest_verification_status,
-                   bool_or(verification_status = 'VERIFIED_SUCCESS') AS has_verified_success
+                   (
+                       bool_or(verification_status = 'VERIFIED_SUCCESS')
+                       OR EXISTS (
+                           SELECT 1
+                           FROM simulator_payment_confirmations s
+                           WHERE s.attempt_id = a.attempt_id
+                             AND s.record_type = 'CONFIRMATION'
+                             AND s.outcome = 'SUCCESS'
+                       )
+                   ) AS has_verified_success
             FROM mpesa_payment_verifications
             WHERE attempt_id = a.attempt_id
         ) v ON TRUE`,

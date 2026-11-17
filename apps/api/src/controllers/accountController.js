@@ -76,16 +76,17 @@ async function getMyContributions(req, res) {
                     c.contribution_status, c.created_at,
                     t.transaction_status, t.mpesa_receipt, t.mpesa_result_code,
                     t.mpesa_result_description, t.completed_at,
-                    a.checkout_request_id,
-                    'UNRESOLVED' AS payment_provider,
+                    a.provider_mode, a.checkout_request_id,
                     COALESCE(fund_shares.fund_allocations, '[]'::jsonb) AS fund_allocations
                  FROM contributions c
                  JOIN transactions t ON t.transaction_id = c.transaction_id
                  LEFT JOIN LATERAL (
-                     SELECT checkout_request_id
-                     FROM mpesa_payment_attempts
-                     WHERE transaction_id = c.transaction_id
-                     ORDER BY created_at DESC, attempt_id DESC
+                     SELECT to_jsonb(attempt)->>'provider_mode' AS provider_mode,
+                            to_jsonb(attempt)->>'checkout_request_id' AS checkout_request_id
+                     FROM mpesa_payment_attempts attempt
+                     WHERE attempt.transaction_id = c.transaction_id
+                       AND attempt.account_id = c.account_id
+                     ORDER BY attempt.created_at DESC, attempt.attempt_id DESC
                      LIMIT 1
                  ) a ON TRUE
                  LEFT JOIN LATERAL (
@@ -105,10 +106,28 @@ async function getMyContributions(req, res) {
                  ORDER BY c.created_at DESC`,
             [account_id]
         );
+        const contributions = contributionsResult.rows.map(({
+            provider_mode: providerMode,
+            checkout_request_id: checkoutRequestId,
+            ...contribution
+        }) => {
+            const paymentProvider = providerMode === "SIMULATOR"
+                ? "SIMULATED"
+                : providerMode === "DARAJA"
+                    ? "DARAJA"
+                    : "UNRESOLVED";
+            return {
+                ...contribution,
+                payment_provider: paymentProvider,
+                checkout_request_id: paymentProvider === "SIMULATED"
+                    ? checkoutRequestId
+                    : null,
+            };
+        });
 
         return res.status(200).json({
             status: "success",
-            data: contributionsResult.rows,
+            data: contributions,
         });
     } catch (error) {
         console.error("Failed to fetch contributions:", {

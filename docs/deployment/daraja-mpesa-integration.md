@@ -243,6 +243,26 @@ settlement and query-only settlement migrations. Confirm the exact starting
 state before applying any subset; never rerun a migration simply because its
 filename is absent from an operator's notes.
 
+`database/migration_mpesa_attempt_status_settled_forward.sql` is a separate,
+guarded correction for an existing attempt table that still has the exact
+validated six-status legacy CHECK and the unchanged accepted-timestamp CHECK.
+It requires the attempt foundation from
+`database/migration_mpesa_payment_attempts.sql`. If the pension-ledger
+migration is still pending, apply this correction before
+`database/migration_pension_account_ledger.sql`; that migration also replaces
+the attempt-status CHECK as part of its broader ledger installation. If the
+ledger migration is recorded as applied but the legacy CHECK remains, stop for
+database-owner review of the target's actual migration history before
+proceeding. Do not run this correction when the canonical status constraint
+already exists, when any precondition differs, or as a substitute for the
+ledger migration.
+
+Before either corrective migration, obtain database-owner approval, inspect
+the exact target schema, and take and verify a restorable backup. The
+corrections do not activate the pension ledger or change opening balances.
+Keep the ledger `PREPARING` until independent reconciliation and formal,
+separate cutover approval are complete.
+
 Notification upgrades are a separate dependency track. For a database that
 has the expected pre-persistent notification schema, the documented order is
 `migration_sms_persistent_delivery.sql`, then

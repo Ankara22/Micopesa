@@ -162,8 +162,11 @@ function createWorkerStatementService(pool) {
                     LEFT JOIN transactions t ON t.transaction_id = c.transaction_id
                     LEFT JOIN pension_ledger l ON l.singleton_key IS TRUE
                     LEFT JOIN LATERAL (
-                        SELECT a.attempt_id, a.provider_mode
+                        SELECT a.attempt_id, s.provider_mode
                         FROM mpesa_payment_attempts a
+                        LEFT JOIN simulator_payment_confirmations s
+                          ON s.attempt_id = a.attempt_id
+                         AND s.record_type = 'INITIATION'
                         WHERE a.transaction_id = c.transaction_id
                         ORDER BY a.created_at DESC, a.attempt_id DESC
                         LIMIT 1
@@ -172,6 +175,7 @@ function createWorkerStatementService(pool) {
                         SELECT s.synthetic_reference
                         FROM simulator_payment_confirmations s
                         WHERE s.attempt_id = latest_attempt.attempt_id
+                          AND s.record_type = 'CONFIRMATION'
                         ORDER BY s.confirmed_at DESC, s.confirmation_id DESC
                         LIMIT 1
                     ) sim ON TRUE

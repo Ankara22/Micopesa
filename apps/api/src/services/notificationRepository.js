@@ -1,7 +1,11 @@
 const { randomUUID } = require("node:crypto");
 const { writeAuditLog } = require("../utils/auditLog");
 const { normalizeKenyanPhone, normalizedPhoneSql } = require("../utils/kenyanPhone");
-const { normalizeRecipient } = require("./communicationDeliveryPolicy");
+const {
+    isDevelopmentDeliveryRuntime,
+    normalizeRecipient,
+    parseAllowlist,
+} = require("./communicationDeliveryPolicy");
 const { isEssentialNotification } = require("./notificationEventPolicy");
 
 const CHANNELS = new Set(["SMS", "EMAIL", "PUSH"]);
@@ -71,7 +75,22 @@ function validateAdminNotification(input) {
     }
 }
 
-function createNotificationRepository(pool) {
+function isRecipientAllowlisted(channel, value, environment) {
+    if (!isDevelopmentDeliveryRuntime(environment)) return true;
+    const recipient = normalizeRecipient(channel, value);
+    return recipient !== null && parseAllowlist(channel, environment).includes(recipient);
+}
+
+function withRecipientAllowlistDiagnostics(recipient, environment) {
+    const { delivery_phone, delivery_email, ...publicRecipient } = recipient;
+    return {
+        ...publicRecipient,
+        sms_recipient_allowed: isRecipientAllowlisted("SMS", delivery_phone, environment),
+        email_recipient_allowed: isRecipientAllowlisted("EMAIL", delivery_email, environment),
+    };
+}
+
+function createNotificationRepository(pool, { environment = process.env } = {}) {
     if (!pool || typeof pool.query !== "function" || typeof pool.connect !== "function") {
         throw new TypeError("A PostgreSQL pool is required.");
     }
@@ -85,6 +104,7 @@ function createNotificationRepository(pool) {
             : null;
         const result = await pool.query(
             `SELECT u.user_id, u.full_name, u.role,
+                    u.phone AS delivery_phone, u.email AS delivery_email,
                        (${validPhoneSql("u.phone")}) AS phone_registered,
                     (u.phone_verified_at IS NOT NULL) AS phone_verified,
                     (u.phone_verified_at IS NOT NULL
@@ -107,7 +127,9 @@ function createNotificationRepository(pool) {
              LIMIT 100`,
             [searchPattern]
         );
-        return result.rows;
+        return result.rows.map((recipient) =>
+            withRecipientAllowlistDiagnostics(recipient, environment)
+        );
     }
 
     async function listRoleRecipients({ senderId, senderRole, search = "" }) {
@@ -124,6 +146,7 @@ function createNotificationRepository(pool) {
         const scopeQuery = senderRole === "FUND_MANAGER"
             ? `SELECT DISTINCT ON (u.user_id)
                     u.user_id, u.full_name, u.role,
+                 u.phone AS delivery_phone, u.email AS delivery_email,
                  (${validPhoneSql("u.phone")}) AS phone_registered,
                  (u.phone_verified_at IS NOT NULL) AS phone_verified,
                  (u.phone_verified_at IS NOT NULL
@@ -172,6 +195,7 @@ function createNotificationRepository(pool) {
                     GROUP BY u.user_id, u.full_name, u.role
                  )
                SELECT sr.user_id, sr.full_name, sr.role,
+                    u.phone AS delivery_phone, u.email AS delivery_email,
                     (${validPhoneSql("u.phone")}) AS phone_registered,
                     (u.phone_verified_at IS NOT NULL) AS phone_verified,
                     (u.phone_verified_at IS NOT NULL
@@ -193,7 +217,9 @@ function createNotificationRepository(pool) {
                ORDER BY sr.full_name, sr.user_id
                LIMIT 100`;
         const result = await pool.query(scopeQuery, [senderId, searchPattern]);
-        return result.rows;
+        return result.rows.map((recipient) =>
+            withRecipientAllowlistDiagnostics(recipient, environment)
+        );
     }
 
     async function queueRoleNotifications({
@@ -213,7 +239,9 @@ function createNotificationRepository(pool) {
         fundId = null,
         testSms = false,
     }) {
-        const bypassOptionalPreferences = senderRole === "ADMIN";
+        const bypassOptionalPreferences = isEssentialNotification({
+            notificationCategory: category,
+        });
         if (!Object.hasOwn(CATEGORIES_BY_ROLE, senderRole) ||
             !CATEGORIES_BY_ROLE[senderRole].has(category)) {
             throw repositoryError("This notification category is not permitted for this role.", "NOTIFICATION_CATEGORY_FORBIDDEN", 403);
@@ -295,18 +323,14 @@ function createNotificationRepository(pool) {
                     if (channel === "SMS") {
                         if (!normalizeKenyanPhone(recipient.phone)) skipCode = "NOTIFICATION_PHONE_INVALID";
                         else if (!recipient.phone_verified_at) skipCode = "NOTIFICATION_PHONE_UNVERIFIED";
-                        else if (!bypassOptionalPreferences &&
-                            !isEssentialNotification({ notificationCategory: category }) &&
-                            recipient.sms_enabled !== true) {
+                        else if (!bypassOptionalPreferences && recipient.sms_enabled !== true) {
                             skipCode = "NOTIFICATION_PREFERENCE_DISABLED";
                         }
                     } else if (channel === "EMAIL") {
                         if (!recipient.email_verified ||
                             !normalizeRecipient("EMAIL", recipient.email)) {
                             skipCode = "NOTIFICATION_EMAIL_UNAVAILABLE";
-                        } else if (!bypassOptionalPreferences &&
-                            !isEssentialNotification({ notificationCategory: category }) &&
-                            recipient.email_enabled !== true) {
+                        } else if (!bypassOptionalPreferences && recipient.email_enabled !== true) {
                             skipCode = "NOTIFICATION_PREFERENCE_DISABLED";
                         }
                     } else if (!recipient.has_push_subscription) {
@@ -535,7 +559,6 @@ function createNotificationRepository(pool) {
             }
             if (channels.includes("SMS") &&
                 !bypassOptionalPreferences &&
-                !isEssentialNotification({ notificationCategory: category }) &&
                 user.sms_enabled !== true) {
                 throw repositoryError("The recipient has disabled SMS notifications.", "NOTIFICATION_PREFERENCE_DISABLED", 422);
             }
@@ -545,7 +568,6 @@ function createNotificationRepository(pool) {
             }
             if (channels.includes("EMAIL") &&
                 !bypassOptionalPreferences &&
-                !isEssentialNotification({ notificationCategory: category }) &&
                 user.email_enabled !== true) {
                 throw repositoryError("The recipient has disabled email notifications.", "NOTIFICATION_PREFERENCE_DISABLED", 422);
             }

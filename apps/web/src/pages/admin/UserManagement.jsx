@@ -47,10 +47,12 @@ function UserManagement() {
         setStaffSubmitting(true);
         try {
             const result = await createStaffAccount(staffForm);
-            if (result.data.sms_accepted) {
+            if (!result.data.sms_accepted || !result.data.verification_email_accepted) {
+                toast.error(result.message);
+            } else if (result.data.account_active) {
                 toast.success(result.message);
             } else {
-                toast.error(result.message);
+                toast.info(result.message);
             }
             setStaffForm({ full_name: "", phone: "", email: "", role: "FUND_MANAGER" });
             await usersApi.refetch();
@@ -84,10 +86,11 @@ function UserManagement() {
         setResendingId(user.user_id);
         try {
             const result = await resendStaffOnboarding(user.user_id);
-            toast.success(result.message);
+            if (result.data?.account_active) toast.success(result.message);
+            else toast.info(result.message);
             await usersApi.refetch();
         } catch (error) {
-            toast.error(error.message || "Unable to resend the onboarding SMS.");
+            toast.error(error.message || "Unable to resend the staff onboarding messages.");
         } finally {
             setResendingId(null);
         }
@@ -129,6 +132,16 @@ function UserManagement() {
         { key: "full_name", header: "Name" },
         { key: "phone", header: "Phone" },
         { key: "role", header: "Role" },
+        {
+            key: "verification",
+            header: "Verification",
+            render: (row) => (
+                <span>
+                    Email {row.email_verified ? "verified" : "pending"}; phone{" "}
+                    {row.phone_verified_at ? "verified" : "pending"}
+                </span>
+            ),
+        },
         {
             key: "account_status",
             header: "Status",
@@ -180,7 +193,7 @@ function UserManagement() {
             <div className="admin-stack">
                 <AdminCard
                     title="Create a staff account"
-                    description="A temporary password is sent through the configured SMS gateway. The staff member must change it at first sign-in and verify their phone and email before using them for notifications."
+                    description="The temporary password is sent by SMS and a separate email-verification link is sent by email. The account stays inactive until the email is verified; the staff member must change the temporary password at first sign-in. Email verification does not verify the phone."
                 >
                     <form className="admin-form-grid" onSubmit={handleStaffSubmit}>
                         <FormField

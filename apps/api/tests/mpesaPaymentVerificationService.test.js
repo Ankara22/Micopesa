@@ -148,12 +148,29 @@ function createHarness({
     const settlementService = {
         async settleVerifiedPayment(input) {
             calls.settlements.push(input);
+            const evidence = verificationRecords.find(
+                (item) => item.verification_id === input.verificationId
+            );
+            if (input.simulatorConfirmation) {
+                Object.assign(evidence, {
+                    verification_status: "UNVERIFIED",
+                    provider_result_code: input.simulatorConfirmation.providerResultCode,
+                    provider_result_description:
+                        input.simulatorConfirmation.providerResultDescription,
+                    simulator_outcome: "SUCCESS",
+                });
+                confirmedEvidence = evidence;
+                processing = false;
+            }
             return {
                 alreadySettled: calls.settlements.filter(
                     (entry) => entry.attemptId === input.attemptId
                 ).length > 1,
                 contribution_status: "COMPLETED",
                 transaction_status: "COMPLETED",
+                ...(input.simulatorConfirmation
+                    ? { verification_status: "UNVERIFIED" }
+                    : {}),
             };
         },
     };
@@ -456,13 +473,14 @@ test("simulator confirmation records query-only success and settles the existing
             checkoutRequestId: attempt.checkout_request_id,
             merchantRequestId: attempt.merchant_request_id,
             resultCode: "0",
-            resultDescription: "SIMULATED: Payment succeeded.",
+            resultDescription:
+                "SIMULATED: Payment succeeded; no real money was transferred.",
         }),
     });
 
     const result = await service.confirmSimulatorAttempt(attempt.attempt_id, "worker_001");
 
-    assert.equal(result.verification_status, "VERIFIED_SUCCESS");
+    assert.equal(result.verification_status, "UNVERIFIED");
     assert.equal(result.outcome, "SUCCESS");
     assert.deepEqual(calls.claims[0], {
         attemptId: attempt.attempt_id,
@@ -471,17 +489,48 @@ test("simulator confirmation records query-only success and settles the existing
         checkoutRequestId: attempt.checkout_request_id,
         merchantRequestId: attempt.merchant_request_id,
     });
-    assert.deepEqual(calls.completions[0], {
-        verificationId: 1,
-        verificationStatus: "VERIFIED_SUCCESS",
-        providerResultCode: "0",
-        providerResultDescription: "SIMULATED: Payment succeeded.",
-        simulatorOutcome: "SUCCESS",
-    });
+    assert.deepEqual(calls.completions, []);
     assert.deepEqual(calls.settlements, [{
         attemptId: attempt.attempt_id,
         verificationId: 1,
+        simulatorConfirmation: {
+            outcome: "SUCCESS",
+            providerResultCode: "0",
+            providerResultDescription:
+                "SIMULATED: Payment succeeded; no real money was transferred.",
+        },
     }]);
+});
+
+test("concurrent simulator confirmations share one provider query and settlement", async () => {
+    const attempt = {
+        ...expectedAttempt,
+        provider_mode: "SIMULATOR",
+        checkout_request_id: `SIM${"A".repeat(22)}`,
+        merchant_request_id: `SIMM${"A".repeat(21)}`,
+        user_id: "worker_001",
+    };
+    const { calls, service } = createHarness({
+        attempt,
+        providerBehavior: async () => ({
+            checkoutRequestId: attempt.checkout_request_id,
+            merchantRequestId: attempt.merchant_request_id,
+            resultCode: "0",
+            resultDescription:
+                "SIMULATED: Payment succeeded; no real money was transferred.",
+        }),
+    });
+
+    const results = await Promise.all([
+        service.confirmSimulatorAttempt(attempt.attempt_id, "worker_001"),
+        service.confirmSimulatorAttempt(attempt.attempt_id, "worker_001"),
+    ]);
+
+    assert.equal(calls.queries.length, 1);
+    assert.equal(calls.settlements.length, 1);
+    assert.equal(results.filter((result) => result.verification_status === "UNVERIFIED").length, 1);
+    assert.equal(results.filter((result) => result.verification_status === "PROCESSING").length, 1);
+    assert.equal(results.filter((result) => result.duplicate === true).length, 1);
 });
 
 test("query-only verification requires exact identifiers and final ResultCode zero", async () => {

@@ -201,6 +201,7 @@ async function register(req, res) {
             console.error("Registration verification delivery failed.", {
                 code: typeof error?.code === "string" ? error.code : "EMAIL_DELIVERY_FAILED",
             });
+            return respondAccepted();
         }
 
         return respondAccepted();
@@ -537,7 +538,7 @@ async function requestPasswordReset(req, res) {
 }
 
 async function requestPublicEmailVerification(req, res) {
-    const genericMessage = "If an unverified email-login account matches this address, verification instructions can be sent.";
+    const genericMessage = "If an eligible account or registration matches this address, verification instructions can be sent.";
     const email = normalizeEmail(req.body?.email);
     try {
         await authEmailService.enforceRequestLimits({
@@ -562,6 +563,12 @@ async function requestPublicEmailVerification(req, res) {
                     });
                 } catch (error) {
                     authEmailService.logEmailDeliveryFailure("EMAIL_VERIFICATION", error);
+                }
+            } else {
+                try {
+                    await authEmailService.resendPendingRegistrationEmail({ email });
+                } catch (error) {
+                    authEmailService.logEmailDeliveryFailure("REGISTRATION_VERIFICATION", error);
                 }
             }
         }
@@ -658,9 +665,25 @@ async function verifyEmail(req, res) {
     if (typeof token !== "string" || token.length < 40 || token.length > 100) {
         return res.status(400).json({ status: "error", message: INVALID_EMAIL_VERIFICATION_MESSAGE });
     }
+    const tokenHash = hashOpaque(token);
+    try {
+        await authEmailService.enforceRequestLimits({
+            req,
+            action: "EMAIL_VERIFICATION_VALIDATE",
+            email: tokenHash,
+        });
+    } catch (error) {
+        if (error.status === 429) {
+            return res.status(429).json({ status: "error", message: error.message });
+        }
+        console.error("Email verification rate-limit check failed:", error.code || "EMAIL_VERIFICATION_RATE_LIMIT_FAILED");
+        return res.status(503).json({
+            status: "error",
+            message: "Unable to verify this email address right now.",
+        });
+    }
     const client = await pool.connect();
     let registrationCompletion = false;
-    const tokenHash = hashOpaque(token);
     try {
         await client.query("BEGIN");
         const pendingResult = await client.query(
@@ -730,7 +753,7 @@ async function verifyEmail(req, res) {
              WHERE token_hash = $1 AND purpose = 'EMAIL_VERIFICATION'
                AND consumed_at IS NULL AND expires_at > now()
              FOR UPDATE`,
-            [hashOpaque(token)]
+            [tokenHash]
         );
         const authToken = result.rows[0];
         if (!authToken) {
@@ -740,13 +763,19 @@ async function verifyEmail(req, res) {
         const updated = await client.query(
             `UPDATE users
              SET email = CASE WHEN pending_email IS NOT NULL THEN pending_email ELSE email END,
-                 pending_email = NULL, email_verified = TRUE
+                 pending_email = NULL, email_verified = TRUE,
+                 account_status = CASE
+                     WHEN login_method = 'PHONE' AND force_password_change IS TRUE
+                          AND account_status = 'INACTIVE'
+                     THEN 'ACTIVE'
+                     ELSE account_status
+                 END
              WHERE user_id = $1
                AND (
                    lower(pending_email) = lower($2)
                    OR (login_method = 'EMAIL' AND email_verified IS FALSE AND lower(email) = lower($2))
                )
-             RETURNING user_id`,
+             RETURNING user_id, account_status, login_method, force_password_change`,
             [authToken.user_id, authToken.email_address]
         );
         if (!updated.rows[0]) {
@@ -758,7 +787,16 @@ async function verifyEmail(req, res) {
             [authToken.auth_token_id]
         );
         await client.query("COMMIT");
-        return res.status(200).json({ status: "success", message: "Email address verified successfully." });
+        const verifiedStaffOnboarding = updated.rows[0].login_method === "PHONE" &&
+            updated.rows[0].force_password_change === true &&
+            updated.rows[0].account_status === "ACTIVE";
+        return res.status(200).json({
+            status: "success",
+            message: verifiedStaffOnboarding
+                ? "Email address verified. Sign in with the temporary password sent by SMS and change it when prompted."
+                : "Email address verified successfully.",
+            ...(verifiedStaffOnboarding ? { next_step: "STAFF_SIGN_IN" } : {}),
+        });
     } catch (error) {
         await client.query("ROLLBACK").catch(() => {});
         if (error.code === "23505") {

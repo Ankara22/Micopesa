@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useAuth } from "../../context/AuthContext";
+import { requestEmailVerificationForAddress } from "../../services/authEmailApi";
 import AuthLayout from "./AuthLayout";
 import { useTranslation } from "react-i18next";
 import "./auth.css";
@@ -48,6 +49,8 @@ function Register() {
     const [formError, setFormError] = useState("");
     const [fieldErrors, setFieldErrors] = useState({});
     const [registrationSubmitted, setRegistrationSubmitted] = useState(false);
+    const [resendingVerification, setResendingVerification] = useState(false);
+    const [resendMessage, setResendMessage] = useState("");
     const submissionInProgress = useRef(false);
 
     function validateEmail(value) {
@@ -116,6 +119,22 @@ function Register() {
         }
     }
 
+    async function handleResendVerification() {
+        if (resendingVerification) return;
+        const normalizedEmail = email.trim().toLowerCase();
+        if (!normalizedEmail) return;
+        setResendingVerification(true);
+        setResendMessage("");
+        try {
+            await requestEmailVerificationForAddress(normalizedEmail);
+            setResendMessage("auth.register.verificationRequestAccepted");
+        } catch {
+            setResendMessage("auth.register.verificationRequestError");
+        } finally {
+            setResendingVerification(false);
+        }
+    }
+
     return (
         <AuthLayout variant="register">
             <div className="auth-card auth-card-register">
@@ -132,13 +151,25 @@ function Register() {
                         {t(formError)}
                     </div>
                 )}
-
                 {registrationSubmitted ? (
                     <section className="auth-form" aria-label={t("auth.register.verificationInstructions")}>
                         <div className="auth-success" role="status">
                             {t("auth.register.checkInbox")}
                         </div>
                         <p>{t("auth.register.setPasswordAfterVerification")}</p>
+                        <button
+                            type="button"
+                            className="auth-submit"
+                            onClick={handleResendVerification}
+                            disabled={resendingVerification || isSubmitting}
+                        >
+                            {resendingVerification
+                                ? t("auth.register.requesting")
+                                : t("auth.register.resend")}
+                        </button>
+                        {resendMessage && (
+                            <p role="status">{t(resendMessage)}</p>
+                        )}
                         <p className="auth-footer"><Link to="/login">{t("auth.register.continueSignIn")}</Link></p>
                     </section>
                 ) : <form className="auth-form auth-register-form" onSubmit={handleSubmit} noValidate aria-busy={isSubmitting}>

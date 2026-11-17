@@ -60,7 +60,6 @@ describe("authentication pages", () => {
         authMocks.register.mockResolvedValue({
             success: true,
             user: { role: "WORKER" },
-            verificationEmailSent: true,
         });
         authMocks.requestEmailVerificationForAddress.mockResolvedValue({
             message: "If an unverified email-login account matches this address, verification instructions can be sent.",
@@ -159,7 +158,7 @@ describe("authentication pages", () => {
         fillLoginForm("new@example.com");
         fireEvent.click(screen.getByRole("button", { name: "Resend verification email" }));
 
-        expect(await screen.findByText(/If an unverified email-login account matches this address/)).toBeInTheDocument();
+        expect(await screen.findByText(/If an eligible account or registration matches this address/)).toBeInTheDocument();
         expect(authMocks.requestEmailVerificationForAddress).toHaveBeenCalledWith("new@example.com");
     });
 
@@ -212,7 +211,7 @@ describe("authentication pages", () => {
 
         expect(await screen.findByRole("heading", { name: "Verify your email" })).toBeInTheDocument();
         expect(screen.getByRole("status")).toHaveTextContent(
-            "If we can complete your registration, verification instructions will be sent.",
+            "If we can complete your registration, verification instructions may be sent.",
         );
         expect(authMocks.register).toHaveBeenCalledWith(
             "Amina Worker",
@@ -223,7 +222,7 @@ describe("authentication pages", () => {
             "1990-04-15",
         );
         expect(screen.queryByText("amina@example.com")).not.toBeInTheDocument();
-        expect(screen.queryByRole("button", { name: "Resend verification email" })).not.toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Resend verification email" })).toBeInTheDocument();
         expect(screen.queryByLabelText("Role")).not.toBeInTheDocument();
     });
 
@@ -287,7 +286,6 @@ describe("authentication pages", () => {
         authMocks.register.mockResolvedValueOnce({
             success: true,
             user: { role: "WORKER" },
-            verificationEmailSent: false,
         });
         renderAuth("/register");
         fireEvent.change(screen.getByLabelText("Full name"), { target: { value: "Amina Worker" } });
@@ -301,11 +299,39 @@ describe("authentication pages", () => {
         fireEvent.click(screen.getByRole("button", { name: "Create account" }));
 
         expect(await screen.findByRole("status")).toHaveTextContent(
-            "If we can complete your registration, verification instructions will be sent.",
+            "If we can complete your registration, verification instructions may be sent.",
         );
         expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-        expect(screen.queryByRole("button", { name: "Resend verification email" })).not.toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Resend verification email" })).toBeInTheDocument();
         expect(authMocks.register).toHaveBeenCalledTimes(1);
+    });
+
+    it("offers a safe resend without revealing registration email delivery outcomes", async () => {
+        authMocks.register.mockResolvedValueOnce({
+            success: true,
+            user: { role: "WORKER" },
+        });
+        renderAuth("/register");
+        fireEvent.change(screen.getByLabelText("Full name"), { target: { value: "Amina Worker" } });
+        fireEvent.change(screen.getByLabelText("Email address (used to sign in)"), { target: { value: "amina@example.com" } });
+        fireEvent.change(screen.getByLabelText("Phone number"), { target: { value: "0712345678" } });
+        fireEvent.change(screen.getByLabelText("National ID"), { target: { value: "12345678" } });
+        fireEvent.change(screen.getByLabelText("Date of birth"), { target: { value: "1990-04-15" } });
+        fireEvent.change(screen.getByRole("combobox", { name: "Occupation" }), {
+            target: { value: "MARKET_VENDOR" },
+        });
+        fireEvent.click(screen.getByRole("button", { name: "Create account" }));
+
+        expect(await screen.findByRole("status")).toHaveTextContent(
+            "If we can complete your registration, verification instructions may be sent.",
+        );
+        expect(screen.getByRole("button", { name: "Resend verification email" })).toBeInTheDocument();
+        fireEvent.click(screen.getByRole("button", { name: "Resend verification email" }));
+        expect(await screen.findByText(
+            "If an eligible account or registration matches this address, verification instructions can be sent.",
+        )).toBeInTheDocument();
+        expect(authMocks.requestEmailVerificationForAddress).toHaveBeenCalledWith("amina@example.com");
+        expect(screen.queryByText(/verification email was accepted/i)).not.toBeInTheDocument();
     });
 
     it("disables duplicate registration submissions while account creation is pending", async () => {
@@ -378,5 +404,18 @@ describe("authentication pages", () => {
         fireEvent.click(screen.getByRole("button", { name: "Verify email and create account" }));
         expect(await screen.findByRole("status")).toHaveTextContent("Email address verified successfully.");
         expect(authMocks.verifyEmail).toHaveBeenCalledWith("opaque-test-token", "secure-pass-1");
+    });
+
+    it("shows staff sign-in and separate phone-verification next steps after email verification", async () => {
+        authMocks.verifyEmail.mockResolvedValueOnce({ next_step: "STAFF_SIGN_IN" });
+        renderAuth("/verify-email?token=opaque-test-token&flow=email-verification");
+        fireEvent.click(screen.getByRole("button", { name: "Verify email address" }));
+
+        expect(await screen.findByRole("status")).toHaveTextContent(
+            "Your email address is verified and your account is active.",
+        );
+        expect(screen.getByRole("status")).toHaveTextContent(
+            "Phone verification remains separate.",
+        );
     });
 });

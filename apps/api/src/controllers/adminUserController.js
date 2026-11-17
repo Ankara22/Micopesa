@@ -5,7 +5,7 @@ const { isSafePhotoReference, removeProfilePhoto } = require("../services/profil
 
 const VALID_ROLES = ["WORKER", "FUND_MANAGER", "REGULATOR", "ADMIN"];
 const VALID_STATUSES = ["ACTIVE", "INACTIVE", "SUSPENDED"];
-const SAFE_COLUMNS = "user_id, full_name, phone, role, occupation, account_status, is_temp_password, force_password_change, created_at, updated_at";
+const SAFE_COLUMNS = "user_id, full_name, phone, role, occupation, account_status, email_verified, phone_verified_at, is_temp_password, force_password_change, created_at, updated_at";
 
 /**
  * GET /api/admin/users

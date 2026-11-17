@@ -160,7 +160,7 @@ describe("shared ProfileCard", () => {
         renderProfile();
 
         expect(await screen.findByRole("alert")).toHaveTextContent(
-            "Your KYC was rejected. Balances, contributions, funds and withdrawals remain unavailable until your account is verified.",
+            "Your KYC was rejected. Review your status here and contact your fund administrator about correcting and resubmitting your identity information. Balances, contributions, funds and withdrawals remain unavailable until verification is complete.",
         );
     });
 

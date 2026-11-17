@@ -254,10 +254,16 @@ export function AuthProvider({ children }) {
                 date_of_birth: dateOfBirth,
             };
             await api.post("/api/auth/register", payload);
-            return { success: true };
+            return {
+                success: true,
+            };
         } catch (err) {
             setError(err.message);
-            return { success: false, message: err.message, code: err.response?.data?.code };
+            return {
+                success: false,
+                message: err.message,
+                code: err.response?.data?.code,
+            };
         }
     }, []);
 
