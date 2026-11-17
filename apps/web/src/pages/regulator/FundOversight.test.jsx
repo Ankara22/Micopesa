@@ -25,7 +25,7 @@ describe("Regulator FundOversight", () => {
         render(<FundOversight />);
 
         expect(screen.getByText(
-            "View pension funds available within your authorized regulatory scope."
+            "Review funds and allocation records within your authorized regulatory scope. Expected returns are configured assumptions, not realized performance."
         )).toBeInTheDocument();
         await waitFor(() => {
             expect(screen.getByText(
@@ -46,23 +46,23 @@ describe("Regulator FundOversight", () => {
             fund_status: "ACTIVE",
         }]);
         mocks.getFundAllocations.mockResolvedValue([{
-            allocation_id: "allocation-1",
-            account_id: "synthetic-account-id",
+            distribution_key: "67.50|2026-10-01|ongoing",
             percentage: "67.50",
             effective_from: "2026-10-01",
             effective_to: null,
+            allocation_count: 3,
         }]);
         render(<FundOversight />);
 
-        fireEvent.click(await screen.findByRole("button", { name: "View allocations" }));
+        fireEvent.click(await screen.findByRole("button", { name: "View allocation distribution" }));
 
-        const dialog = await screen.findByRole("dialog", { name: "Allocations - Assigned Growth" });
+        const dialog = await screen.findByRole("dialog", { name: "Allocation distribution - Assigned Growth" });
         const table = within(dialog).getByRole("table");
-        expect(within(table).getByText("Account 1")).toBeInTheDocument();
         expect(within(table).getByText("67.50%")).toBeInTheDocument();
-        expect(within(table).getByText("10/1/2026")).toBeInTheDocument();
+        expect(within(table).getByText("3")).toBeInTheDocument();
+        expect(within(table).getByText("01/10/2026")).toBeInTheDocument();
         expect(within(table).getByText("Ongoing")).toBeInTheDocument();
-        expect(dialog).not.toHaveTextContent("synthetic-account-id");
+        expect(dialog).not.toHaveTextContent("account_id");
         expect(within(dialog).queryByRole("button", { name: /edit|change/i })).not.toBeInTheDocument();
         expect(mocks.getFundAllocations).toHaveBeenCalledWith("fund-1");
     });

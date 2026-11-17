@@ -163,11 +163,28 @@
 }
 
 .app-sidebar {
+    position: sticky;
+    top: 60px;
+    align-self: flex-start;
+    display: flex;
+    flex-direction: column;
     width: 240px;
+    height: calc(100svh - 60px);
+    min-height: 0;
     flex-shrink: 0;
+    box-sizing: border-box;
     border-right: 1px solid var(--border);
     background: var(--bg);
-    padding: 16px 0;
+    padding: 12px 0;
+    overflow: hidden;
+}
+
+.app-sidebar nav {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
 }
 
 .app-sidebar nav ul {
@@ -179,13 +196,38 @@
     gap: 2px;
 }
 
+.app-sidebar-primary-list {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
 .app-sidebar nav a {
-    display: block;
-    padding: 10px 20px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 42px;
+    padding: 9px 18px;
     color: var(--text);
     text-decoration: none;
     font-size: 14px;
     border-left: 3px solid transparent;
+}
+
+.app-sidebar nav a span {
+    min-width: 0;
+}
+
+.app-sidebar .regulator-nav-icon {
+    width: 18px;
+    height: 18px;
+    flex: 0 0 18px;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 1.7;
 }
 
 .app-sidebar nav a:hover {
@@ -240,6 +282,8 @@
         position: fixed;
         top: 57px;
         bottom: 0;
+        height: auto;
+        max-height: calc(100svh - 57px);
         left: 0;
         transform: translateX(-100%);
         transition: transform 0.2s ease;
@@ -340,30 +384,32 @@
 }
 
 .admin-sidebar {
-    position: sticky;
     top: var(--admin-header-height);
-    align-self: flex-start;
     flex: 0 0 var(--admin-nav-width);
-    box-sizing: border-box;
     width: var(--admin-nav-width);
     height: calc(100svh - var(--admin-header-height));
-    padding: 22px 14px;
+    padding: 10px 12px;
     border-right: 1px solid #e8eee9;
     background: #fff;
 }
 
+.admin-sidebar nav {
+    gap: 8px;
+}
+
 .admin-sidebar nav ul {
-    gap: 5px;
+    gap: 2px;
 }
 
 .admin-sidebar nav a,
 .admin-sidebar nav a.active {
-    min-height: 42px;
+    min-height: 38px;
     box-sizing: border-box;
-    padding: 11px 13px;
+    padding: 8px 11px;
     border: 0;
-    border-radius: 11px;
+    border-radius: 9px;
     color: #55665c;
+    font-size: 13px;
     font-weight: 550;
     transition: color 0.15s ease, background-color 0.15s ease;
 }
@@ -377,6 +423,17 @@
     color: #0a5c36;
     background: #e2eedf;
     font-weight: 700;
+}
+
+.admin-sidebar .app-sidebar-primary-list {
+    padding-bottom: 4px;
+}
+
+.admin-sidebar .app-sidebar-pinned-list {
+    flex: 0 0 auto;
+    gap: 2px;
+    padding-top: 8px;
+    border-top: 1px solid #e8eee9;
 }
 
 .admin-main {
@@ -412,14 +469,14 @@
     }
 
     .admin-sidebar {
-        position: fixed;
         top: var(--admin-header-height);
         bottom: 0;
         left: 0;
         z-index: 20;
         width: min(var(--admin-nav-width), calc(100vw - 48px));
-        height: auto;
-        overflow-y: auto;
+        height: calc(100svh - var(--admin-header-height));
+        max-height: calc(100svh - var(--admin-header-height));
+        overflow: hidden;
         transform: translateX(-105%);
         transition: transform 0.2s ease;
         box-shadow: 0 16px 30px rgba(27, 67, 50, 0.12);
@@ -466,7 +523,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-    .admin-sidebar,
+    .app-sidebar,
     .admin-sidebar nav a {
         transition: none;
     }

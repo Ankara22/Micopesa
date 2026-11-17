@@ -30,6 +30,7 @@ function RegulatorAnalytics() {
                 <div>
                     <h1 className="page-title">{t("analytics.regulatorTitle")}</h1>
                     <p className="page-subtitle">{t("analytics.regulatorSubtitle")}</p>
+                    <p className="regulator-performance-note">{t("analytics.regulatorPerformanceNote")}</p>
                 </div>
             </header>
             <Link className="analytics-navigation" to="/regulator/dashboard">{t("analytics.backDashboard")}</Link>

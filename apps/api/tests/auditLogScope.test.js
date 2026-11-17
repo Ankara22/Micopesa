@@ -114,12 +114,12 @@ test("regulators see redacted KYC reviews and only fund assignments granting the
     assert.deepEqual(response.body.data, events);
     assert.deepEqual(calls[0].params, ["regulator-1", "REGULATOR"]);
     assert.match(calls[0].sql, /al\.entity_name = 'KYC_RECORD'[\s\S]*u\.role = 'ADMIN'/);
-    assert.match(calls[0].sql, /al\.entity_name = 'REGULATOR_FUND_ASSIGNMENT'[\s\S]*al\.details->>'regulatorUserId' = \$1/);
-    assert.match(calls[0].sql, /al\.details->>'active' = 'true'/);
+    assert.match(calls[1].sql, /al\.entity_name = 'REGULATOR_FUND_ASSIGNMENT'[\s\S]*al\.details->>'regulatorUserId' = \$1/);
+    assert.match(calls[1].sql, /al\.details->>'active' = 'true'/);
     assert.match(calls[0].sql, /rfa\.regulator_user_id = \$1[\s\S]*rfa\.fund_id = al\.entity_id[\s\S]*rfa\.active = TRUE/);
-    assert.match(calls[0].sql, /f\.fund_id = al\.entity_id/);
+    assert.match(calls[1].sql, /f\.fund_id = al\.entity_id/);
 
-    const selectedColumns = calls[0].sql.slice(0, calls[0].sql.indexOf("FROM audit_logs"));
+    const selectedColumns = calls[1].sql.slice(0, calls[1].sql.indexOf("FROM audit_logs"));
     assert.doesNotMatch(selectedColumns, /al\.user_id|u\.full_name|al\.entity_id,\s*al\.details/);
     assert.doesNotMatch(selectedColumns, /national_id|email|phone|password_hash|details,/i);
     assert.doesNotMatch(JSON.stringify(response.body.data), /national_id|email|phone|password_hash|user_id|kyc_id/i);
@@ -175,6 +175,61 @@ test("regulator audit history stays empty when no currently authorized events ex
     assert.match(calls[0].sql, /rfa\.regulator_user_id = \$1[\s\S]*rfa\.active = TRUE/);
 });
 
+test("operational audit applies validated filters and returns bounded pagination", async () => {
+    const calls = [];
+    const controller = loadController({
+        async query(sql, params) {
+            calls.push({ sql, params });
+            if (sql.includes("SELECT count(*)::int AS total_count")) {
+                return { rows: [{ total_count: 21 }] };
+            }
+            return { rows: [{ log_id: "log-1", action_type: "LOGIN" }] };
+        },
+    });
+    const response = {
+        status(code) { this.statusCode = code; return this; },
+        json(body) { this.body = body; return this; },
+    };
+
+    await controller.listOperationalLogs({
+        user: { userId: "manager-1", role: "FUND_MANAGER" },
+        query: {
+            page: "2",
+            page_size: "10",
+            start_date: "2026-01-01",
+            end_date: "2026-01-31",
+            action_type: "LOGIN",
+            category: "COMPLIANCE_REPORTS",
+        },
+    }, response);
+
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(calls[0].params, [
+        "manager-1", "FUND_MANAGER", "2026-01-01", "2026-01-31", "LOGIN", "COMPLIANCE_REPORTS",
+    ]);
+    assert.deepEqual(calls[1].params.slice(0, 6), calls[0].params);
+    assert.deepEqual(calls[1].params.slice(-2), [10, 10]);
+    assert.match(calls[0].sql, /al\."timestamp" >= \$3::date/);
+    assert.match(calls[0].sql, /al\.action_type = \$5/);
+    assert.deepEqual(response.body.pagination, {
+        page: 2,
+        page_size: 10,
+        total_count: 21,
+        total_pages: 3,
+    });
+
+    const invalid = {
+        status(code) { this.statusCode = code; return this; },
+        json(body) { this.body = body; return this; },
+    };
+    await controller.listOperationalLogs({
+        user: { userId: "manager-1", role: "FUND_MANAGER" },
+        query: { start_date: "2026-02-01", end_date: "2026-01-01" },
+    }, invalid);
+    assert.equal(invalid.statusCode, 400);
+    assert.equal(calls.length, 2);
+});
+
 test("operational audit database errors return a safe error response and log only the error code", async () => {
     const controller = loadController({
         async query() {
@@ -211,8 +266,11 @@ test("operational audit database errors return a safe error response and log onl
 test("explicitly global role-notification audit entries remain visible without granting unknown event access", async () => {
     const controller = loadController({
         async query(sql, params) {
-            assert.deepEqual(params, ["manager-1", "FUND_MANAGER"]);
+            assert.deepEqual(params.slice(0, 2), ["manager-1", "FUND_MANAGER"]);
             assert.match(sql, /al\.details \? 'scopeFundId'/);
+            if (sql.includes("SELECT count(*)::int AS total_count")) {
+                return { rows: [{ total_count: 1 }] };
+            }
             return {
                 rows: [{
                     entity_name: "ROLE_NOTIFICATION",

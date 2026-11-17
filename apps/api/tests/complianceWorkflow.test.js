@@ -145,7 +145,12 @@ async function fakeQuery(query, values = []) {
     if (sql.startsWith("SELECT cr.report_id, cr.fund_id, f.fund_name")) {
         return result([...fixture.reports.values()]
             .filter((report) => fixture.funds.get(report.fund_id)?.managed_by === values[0])
-            .map((report) => ({ ...report, fund_name: fixture.funds.get(report.fund_id).fund_name })));
+            .map((report) => ({
+                ...report,
+                fund_name: fixture.funds.get(report.fund_id).fund_name,
+                report_category: report.report_content?.report_category || null,
+                is_synthetic_demo: report.report_content?.demo_classification === "SYNTHETIC_DEMO",
+            })));
     }
     if (sql.startsWith("SELECT cr.report_id, cr.generated_by, manager.full_name")) {
         assert.match(sql, /\bcr\.is_legacy\b/);
@@ -237,6 +242,8 @@ async function fakeQuery(query, values = []) {
                 ...report,
                 manager_id: report.generated_by,
                 manager_name: report.generated_by,
+                report_category: report.report_content?.report_category || null,
+                is_synthetic_demo: report.report_content?.demo_classification === "SYNTHETIC_DEMO",
                 is_legacy_history: report.is_legacy || !report.fund_id || !report.submitted_at
                     || !report.last_submitted_at
                     || !fixture.submissions.some((submission) => submission.report_id === report.report_id),
@@ -397,6 +404,19 @@ const completeReport = {
         supporting_information: "Supporting documentation is summarized in this section.",
     },
 };
+const syntheticDemoReport = {
+    ...completeReport,
+    report_type: "INTERNAL",
+    report_content: {
+        report_category: "QUARTERLY_CONTRIBUTION_RECONCILIATION",
+        demo_classification: "SYNTHETIC_DEMO",
+        executive_summary: "SYNTHETIC DEMONSTRATION ONLY - NOT A GENUINE REGULATORY SUBMISSION. Fictional quarterly totals only.",
+        financial_summary: "SYNTHETIC DEMONSTRATION ONLY - NOT A GENUINE REGULATORY SUBMISSION. All amounts are invented.",
+        risk_and_governance: "SYNTHETIC DEMONSTRATION ONLY - NOT A GENUINE REGULATORY SUBMISSION. This is a fictional control example.",
+        incidents_and_actions: "SYNTHETIC DEMONSTRATION ONLY - NOT A GENUINE REGULATORY SUBMISSION. No actual incident is represented.",
+        supporting_information: "SYNTHETIC DEMONSTRATION ONLY - NOT A GENUINE REGULATORY SUBMISSION. No real records are referenced.",
+    },
+};
 
 async function createAndSubmit() {
     const createdResponse = response();
@@ -447,6 +467,84 @@ test("a manager cannot create a report for another manager's fund", async () => 
     assert.equal(res.statusCode, 404);
     assert.equal(fixture.reports.size, 0);
     assert.equal(fixture.audits.length, 0);
+});
+
+test("synthetic demonstrations use the authorized workflow and remain unmistakably classified", async () => {
+    resetFixture();
+    const created = response();
+    await workflow.createDraft({ user: { userId: "manager-1" }, body: syntheticDemoReport }, created);
+    assert.equal(created.statusCode, 201);
+    const reportId = created.body.data.report.report_id;
+    assert.equal(created.body.data.report.report_content.demo_classification, "SYNTHETIC_DEMO");
+    assert.equal(created.body.data.report.report_content.report_category, "QUARTERLY_CONTRIBUTION_RECONCILIATION");
+
+    const submitted = response();
+    await workflow.submitReport({ user: { userId: "manager-1" }, params: { reportId } }, submitted);
+    assert.equal(submitted.statusCode, 200);
+    assert.equal(fixture.submissions[0].report_content.demo_classification, "SYNTHETIC_DEMO");
+
+    const managerList = response();
+    await workflow.listManagerReports({ user: { userId: "manager-1" } }, managerList);
+    assert.equal(managerList.body.data[0].is_synthetic_demo, true);
+
+    const regulatorList = response();
+    await regulator.listReports({ user: { userId: "regulator-1" }, query: {} }, regulatorList);
+    assert.equal(regulatorList.statusCode, 200);
+    assert.equal(regulatorList.body.data[0].is_synthetic_demo, true);
+    assert.equal(regulatorList.body.data[0].report_category, "QUARTERLY_CONTRIBUTION_RECONCILIATION");
+});
+
+test("synthetic reports require INTERNAL type and cannot lose their disclosure", async () => {
+    resetFixture();
+    const invalidCategory = response();
+    await workflow.createDraft({
+        user: { userId: "manager-1" },
+        body: {
+            ...syntheticDemoReport,
+            report_content: {
+                ...syntheticDemoReport.report_content,
+                report_category: "UNSUPPORTED_CATEGORY",
+            },
+        },
+    }, invalidCategory);
+    assert.equal(invalidCategory.statusCode, 400);
+
+    const invalidType = response();
+    await workflow.createDraft({
+        user: { userId: "manager-1" },
+        body: { ...syntheticDemoReport, report_type: "RBA" },
+    }, invalidType);
+    assert.equal(invalidType.statusCode, 400);
+    assert.equal(fixture.reports.size, 0);
+
+    const created = response();
+    await workflow.createDraft({ user: { userId: "manager-1" }, body: syntheticDemoReport }, created);
+    const reportId = created.body.data.report.report_id;
+    const strippedClassification = response();
+    const { demo_classification, ...unmarkedContent } = syntheticDemoReport.report_content;
+    await workflow.updateDraft({
+        user: { userId: "manager-1" },
+        params: { reportId },
+        body: { report_content: unmarkedContent },
+    }, strippedClassification);
+    assert.equal(strippedClassification.statusCode, 400);
+    assert.equal(fixture.reports.get(reportId).report_content.demo_classification, "SYNTHETIC_DEMO");
+
+    const editedContent = {
+        ...syntheticDemoReport.report_content,
+        executive_summary: "This section no longer carries its required synthetic disclosure.",
+    };
+    const update = response();
+    await workflow.updateDraft({
+        user: { userId: "manager-1" },
+        params: { reportId },
+        body: { report_content: editedContent },
+    }, update);
+    assert.equal(update.statusCode, 200);
+    const submit = response();
+    await workflow.submitReport({ user: { userId: "manager-1" }, params: { reportId } }, submit);
+    assert.equal(submit.statusCode, 400);
+    assert.equal(fixture.submissions.length, 0);
 });
 
 test("a manager cannot submit a report after fund ownership changes", async () => {

@@ -2,6 +2,57 @@
     min-width: 0;
 }
 
+.compliance-report-register,
+.compliance-report-queue {
+    display: grid;
+    gap: 12px;
+    min-width: 0;
+    margin-top: 18px;
+    padding: 18px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--bg);
+}
+
+.compliance-register-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+}
+
+.compliance-register-heading h2 {
+    margin: 0;
+    color: var(--text-h);
+    font-size: 18px;
+}
+
+.compliance-register-heading p {
+    margin: 6px 0 0;
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.compliance-register-heading a {
+    flex: 0 0 auto;
+    color: var(--accent-text);
+    font-size: 13px;
+    font-weight: 700;
+    text-underline-offset: 3px;
+}
+
+.compliance-queue-count {
+    flex: 0 0 auto;
+    padding: 6px 10px;
+    border-radius: 999px;
+    color: var(--text-h);
+    background: var(--accent-bg);
+    font-size: 12px;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
 .compliance-actions,
 .compliance-filter-actions,
 .compliance-period-fields,
@@ -42,6 +93,29 @@
     color: var(--text-muted, #566273);
 }
 
+.compliance-synthetic-notice {
+    margin: 0;
+    padding: 0.75rem;
+    border: 1px solid var(--warning-border, #b7791f);
+    border-radius: 0.55rem;
+    color: var(--text-h);
+    background: var(--warning-bg, #fff8e6);
+    font-weight: 650;
+}
+
+.compliance-demo-badge {
+    display: inline-block;
+    max-width: 22rem;
+    padding: 0.25rem 0.5rem;
+    border: 1px solid var(--warning-border, #b7791f);
+    border-radius: 0.45rem;
+    color: var(--text-h);
+    background: var(--warning-bg, #fff8e6);
+    font-size: 0.8rem;
+    line-height: 1.4;
+    white-space: normal;
+}
+
 .compliance-report-detail {
     display: grid;
     gap: 1rem;
@@ -74,6 +148,15 @@
 }
 
 @media (max-width: 600px) {
+    .compliance-report-register,
+    .compliance-report-queue {
+        padding: 14px;
+    }
+
+    .compliance-register-heading {
+        flex-direction: column;
+    }
+
     .compliance-actions > .btn,
     .compliance-filter-actions > .btn {
         flex: 1 1 auto;

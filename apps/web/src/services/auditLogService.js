@@ -1,8 +1,11 @@
 import api from "./api";
 
-export async function getOperationalLogs() {
-    const res = await api.get("/api/audit-logs/operational");
-    return res.data.data;
+export async function getOperationalLogs(filters = {}) {
+    const res = await api.get("/api/audit-logs/operational", { params: filters });
+    return {
+        rows: res.data.data,
+        pagination: res.data.pagination,
+    };
 }
 
 export async function getSystemLogs() {

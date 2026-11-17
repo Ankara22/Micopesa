@@ -1,0 +1,19 @@
+.reports-disclaimer {
+    border-left: 4px solid var(--primary, #166534);
+    padding: 12px 16px;
+    background: var(--surface-muted, #f8fafc);
+}
+
+.reports-history-pagination {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 12px;
+    margin-top: 14px;
+}
+
+.reports-history-pagination span {
+    color: var(--text);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+}

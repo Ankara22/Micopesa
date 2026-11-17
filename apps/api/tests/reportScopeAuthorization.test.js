@@ -32,11 +32,35 @@ function createHistoryService({ fundIds = ["fund-1"], rows = [] } = {}) {
                 if (sql.includes("FROM regulator_fund_assignments")) {
                     return { rows: fundIds.map((fund_id) => ({ fund_id })) };
                 }
-                if (sql.includes("FROM report_generation_history h")) {
-                    return params.length === 2
-                        ? { rows: rows.filter((row) =>
-                            row.generated_by === params[0] && row.generator_role === params[1]) }
-                        : { rows };
+                if (sql.includes("FROM report_generation_history")) {
+                    if (sql.includes("SELECT count(*)::int AS total_count")) {
+                        const matching = params.length === 3
+                            ? rows.filter((row) =>
+                                row.generated_by === params[0] &&
+                                row.generator_role === params[1] &&
+                                Array.isArray(row.scope_fund_ids) &&
+                                row.scope_fund_ids.every((id) => fundIds.includes(id)) &&
+                                (row.scope_fund_ids.length > 0 || row.result_count === 0) &&
+                                row.applied_filters &&
+                                (!Object.hasOwn(row.applied_filters, "fund_id") ||
+                                    fundIds.includes(row.applied_filters.fund_id)))
+                            : rows;
+                        return { rows: [{ total_count: matching.length }] };
+                    }
+                    const matching = params.length === 5
+                        ? rows.filter((row) =>
+                            row.generated_by === params[0] &&
+                            row.generator_role === params[1] &&
+                            Array.isArray(row.scope_fund_ids) &&
+                            row.scope_fund_ids.every((id) => fundIds.includes(id)) &&
+                            (row.scope_fund_ids.length > 0 || row.result_count === 0) &&
+                            row.applied_filters &&
+                            (!Object.hasOwn(row.applied_filters, "fund_id") ||
+                                fundIds.includes(row.applied_filters.fund_id)))
+                        : rows;
+                    const pageSize = params.length === 5 ? params[3] : params[0];
+                    const offset = params.length === 5 ? params[4] : params[1];
+                    return { rows: matching.slice(offset, offset + pageSize) };
                 }
                 throw new Error(`Unexpected report SQL: ${sql}`);
             },
@@ -78,9 +102,11 @@ test("regulator report history retains active scopes and explicit empty results,
 
     const result = await service.listHistory({ userId: "regulator-1", role: "REGULATOR" });
 
-    assert.deepEqual(result.map((entry) => entry.report_id), [REPORT_ID, "empty"]);
+    assert.deepEqual(result.records.map((entry) => entry.report_id), [REPORT_ID, "empty"]);
+    assert.deepEqual(result.pagination, { page: 1, page_size: 50, total_count: 2, total_pages: 1 });
     assert.deepEqual(calls[0].params, ["regulator-1"]);
-    assert.match(calls[1].sql, /h\.generated_by = \$1 AND h\.generator_role = \$2/);
+    assert.match(calls[2].sql, /h\.generated_by = \$1 AND h\.generator_role = \$2/);
+    assert.match(calls[2].sql, /LIMIT \$4 OFFSET \$5/);
 });
 
 test("admin report history preserves intentionally unscoped history", async () => {
@@ -94,9 +120,82 @@ test("admin report history preserves intentionally unscoped history", async () =
 
     const result = await service.listHistory({ userId: "admin-1", role: "ADMIN" });
 
-    assert.deepEqual(result, [globalEntry]);
-    assert.equal(calls.length, 1);
-    assert.doesNotMatch(calls[0].sql, /WHERE h\.generated_by =/);
+    assert.deepEqual(result.records, [globalEntry]);
+    assert.deepEqual(result.pagination, { page: 1, page_size: 50, total_count: 1, total_pages: 1 });
+    assert.equal(calls.length, 2);
+    assert.doesNotMatch(calls[1].sql, /WHERE h\.generated_by =/);
+});
+
+test("report history applies bounded pagination and rejects invalid page values", async () => {
+    const { calls, service } = createHistoryService({
+        rows: [
+            historyRow(),
+            historyRow({ report_id: "report-2" }),
+        ],
+    });
+
+    const result = await service.listHistory({
+        userId: "regulator-1",
+        role: "REGULATOR",
+        page: "2",
+        page_size: "1",
+    });
+    assert.deepEqual(result.records.map((entry) => entry.report_id), ["report-2"]);
+    assert.deepEqual(result.pagination, { page: 2, page_size: 1, total_count: 2, total_pages: 2 });
+    assert.deepEqual(calls[2].params.slice(-2), [1, 1]);
+    await assert.rejects(
+        () => service.listHistory({ userId: "regulator-1", role: "REGULATOR", page: "0" }),
+        { code: "REPORT_INVALID_PAGINATION", statusCode: 400 }
+    );
+});
+
+test("regulator report catalog exposes scoped KYC, payment reconciliation and audit summaries", async () => {
+    const dataQueries = [];
+    const service = createReportService({
+        async query(sql, params = []) {
+            if (sql.includes("FROM regulator_fund_assignments")) {
+                return { rows: [{ fund_id: "fund-1" }] };
+            }
+            if (sql.includes("WITH report_data AS")) {
+                dataQueries.push({ sql, params });
+                return { rows: [] };
+            }
+            if (sql.includes("INSERT INTO report_generation_history")) {
+                return { rows: [{ report_id: REPORT_ID, generated_at: "2026-11-04T00:00:00Z" }] };
+            }
+            if (sql.includes("INSERT INTO report_download_events")) return { rows: [] };
+            throw new Error(`Unexpected report SQL: ${sql}`);
+        },
+    });
+
+    const catalog = service.listCatalog("REGULATOR");
+    const reportKeys = [
+        "kyc-status-summary",
+        "payment-reconciliation-summary",
+        "regulatory-audit-activity",
+    ];
+    assert.ok(reportKeys.every((key) => catalog.includes(key)));
+    for (const reportKey of reportKeys) {
+        await service.generate({
+            userId: "regulator-1",
+            role: "REGULATOR",
+            reportKey,
+            filters: {},
+            format: "CSV",
+            language: "en",
+        });
+    }
+
+    assert.equal(dataQueries.length, 3);
+    for (const { sql, params } of dataQueries) {
+        assert.deepEqual(params[6], ["fund-1"]);
+        assert.match(sql, /\$7::text\[\] IS NULL OR fund_id::text = ANY\(\$7\)/);
+    }
+    assert.match(dataQueries[0].sql, /count\(DISTINCT k\.user_id\)::integer AS worker_count/);
+    assert.match(dataQueries[1].sql, /count\(DISTINCT a\.attempt_id\)::integer AS attempt_count/);
+    assert.match(dataQueries[1].sql, /'PENDING', 'OUTCOME_UNKNOWN', 'PROMPT_ACCEPTED'/);
+    assert.match(dataQueries[2].sql, /al\.entity_name = 'COMPLIANCE_REPORTS'/);
+    assert.match(dataQueries[2].sql, /cr\.is_legacy = TRUE OR cr\.rba_status <> 'DRAFT'/);
 });
 
 test("regulator downloads only reports owned by them and within their current active fund scope", async (t) => {
