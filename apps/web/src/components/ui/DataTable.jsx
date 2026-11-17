@@ -46,7 +46,7 @@ function DataTable({
             <>
                 {refreshing && <LoadingState message={refreshingLabel} />}
                 {error && <ErrorState message={error} title={errorTitle} retryLabel={retryLabel} onRetry={onRetry} />}
-                <div className="state-block"><span>{emptyMessage}</span></div>
+                {!error && <div className="state-block"><span>{emptyMessage}</span></div>}
             </>
         );
     }

@@ -42,6 +42,8 @@ import RegulatorDashboard from "../pages/regulator/Dashboard";
 import RegulatorAnalytics from "../pages/regulator/Analytics";
 import RegulatorFundOversight from "../pages/regulator/FundOversight";
 import RegulatorComplianceReports from "../pages/regulator/ComplianceReports";
+import RegulatorParameters from "../pages/regulator/RegulatoryParameters";
+import RegulatorKycOversight from "../pages/regulator/KycOversight";
 import RegulatorAuditLogs from "../pages/regulator/AuditLogs";
 import RegulatorProfile from "../pages/regulator/Profile";
 import RoleNotifications from "../pages/notifications/RoleNotifications";
@@ -149,6 +151,8 @@ function AppRoutes() {
                 <Route path="/regulator/analytics" element={<RegulatorAnalytics />} />
                 <Route path="/regulator/funds" element={<RegulatorFundOversight />} />
                 <Route path="/regulator/compliance-reports" element={<RegulatorComplianceReports />} />
+                <Route path="/regulator/regulatory-parameters" element={<RegulatorParameters />} />
+                <Route path="/regulator/kyc-oversight" element={<RegulatorKycOversight />} />
                 <Route path="/regulator/audit-logs" element={<RegulatorAuditLogs />} />
                 <Route path="/regulator/notifications" element={<RoleNotifications />} />
                 <Route path="/regulator/notification-audit-log" element={<NotificationAuditPage />} />

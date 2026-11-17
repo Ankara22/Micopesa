@@ -57,4 +57,18 @@ describe("shared loading primitives", () => {
         rerender(<DataTable columns={columns} rows={null} error="Initial load failed" onRetry={retry} />);
         expect(screen.getByRole("alert")).toHaveTextContent("Initial load failed");
     });
+
+    it("does not present a failed empty response as a successful empty state", () => {
+        render(
+            <DataTable
+                columns={columns}
+                rows={[]}
+                error="The report request failed."
+                emptyMessage="No reports are recorded."
+            />
+        );
+
+        expect(screen.getByRole("alert")).toHaveTextContent("The report request failed.");
+        expect(screen.queryByText("No reports are recorded.")).not.toBeInTheDocument();
+    });
 });

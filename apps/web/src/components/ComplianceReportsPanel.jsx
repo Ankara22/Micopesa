@@ -14,6 +14,13 @@ import Button from "./ui/Button";
 import Modal from "./ui/Modal";
 import FormField from "./ui/FormField";
 import { useToast } from "./ui/ToastContext";
+import {
+    getReportCategoryLabel,
+    isSyntheticDemo,
+    REPORT_CATEGORIES,
+    SYNTHETIC_DEMO_CLASSIFICATION,
+    SYNTHETIC_DEMO_TEMPLATES,
+} from "../utils/complianceReports";
 import "./compliance-workflow.css";
 
 const CONTENT_FIELDS = [
@@ -28,7 +35,10 @@ const EMPTY_FORM = {
     report_type: "RBA",
     period_start: "",
     period_end: "",
-    report_content: Object.fromEntries(CONTENT_FIELDS.map(([key]) => [key, ""])),
+    report_content: {
+        report_category: "GENERAL_COMPLIANCE",
+        ...Object.fromEntries(CONTENT_FIELDS.map(([key]) => [key, ""])),
+    },
 };
 
 function formatDate(value) {
@@ -49,9 +59,20 @@ function ComplianceReportsPanel({ title, subtitle }) {
     const [saving, setSaving] = useState(false);
     const submissionInProgressRef = useRef(false);
 
-    function openNewDraft() {
+    function openNewDraft(syntheticDemo = false) {
         setEditingId(null);
-        setForm({ ...EMPTY_FORM, report_content: { ...EMPTY_FORM.report_content } });
+        const demoCategory = "QUARTERLY_CONTRIBUTION_RECONCILIATION";
+        setForm({
+            ...EMPTY_FORM,
+            report_type: syntheticDemo ? "INTERNAL" : EMPTY_FORM.report_type,
+            report_content: syntheticDemo
+                ? {
+                    ...SYNTHETIC_DEMO_TEMPLATES[demoCategory],
+                    report_category: demoCategory,
+                    demo_classification: SYNTHETIC_DEMO_CLASSIFICATION,
+                }
+                : { ...EMPTY_FORM.report_content },
+        });
         setEditorOpen(true);
     }
 
@@ -148,6 +169,14 @@ function ComplianceReportsPanel({ title, subtitle }) {
     const columns = [
         { key: "fund_name", header: "Fund", render: (row) => row.is_legacy || !row.fund_id ? "Legacy historical" : row.fund_name },
         { key: "report_type", header: "Type" },
+        { key: "report_category", header: "Category", render: (row) => getReportCategoryLabel(row.report_category) },
+        {
+            key: "is_synthetic_demo",
+            header: "Classification",
+            render: (row) => row.is_synthetic_demo
+                ? <span className="compliance-demo-badge">Synthetic demo — not a genuine regulatory submission</span>
+                : "Not marked synthetic",
+        },
         { key: "period_start", header: "Period", render: (row) => `${row.period_start || "—"} – ${row.period_end || "—"}` },
         { key: "rba_status", header: "Status", render: (row) => <StatusBadge status={row.rba_status} /> },
         { key: "last_submitted_at", header: "Last submitted", render: (row) => formatDate(row.last_submitted_at) },
@@ -174,7 +203,10 @@ function ComplianceReportsPanel({ title, subtitle }) {
                     <h1 className="page-title">{title}</h1>
                     <p className="page-subtitle">{subtitle}</p>
                 </div>
-                <Button variant="primary" onClick={openNewDraft}>+ Create report</Button>
+                <div className="compliance-actions">
+                    <Button variant="primary" onClick={() => openNewDraft(false)}>+ Create report</Button>
+                    <Button variant="secondary" onClick={() => openNewDraft(true)}>Create synthetic demo report</Button>
+                </div>
             </div>
 
             <DataTable
@@ -190,13 +222,18 @@ function ComplianceReportsPanel({ title, subtitle }) {
 
             <Modal
                 open={editorOpen}
-                title={editingId ? "Edit compliance report" : "Create compliance report draft"}
+                title={editingId ? "Edit compliance report" : isSyntheticDemo(form.report_content) ? "Create synthetic demo report draft" : "Create compliance report draft"}
                 onClose={() => !saving && setEditorOpen(false)}
             >
                 <form className="form-grid" onSubmit={handleSave}>
                     {editingId && (
                         <p className="compliance-evidence-note">
                             Existing report ID: <strong>{editingId}</strong>. Saving or submitting updates this report.
+                        </p>
+                    )}
+                    {isSyntheticDemo(form.report_content) && (
+                        <p className="compliance-synthetic-notice" role="status">
+                            Synthetic demonstration only — not a genuine regulatory submission. Use fictional information only; this report is stored and reviewed through the normal workflow.
                         </p>
                     )}
                     <FormField
@@ -218,12 +255,25 @@ function ComplianceReportsPanel({ title, subtitle }) {
                         as="select"
                         value={form.report_type}
                         onChange={handleChange}
-                        disabled={saving}
+                        disabled={saving || isSyntheticDemo(form.report_content)}
                         options={[
                             { value: "RBA", label: "RBA" },
                             { value: "NSSF", label: "NSSF" },
                             { value: "INTERNAL", label: "Internal" },
                         ]}
+                    />
+                    <FormField
+                        id="report_category"
+                        name="report_content.report_category"
+                        label="Report category"
+                        as="select"
+                        value={form.report_content.report_category || "GENERAL_COMPLIANCE"}
+                        onChange={handleChange}
+                        disabled={saving || isSyntheticDemo(form.report_content)}
+                        options={REPORT_CATEGORIES.map((category) => ({
+                            value: category.value,
+                            label: category.label,
+                        }))}
                     />
                     <div className="compliance-period-fields">
                         <FormField id="period_start" label="Period start" type="date" value={form.period_start} onChange={handleChange} disabled={saving} />
@@ -273,6 +323,12 @@ function ComplianceReportsPanel({ title, subtitle }) {
                             </p>
                         )}
                         <p><strong>Fund:</strong> {reportDetails.report.fund_name || "Legacy report"}</p>
+                        <p><strong>Report category:</strong> {getReportCategoryLabel(reportDetails.report.report_category || reportDetails.report.report_content?.report_category)}</p>
+                        {isSyntheticDemo(reportDetails.report.report_content) && (
+                            <p className="compliance-synthetic-notice" role="status">
+                                Synthetic demonstration only — not a genuine regulatory submission.
+                            </p>
+                        )}
                         <p><strong>Reporting period:</strong> {reportDetails.report.period_start || "—"} – {reportDetails.report.period_end || "—"}</p>
                         <p><strong>Current status:</strong> <StatusBadge status={reportDetails.report.rba_status} /></p>
                         {reportDetails.reviews.map((review) => (
@@ -290,6 +346,12 @@ function ComplianceReportsPanel({ title, subtitle }) {
                         {reportDetails.submissions.map((submission) => (
                             <section className="compliance-history-item" key={submission.submission_id}>
                                 <h3>Submission {submission.version}</h3>
+                                {isSyntheticDemo(submission.report_content) && (
+                                    <p className="compliance-synthetic-notice" role="status">
+                                        Synthetic demonstration only — not a genuine regulatory submission.
+                                    </p>
+                                )}
+                                <p><strong>Report category:</strong> {getReportCategoryLabel(submission.report_content?.report_category)}</p>
                                 <small>
                                     Submitted by: {submission.submitted_by_name || "Historical name unavailable"}
                                     {submission.submitted_by_role ? ` (${submission.submitted_by_role})` : ""}

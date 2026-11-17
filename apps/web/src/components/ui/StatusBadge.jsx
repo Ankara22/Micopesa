@@ -14,6 +14,8 @@ const COLOR_MAP = {
     SUBMITTED: "yellow",
     TIMED_OUT: "yellow",
     UNKNOWN: "yellow",
+    ATTENTION_REQUIRED: "yellow",
+    UNEVALUATED: "yellow",
 
     REJECTED: "red",
     FAILED: "red",
@@ -24,6 +26,7 @@ const COLOR_MAP = {
     INACTIVE: "gray",
     CLOSED: "gray",
     DRAFT: "gray",
+    NOT_CONFIGURED: "gray",
 
     PROCESSING: "blue",
     PROVIDER_ACCEPTED: "blue",

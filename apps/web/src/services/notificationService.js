@@ -67,9 +67,20 @@ export async function createRoleNotification(payload) {
     return res.data.data.notifications;
 }
 
-export async function listNotificationAudit() {
-    const res = await api.get("/api/notifications/audit");
-    return res.data.data;
+export async function listNotificationAudit(filters = {}) {
+    const res = await api.get("/api/notifications/audit", { params: filters });
+    if (
+        !Array.isArray(res.data?.data) ||
+        !res.data.pagination ||
+        !res.data.summary
+    ) {
+        throw new Error("The notification audit response was incomplete.");
+    }
+    return {
+        records: res.data.data,
+        pagination: res.data.pagination,
+        summary: res.data.summary,
+    };
 }
 
 export async function getPushPublicKey() {

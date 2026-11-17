@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ToastProvider } from "../../components/ui/ToastContext";
 import i18n from "../../i18n";
@@ -53,7 +53,11 @@ describe("role-scoped notifications", () => {
             push_subscription_count: 1,
             scope_fund_id: "fund-1",
         }]);
-        mocks.listNotificationAudit.mockResolvedValue([]);
+        mocks.listNotificationAudit.mockResolvedValue({
+            records: [],
+            pagination: { page: 1, total_pages: 0 },
+            summary: { total_count: 3, authorized_count: 2, denied_count: 1 },
+        });
         mocks.createRoleNotification.mockResolvedValue([]);
         mocks.getMyNotificationPreferences.mockResolvedValue({
             email_enabled: false,
@@ -118,5 +122,14 @@ describe("role-scoped notifications", () => {
         const categorySelect = screen.getByLabelText("Notification category");
         expect(categorySelect.querySelectorAll("option")).toHaveLength(4);
         expect(screen.queryByRole("option", { name: "Scheme update" })).not.toBeInTheDocument();
+    });
+
+    it("renders the actual authorization summary returned by the audit endpoint", async () => {
+        render(<ToastProvider><RoleNotifications /></ToastProvider>);
+
+        const summary = await screen.findByRole("region", { name: "Notification audit summary" });
+        expect(within(summary).getByText("3")).toBeInTheDocument();
+        expect(within(summary).getByText("2")).toBeInTheDocument();
+        expect(within(summary).getByText("1")).toBeInTheDocument();
     });
 });

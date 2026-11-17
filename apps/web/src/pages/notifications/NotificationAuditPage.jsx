@@ -1,24 +1,36 @@
-import { useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import useApi from "../../hooks/useApi";
 import DataTable from "../../components/ui/DataTable";
+import Button from "../../components/ui/Button";
 import { normalizeNotificationStatus } from "../../components/ui/notificationStatus";
 import { listNotificationAudit } from "../../services/notificationService";
 import "./notifications.css";
 
+const CHANNELS = ["SMS", "EMAIL", "PUSH"];
+const DELIVERY_STATUSES = ["PENDING", "PROVIDER_ACCEPTED", "DELIVERED", "FAILED", "UNKNOWN", "SKIPPED"];
+const EMPTY_FILTERS = {
+    start_date: "",
+    end_date: "",
+    channel: "",
+    authorization_outcome: "",
+    delivery_status: "",
+};
+
 function NotificationAuditPage() {
     const { t, i18n } = useTranslation();
-    const auditApi = useApi(listNotificationAudit, []);
-    const auditRows = useMemo(
-        () => Array.isArray(auditApi.data) ? auditApi.data : [],
-        [auditApi.data]
+    const [filters, setFilters] = useState(EMPTY_FILTERS);
+    const [appliedFilters, setAppliedFilters] = useState({});
+    const [page, setPage] = useState(1);
+    const fetchAudit = useCallback(
+        () => listNotificationAudit({ ...appliedFilters, page, page_size: 25 }),
+        [appliedFilters, page]
     );
-    const auditSummary = useMemo(() => auditRows.reduce((summary, row) => {
-        summary.total += 1;
-        if (row.authorization_outcome === "AUTHORIZED") summary.authorized += 1;
-        if (row.authorization_outcome === "DENIED") summary.denied += 1;
-        return summary;
-    }, { total: 0, authorized: 0, denied: 0 }), [auditRows]);
+    const auditApi = useApi(fetchAudit, [fetchAudit]);
+    const records = auditApi.data?.records;
+    const pagination = auditApi.data?.pagination;
+    const summary = auditApi.data?.summary;
+
     const columns = useMemo(() => [
         {
             key: "created_at",
@@ -65,6 +77,19 @@ function NotificationAuditPage() {
         },
     ], [i18n.language, t]);
 
+    function updateFilter(event) {
+        const { name, value } = event.target;
+        setFilters((current) => ({ ...current, [name]: value }));
+    }
+
+    function applyFilters(event) {
+        event.preventDefault();
+        setPage(1);
+        setAppliedFilters(Object.fromEntries(
+            Object.entries(filters).filter(([, value]) => value.trim() !== "")
+        ));
+    }
+
     return (
         <div className="page-content notification-page">
             <header className="page-header">
@@ -73,28 +98,78 @@ function NotificationAuditPage() {
                     <p className="page-subtitle">{t("roleNotifications.auditSubtitle")}</p>
                 </div>
             </header>
-            {Array.isArray(auditApi.data) && (
+            {auditApi.data && summary && (
                 <section className="notification-summary" aria-label={t("roleNotifications.summary")}>
                     {[
-                        ["total", "summaryLabels.total", "•"],
-                        ["authorized", "summaryLabels.authorized", "✓"],
-                        ["denied", "summaryLabels.denied", "!"],
-                    ].map(([key, label, icon]) => (
+                        ["total_count", "summaryLabels.total", "•", "total"],
+                        ["authorized_count", "summaryLabels.authorized", "✓", "authorized"],
+                        ["denied_count", "summaryLabels.denied", "!", "denied"],
+                    ].map(([key, label, icon, variant]) => (
                         <article className="notification-summary-card" key={key}>
-                            <span className={`notification-summary-icon notification-summary-icon--${key}`} aria-hidden="true">
+                            <span className={`notification-summary-icon notification-summary-icon--${variant}`} aria-hidden="true">
                                 {icon}
                             </span>
                             <div>
                                 <span className="notification-summary-label">{t(`roleNotifications.${label}`)}</span>
-                                <strong>{auditSummary[key]}</strong>
+                                <strong>{summary[key]}</strong>
                             </div>
                         </article>
                     ))}
                 </section>
             )}
+            <form className="notification-audit-filters" onSubmit={applyFilters}>
+                <label className="form-field">
+                    <span>{t("roleNotifications.dateFrom")}</span>
+                    <input type="date" name="start_date" value={filters.start_date} onChange={updateFilter} />
+                </label>
+                <label className="form-field">
+                    <span>{t("roleNotifications.dateTo")}</span>
+                    <input type="date" name="end_date" value={filters.end_date} onChange={updateFilter} />
+                </label>
+                <label className="form-field">
+                    <span>{t("roleNotifications.channelFilter")}</span>
+                    <select name="channel" value={filters.channel} onChange={updateFilter}>
+                        <option value="">{t("roleNotifications.allChannels")}</option>
+                        {CHANNELS.map((channel) => <option key={channel} value={channel}>{channel}</option>)}
+                    </select>
+                </label>
+                <label className="form-field">
+                    <span>{t("roleNotifications.authorizationFilter")}</span>
+                    <select name="authorization_outcome" value={filters.authorization_outcome} onChange={updateFilter}>
+                        <option value="">{t("roleNotifications.allOutcomes")}</option>
+                        <option value="AUTHORIZED">{t("roleNotifications.authorized")}</option>
+                        <option value="DENIED">{t("roleNotifications.denied")}</option>
+                    </select>
+                </label>
+                <label className="form-field">
+                    <span>{t("roleNotifications.deliveryStatusFilter")}</span>
+                    <select name="delivery_status" value={filters.delivery_status} onChange={updateFilter}>
+                        <option value="">{t("roleNotifications.allStatuses")}</option>
+                        {DELIVERY_STATUSES.map((status) => (
+                            <option key={status} value={status}>
+                                {t(`worker.common.statuses.${normalizeNotificationStatus(status)}`, { defaultValue: status })}
+                            </option>
+                        ))}
+                    </select>
+                </label>
+                <div className="notification-audit-filter-actions">
+                    <Button type="submit">{t("roleNotifications.applyFilters")}</Button>
+                    <Button
+                        type="button"
+                        variant="secondary"
+                        onClick={() => {
+                            setFilters(EMPTY_FILTERS);
+                            setAppliedFilters({});
+                            setPage(1);
+                        }}
+                    >
+                        {t("roleNotifications.clearFilters")}
+                    </Button>
+                </div>
+            </form>
             <DataTable
                 columns={columns}
-                rows={auditApi.data}
+                rows={auditApi.data === null ? null : records}
                 rowKey="audit_event_id"
                 loading={auditApi.loading}
                 refreshing={auditApi.refreshing}
@@ -102,6 +177,17 @@ function NotificationAuditPage() {
                 onRetry={auditApi.refetch}
                 emptyMessage={t("roleNotifications.empty")}
             />
+            {pagination?.total_pages > 1 && (
+                <div className="notification-audit-pagination" aria-label={t("roleNotifications.pagination")}>
+                    <Button variant="secondary" disabled={page <= 1 || auditApi.loading} onClick={() => setPage((current) => current - 1)}>
+                        {t("roleNotifications.previous")}
+                    </Button>
+                    <span>{t("roleNotifications.pageOf", { page, pages: pagination.total_pages })}</span>
+                    <Button variant="secondary" disabled={page >= pagination.total_pages || auditApi.loading} onClick={() => setPage((current) => current + 1)}>
+                        {t("roleNotifications.next")}
+                    </Button>
+                </div>
+            )}
         </div>
     );
 }

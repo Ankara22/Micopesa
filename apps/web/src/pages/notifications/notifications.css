@@ -436,3 +436,30 @@
         transition: none;
     }
 }
+.notification-audit-filters {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr));
+    align-items: end;
+    gap: 12px;
+    margin: 14px 0;
+}
+
+.notification-audit-filter-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.notification-audit-pagination {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 12px;
+    margin-top: 14px;
+}
+
+.notification-audit-pagination span {
+    color: var(--text);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+}

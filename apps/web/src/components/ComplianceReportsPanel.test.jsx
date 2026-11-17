@@ -1,4 +1,5 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ToastProvider } from "./ui/ToastContext";
 import ComplianceReportsPanel from "./ComplianceReportsPanel";
@@ -53,7 +54,7 @@ const report = {
 };
 
 function renderWithToasts(element) {
-    return render(<ToastProvider>{element}</ToastProvider>);
+    return render(<MemoryRouter><ToastProvider>{element}</ToastProvider></MemoryRouter>);
 }
 
 describe("compliance reporting and review interface", () => {
@@ -97,6 +98,60 @@ describe("compliance reporting and review interface", () => {
         expect(mocks.reviewRegulatorReport).not.toHaveBeenCalled();
     });
 
+    it("creates a clearly disclosed synthetic demonstration through the normal draft workflow", async () => {
+        renderWithToasts(<ComplianceReportsPanel title="Compliance Reports" subtitle="My fund reports" />);
+        fireEvent.click(await screen.findByRole("button", { name: "Create synthetic demo report" }));
+
+        expect(screen.getByText(/Synthetic demonstration only — not a genuine regulatory submission/)).toBeInTheDocument();
+        fireEvent.change(screen.getByLabelText("Managed fund"), { target: { value: "fund-1" } });
+        expect(screen.getByLabelText("Report type")).toHaveValue("INTERNAL");
+        expect(screen.getByLabelText("Report type")).toBeDisabled();
+        const categorySelect = screen.getByLabelText("Report category");
+        expect(categorySelect).toHaveValue("QUARTERLY_CONTRIBUTION_RECONCILIATION");
+        expect(categorySelect).toBeDisabled();
+        for (const label of [
+            "Quarterly contribution reconciliation",
+            "Investment performance",
+            "Assets and liabilities",
+            "Compliance checklist",
+        ]) {
+            expect(within(categorySelect).getByRole("option", { name: label })).toBeInTheDocument();
+        }
+        fireEvent.click(screen.getByRole("button", { name: "Save draft" }));
+
+        await waitFor(() => expect(mocks.createDraft).toHaveBeenCalledTimes(1));
+        const payload = mocks.createDraft.mock.calls[0][0];
+        expect(payload).toMatchObject({
+            fund_id: "fund-1",
+            report_type: "INTERNAL",
+            report_content: {
+                report_category: "QUARTERLY_CONTRIBUTION_RECONCILIATION",
+                demo_classification: "SYNTHETIC_DEMO",
+            },
+        });
+        for (const key of [
+            "executive_summary",
+            "financial_summary",
+            "risk_and_governance",
+            "incidents_and_actions",
+            "supporting_information",
+        ]) {
+            expect(payload.report_content[key]).toMatch(/^SYNTHETIC DEMONSTRATION ONLY - NOT A GENUINE REGULATORY SUBMISSION\./);
+        }
+    });
+
+    it("labels synthetic demo reports in the manager report register", async () => {
+        mocks.listManagerReports.mockResolvedValue([{
+            ...report,
+            report_category: "QUARTERLY_CONTRIBUTION_RECONCILIATION",
+            is_synthetic_demo: true,
+        }]);
+        renderWithToasts(<ComplianceReportsPanel title="Compliance Reports" subtitle="My fund reports" />);
+
+        expect(await screen.findByText("Synthetic demo — not a genuine regulatory submission")).toBeInTheDocument();
+        expect(screen.getByText("Quarterly contribution reconciliation")).toBeInTheDocument();
+    });
+
     it("submits a manager report after saving it", async () => {
         renderWithToasts(<ComplianceReportsPanel title="Operational Reports" subtitle="My fund reports" />);
         fireEvent.click(await screen.findByRole("button", { name: "+ Create report" }));
@@ -118,7 +173,10 @@ describe("compliance reporting and review interface", () => {
         expect(mocks.createDraft).toHaveBeenCalledWith(expect.objectContaining({
             fund_id: "fund-1",
             period_start: "2026-01-01",
-            report_content: report.report_content,
+            report_content: {
+                ...report.report_content,
+                report_category: "GENERAL_COMPLIANCE",
+            },
         }));
     });
 
@@ -225,7 +283,10 @@ describe("compliance reporting and review interface", () => {
 
     it("provides regulator filters and reasoned revision requests without a report-creation action", async () => {
         renderWithToasts(<ComplianceReview />);
-        expect(await screen.findByRole("heading", { name: "Compliance Review Queue" })).toBeInTheDocument();
+        expect(await screen.findByRole("heading", { name: "Recent Compliance Reports" })).toBeInTheDocument();
+        expect(screen.getByRole("heading", { name: "Submitted Reports Awaiting Review" })).toBeInTheDocument();
+        expect(screen.getByRole("link", { name: "Generate system reports and exports" }))
+            .toHaveAttribute("href", "/regulator/reports");
         expect(screen.queryByRole("button", { name: /create report/i })).not.toBeInTheDocument();
         fireEvent.change(screen.getByLabelText("Fund"), { target: { value: "fund-1" } });
         fireEvent.change(screen.getByLabelText("Report type"), { target: { value: "RBA" } });
@@ -235,7 +296,8 @@ describe("compliance reporting and review interface", () => {
             report_type: "RBA",
         }));
 
-        fireEvent.click(screen.getByRole("button", { name: "Open report" }));
+        const reviewQueue = screen.getByRole("region", { name: "Submitted Reports Awaiting Review" });
+        fireEvent.click(within(reviewQueue).getByRole("button", { name: "Open report" }));
         expect(await screen.findByText("Current report content")).toBeInTheDocument();
         expect(screen.getAllByText(report.report_content.executive_summary)).toHaveLength(2);
         fireEvent.click(screen.getByRole("button", { name: "Request revisions" }));
@@ -251,13 +313,51 @@ describe("compliance reporting and review interface", () => {
         }));
     });
 
+    it("labels synthetic demos in the regulator register and report details", async () => {
+        const syntheticContent = {
+            ...report.report_content,
+            report_category: "QUARTERLY_CONTRIBUTION_RECONCILIATION",
+            demo_classification: "SYNTHETIC_DEMO",
+        };
+        const syntheticReport = {
+            ...report,
+            report_type: "INTERNAL",
+            report_category: "QUARTERLY_CONTRIBUTION_RECONCILIATION",
+            is_synthetic_demo: true,
+            report_content: syntheticContent,
+        };
+        mocks.listRegulatorReports.mockResolvedValue([syntheticReport]);
+        mocks.getRegulatorReport.mockResolvedValue({
+            report: syntheticReport,
+            submissions: [{
+                submission_id: "submission-1",
+                version: 1,
+                submitted_by: "manager-1",
+                submitted_by_name: "Fund Manager",
+                submitted_by_role: "FUND_MANAGER",
+                submitted_at: report.last_submitted_at,
+                report_content: syntheticContent,
+            }],
+            reviews: [],
+        });
+        renderWithToasts(<ComplianceReview />);
+
+        expect(await screen.findAllByText("Synthetic demo — not a genuine regulatory submission")).toHaveLength(2);
+        expect(screen.getAllByText("Quarterly contribution reconciliation")).toHaveLength(2);
+        const reviewQueue = screen.getByRole("region", { name: "Submitted Reports Awaiting Review" });
+        fireEvent.click(within(reviewQueue).getByRole("button", { name: "Open report" }));
+        expect(await screen.findByText(/Review this record only as a workflow demonstration/)).toBeInTheDocument();
+        expect(screen.getAllByText("Report category:")).toHaveLength(2);
+    });
+
     it("shows loading and retryable errors while opening report details", async () => {
         let rejectDetails;
         mocks.getRegulatorReport.mockImplementation(() => new Promise((resolve, reject) => {
             rejectDetails = reject;
         }));
         renderWithToasts(<ComplianceReview />);
-        fireEvent.click(await screen.findByRole("button", { name: "Open report" }));
+        const reviewQueue = await screen.findByRole("region", { name: "Submitted Reports Awaiting Review" });
+        fireEvent.click(within(reviewQueue).getByRole("button", { name: "Open report" }));
 
         expect(screen.getByText("Loading report details...")).toBeInTheDocument();
         await act(async () => rejectDetails(new Error("Report details unavailable")));

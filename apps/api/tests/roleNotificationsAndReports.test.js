@@ -386,10 +386,10 @@ test("recipient search and audit views are scoped and never return unmasked cont
     const recipientQuery = queries[0][0];
     assert.match(recipientQuery, /f\.managed_by = \$1/);
     assert.doesNotMatch(recipientQuery, /SELECT[^\n]*u\.(?:phone|email)\s*,/i);
-    assert.match(queries[1][0], /f\.managed_by = \$1/);
-    assert.match(queries[1][0], /recipient_email_masked/);
-    assert.match(queries[1][0], /recipient_phone_masked/);
-    assert.doesNotMatch(queries[1][0], /ELSE NULL END,\s*\)/);
+    assert.match(queries[2][0], /f\.managed_by = \$1/);
+    assert.match(queries[2][0], /recipient_email_masked/);
+    assert.match(queries[2][0], /recipient_phone_masked/);
+    assert.doesNotMatch(queries[2][0], /ELSE NULL END,\s*\)/);
 });
 
 test("notification audit requires current fund scope even when the caller sent the event", async () => {
@@ -405,8 +405,7 @@ test("notification audit requires current fund scope even when the caller sent t
             queries.push({ sql, params });
             const userId = params[0];
             const role = sql.includes("regulator_fund_assignments") ? "REGULATOR" : "FUND_MANAGER";
-            return {
-                rows: auditEvents.filter((event) => {
+            const visibleEvents = auditEvents.filter((event) => {
                     if (event.scope_fund_id === null) return event.sender_user_id === userId;
                     if (role === "REGULATOR") {
                         return assignments.some((assignment) =>
@@ -416,8 +415,17 @@ test("notification audit requires current fund scope even when the caller sent t
                         );
                     }
                     return fundOwners.get(event.scope_fund_id) === userId;
-                }),
-            };
+                });
+            if (sql.includes("SELECT count(*)::int AS total_count")) {
+                return {
+                    rows: [{
+                        total_count: visibleEvents.length,
+                        authorized_count: visibleEvents.length,
+                        denied_count: 0,
+                    }],
+                };
+            }
+            return { rows: visibleEvents };
         },
         async connect() { throw new Error("Not expected"); },
     });
@@ -426,7 +434,7 @@ test("notification audit requires current fund scope even when the caller sent t
         userId: "regulator-1",
         role: "REGULATOR",
     });
-    assert.deepEqual(assigned.map(({ audit_event_id }) => audit_event_id), ["scoped", "global"]);
+    assert.deepEqual(assigned.records.map(({ audit_event_id }) => audit_event_id), ["scoped", "global"]);
     assert.match(queries[0].sql, /nae\.scope_fund_id IS NULL AND nae\.sender_user_id = \$1/);
     assert.match(queries[0].sql, /rfa\.regulator_user_id = \$1 AND rfa\.active = TRUE/);
     assert.doesNotMatch(queries[0].sql, /nae\.sender_user_id = \$1 OR EXISTS/);
@@ -436,23 +444,70 @@ test("notification audit requires current fund scope even when the caller sent t
         userId: "regulator-1",
         role: "REGULATOR",
     });
-    assert.deepEqual(revoked.map(({ audit_event_id }) => audit_event_id), ["global"]);
-    assert.equal(revoked.some(({ audit_event_id }) => audit_event_id === "scoped"), false);
+    assert.deepEqual(revoked.records.map(({ audit_event_id }) => audit_event_id), ["global"]);
+    assert.equal(revoked.records.some(({ audit_event_id }) => audit_event_id === "scoped"), false);
 
     const managerOwned = await repository.listNotificationAudit({
         userId: "manager-1",
         role: "FUND_MANAGER",
     });
-    assert.deepEqual(managerOwned.map(({ audit_event_id }) => audit_event_id), ["scoped"]);
-    assert.match(queries[2].sql, /nae\.scope_fund_id IS NULL AND nae\.sender_user_id = \$1/);
-    assert.match(queries[2].sql, /f\.fund_id = nae\.scope_fund_id AND f\.managed_by = \$1/);
+    assert.deepEqual(managerOwned.records.map(({ audit_event_id }) => audit_event_id), ["scoped"]);
+    assert.match(queries[4].sql, /nae\.scope_fund_id IS NULL AND nae\.sender_user_id = \$1/);
+    assert.match(queries[4].sql, /f\.fund_id = nae\.scope_fund_id AND f\.managed_by = \$1/);
 
     fundOwners.set("fund-1", "manager-2");
     const formerManager = await repository.listNotificationAudit({
         userId: "manager-1",
         role: "FUND_MANAGER",
     });
-    assert.deepEqual(formerManager, []);
+    assert.deepEqual(formerManager.records, []);
+});
+
+test("notification audit filters and pagination share the same scoped parameterized query", async () => {
+    const calls = [];
+    const repository = createNotificationRepository({
+        async query(sql, params = []) {
+            calls.push({ sql, params });
+            if (sql.includes("SELECT count(*)::int AS total_count")) {
+                return { rows: [{ total_count: 21, authorized_count: 18, denied_count: 3 }] };
+            }
+            return { rows: [{ audit_event_id: "event-1" }] };
+        },
+        async connect() { throw new Error("Not expected"); },
+    });
+
+    const result = await repository.listNotificationAudit({
+        userId: "regulator-1",
+        role: "REGULATOR",
+        page: "2",
+        page_size: "5",
+        start_date: "2026-01-01",
+        end_date: "2026-01-31",
+        authorization_outcome: "AUTHORIZED",
+        channel: "EMAIL",
+        delivery_status: "DELIVERED",
+    });
+
+    assert.deepEqual(calls[0].params, [
+        "regulator-1", "2026-01-01", "2026-01-31", "AUTHORIZED", "EMAIL", "DELIVERED",
+    ]);
+    assert.deepEqual(calls[1].params.slice(0, 6), calls[0].params);
+    assert.deepEqual(calls[1].params.slice(-2), [5, 5]);
+    assert.match(calls[0].sql, /nae\.created_at >= \$2::date/);
+    assert.match(calls[0].sql, /nae\.authorization_outcome = \$4/);
+    assert.match(calls[0].sql, /nae\.channels \? \$5/);
+    assert.match(calls[0].sql, /n\.delivery_status = \$6/);
+    assert.deepEqual(result.pagination, {
+        page: 2,
+        page_size: 5,
+        total_count: 21,
+        total_pages: 5,
+    });
+    assert.deepEqual(result.summary, {
+        total_count: 21,
+        authorized_count: 18,
+        denied_count: 3,
+    });
 });
 
 test("Regulator categories are independent from manager categories and use assigned funds", async () => {

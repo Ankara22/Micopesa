@@ -1,8 +1,11 @@
 import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useAuth } from "../../context/AuthContext";
 import useApi from "../../hooks/useApi";
 import DataTable from "../../components/ui/DataTable";
+import ErrorState from "../../components/ui/ErrorState";
 import Button from "../../components/ui/Button";
+import StatusBadge from "../../components/ui/StatusBadge";
 import { useToast } from "../../components/ui/ToastContext";
 import {
     downloadReport,
@@ -11,6 +14,7 @@ import {
     getReportFunds,
     getReportHistory,
 } from "../../services/reportsApi";
+import "./reports-page.css";
 
 function saveDownload(response, fallbackName) {
     const blob = response.data instanceof Blob
@@ -34,6 +38,7 @@ function getTruncatedCount(response) {
 
 function ReportsPage({ historyOnly = false }) {
     const { t, i18n } = useTranslation();
+    const { user } = useAuth();
     const [filters, setFilters] = useState({
         report_key: "",
         format: "CSV",
@@ -49,12 +54,18 @@ function ReportsPage({ historyOnly = false }) {
         contribution_status: "",
     });
     const [generating, setGenerating] = useState(false);
+    const [historyPage, setHistoryPage] = useState(1);
     const [truncatedCount, setTruncatedCount] = useState(null);
     const generationRef = useRef(false);
     const toast = useToast();
     const catalogApi = useApi(getReportCatalog, []);
     const fundsApi = useApi(getReportFunds, []);
-    const historyApi = useApi(getReportHistory, []);
+    const historyApi = useApi(
+        () => getReportHistory({ page: historyPage, page_size: 50 }),
+        [historyPage]
+    );
+    const historyRows = historyApi.data?.records;
+    const historyPagination = historyApi.data?.pagination;
 
     const columns = [
         {
@@ -63,6 +74,15 @@ function ReportsPage({ historyOnly = false }) {
             render: (row) => t(`reports.keys.${row.report_key}`, { defaultValue: row.report_key }),
         },
         { key: "export_format", header: t("reports.format") },
+        {
+            key: "period",
+            header: t("reports.period"),
+            render: (row) => {
+                const start = row.applied_filters?.start_date || "—";
+                const end = row.applied_filters?.end_date || "—";
+                return start === "—" && end === "—" ? t("reports.allAvailableDates") : `${start} – ${end}`;
+            },
+        },
         { key: "generated_by_name", header: t("reports.generatedBy") },
         {
             key: "generated_at",
@@ -70,6 +90,11 @@ function ReportsPage({ historyOnly = false }) {
             render: (row) => new Date(row.generated_at).toLocaleString(
                 i18n.language === "sw" ? "sw-KE" : "en-KE"
             ),
+        },
+        {
+            key: "generation_status",
+            header: t("reports.status"),
+            render: (row) => <StatusBadge status={row.generation_status} />,
         },
         { key: "result_count", header: t("reports.records") },
         { key: "download_count", header: t("reports.downloads") },
@@ -80,6 +105,7 @@ function ReportsPage({ historyOnly = false }) {
                 <Button
                     variant="secondary"
                     size="sm"
+                    disabled={row.generation_status !== "SUCCEEDED"}
                     onClick={() => handleDownload(row)}
                 >
                     {t("reports.download")}
@@ -110,7 +136,8 @@ function ReportsPage({ historyOnly = false }) {
             });
             setTruncatedCount(getTruncatedCount(response));
             saveDownload(response, `micopesa-${filters.report_key}.${filters.format.toLowerCase()}`);
-            await historyApi.refetch();
+            if (historyPage !== 1) setHistoryPage(1);
+            else await historyApi.refetch();
             toast.success(t("reports.generated"));
         } catch {
             toast.error(t("reports.generateError"));
@@ -143,6 +170,10 @@ function ReportsPage({ historyOnly = false }) {
                 </div>
             </header>
 
+            {user?.role === "REGULATOR" && (
+                <p className="reports-disclaimer" role="note">{t("reports.regulatoryExportDisclaimer")}</p>
+            )}
+
             {truncatedCount !== null && (
                 <p className="card" role="status">
                     {t("reports.truncatedNotice", { count: truncatedCount })}
@@ -153,9 +184,20 @@ function ReportsPage({ historyOnly = false }) {
                 <section className="card" aria-labelledby="report-generator-heading">
                     <h2 id="report-generator-heading">{t("reports.generateTitle")}</h2>
                     {catalogApi.error ? (
-                        <p role="alert">{t("reports.loadError")}</p>
+                        <ErrorState
+                            title={t("reports.loadError")}
+                            message={catalogApi.error}
+                            onRetry={catalogApi.refetch}
+                        />
                     ) : (
                         <form className="form-grid" onSubmit={handleGenerate}>
+                            {fundsApi.error && (
+                                <ErrorState
+                                    title={t("reports.loadError")}
+                                    message={fundsApi.error}
+                                    onRetry={fundsApi.refetch}
+                                />
+                            )}
                             <label className="form-field">
                                 <span>{t("reports.report")}</span>
                                 <select name="report_key" value={filters.report_key} onChange={updateFilter} required>
@@ -242,7 +284,7 @@ function ReportsPage({ historyOnly = false }) {
                 <h2 id="report-history-heading">{t("reports.historyTitle")}</h2>
                 <DataTable
                     columns={columns}
-                    rows={historyApi.data}
+                    rows={historyRows}
                     rowKey="report_id"
                     loading={historyApi.loading}
                     refreshing={historyApi.refreshing}
@@ -250,6 +292,28 @@ function ReportsPage({ historyOnly = false }) {
                     onRetry={historyApi.refetch}
                     emptyMessage={t("reports.emptyHistory")}
                 />
+                {historyPagination?.total_pages > 1 && (
+                    <div className="reports-history-pagination">
+                        <Button
+                            variant="secondary"
+                            disabled={historyPage <= 1 || historyApi.loading}
+                            onClick={() => setHistoryPage((current) => current - 1)}
+                        >
+                            {t("reports.previous")}
+                        </Button>
+                        <span>{t("reports.pageOf", {
+                            page: historyPagination.page || historyPage,
+                            pages: historyPagination.total_pages,
+                        })}</span>
+                        <Button
+                            variant="secondary"
+                            disabled={historyPage >= historyPagination.total_pages || historyApi.loading}
+                            onClick={() => setHistoryPage((current) => current + 1)}
+                        >
+                            {t("reports.next")}
+                        </Button>
+                    </div>
+                )}
             </section>
         </div>
     );

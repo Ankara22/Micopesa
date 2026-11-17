@@ -138,7 +138,14 @@ if (require.main === module) {
     );
     const stopPendingRegistrationCleanup = startPendingRegistrationCleanup(pool);
     let smsDispatcher = null;
-    const activeNotificationChannels = testMode ? [] : enabledChannels(process.env);
+    const notificationDispatchPaused =
+        process.env.NODE_ENV === "development" &&
+        process.env.MICOPESA_NOTIFICATION_DISPATCH_PAUSED === "true";
+    const activeNotificationChannels =
+        testMode || notificationDispatchPaused ? [] : enabledChannels(process.env);
+    if (notificationDispatchPaused && !testMode) {
+        console.log("Notification dispatch is paused by MICOPESA_NOTIFICATION_DISPATCH_PAUSED.");
+    }
     if (activeNotificationChannels.length > 0) {
         const notificationRepository = createSmsNotificationRepository(pool);
         const webPushService = createWebPushService({

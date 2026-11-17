@@ -14,6 +14,7 @@ const REPORTS_BY_ROLE = {
     ]),
     REGULATOR: new Set([
         "fund-performance", "contribution-trends", "regulatory-notifications", "compliance",
+        "kyc-status-summary", "payment-reconciliation-summary", "regulatory-audit-activity",
     ]),
 };
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -61,6 +62,13 @@ function serviceError(message, code, statusCode) {
     error.code = code;
     error.statusCode = statusCode;
     return error;
+}
+
+function parsePage(value, fallback, maximum) {
+    if (value === undefined) return fallback;
+    if ((typeof value !== "string" && typeof value !== "number") || !/^\d+$/.test(String(value))) return null;
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) && parsed >= 1 && parsed <= maximum ? parsed : null;
 }
 
 function validateFilters(filters) {
@@ -440,6 +448,47 @@ const REPORT_SQL = {
                NULL::text AS channel, NULL::text AS category, NULL::text AS delivery_status
         FROM compliance_reports cr
         LEFT JOIN funds f ON f.fund_id = cr.fund_id`,
+    "kyc-status-summary": `
+        SELECT fa.fund_id, f.fund_name, k.kyc_status AS status,
+               count(DISTINCT k.user_id)::integer AS worker_count,
+               max(k.updated_at) AS report_date,
+               NULL::text AS channel, NULL::text AS category,
+               NULL::text AS delivery_status, NULL::text AS filter_user_id
+        FROM kyc_records k
+        JOIN pension_accounts pa ON pa.user_id = k.user_id
+        JOIN fund_allocations fa ON fa.account_id = pa.account_id
+        JOIN funds f ON f.fund_id = fa.fund_id AND f.fund_status = 'ACTIVE'
+        WHERE fa.effective_from <= CURRENT_DATE
+          AND (fa.effective_to IS NULL OR fa.effective_to >= CURRENT_DATE)
+        GROUP BY fa.fund_id, f.fund_name, k.kyc_status`,
+    "payment-reconciliation-summary": `
+        SELECT cfa.fund_id, f.fund_name,
+               date_trunc('month', a.created_at)::date AS report_date,
+               a.attempt_status AS status,
+               count(DISTINCT a.attempt_id)::integer AS attempt_count,
+               count(DISTINCT CASE
+                   WHEN a.attempt_status IN ('PENDING', 'OUTCOME_UNKNOWN', 'PROMPT_ACCEPTED')
+                   THEN a.attempt_id END)::integer AS unresolved_count,
+               NULL::text AS channel, NULL::text AS category,
+               NULL::text AS delivery_status, NULL::text AS filter_user_id
+        FROM mpesa_payment_attempts a
+        JOIN contribution_fund_allocations cfa
+          ON cfa.contribution_id = a.contribution_id
+         AND cfa.account_id = a.account_id
+        JOIN funds f ON f.fund_id = cfa.fund_id AND f.fund_status = 'ACTIVE'
+        GROUP BY cfa.fund_id, f.fund_name,
+                 date_trunc('month', a.created_at), a.attempt_status`,
+    "regulatory-audit-activity": `
+        SELECT al.log_id, al.action_type AS status,
+               al."timestamp" AS report_date, cr.fund_id, f.fund_name,
+               cr.report_type AS category,
+               NULL::text AS channel, NULL::text AS delivery_status,
+               NULL::text AS filter_user_id
+        FROM audit_logs al
+        JOIN compliance_reports cr
+          ON cr.report_id = al.entity_id
+         AND al.entity_name = 'COMPLIANCE_REPORTS'
+        JOIN funds f ON f.fund_id = cr.fund_id AND f.fund_status = 'ACTIVE'`,
     "retirement-projections": `
         SELECT rp.projection_id, rp.plan_id, u.user_id AS filter_user_id, u.full_name,
                rp.projected_amount, rp.projection_years, rp.created_at AS report_date,
@@ -834,7 +883,8 @@ function createReportService(pool) {
         const source = REPORT_SQL[reportKey];
         if (!source) throw serviceError("This report is not available.", "REPORT_NOT_FOUND", 404);
         let querySource = source;
-        if (role === "REGULATOR" && reportKey === "compliance") {
+        if (role === "REGULATOR" &&
+            ["compliance", "regulatory-audit-activity"].includes(reportKey)) {
             querySource = `${source}
                 WHERE (cr.is_legacy = TRUE OR cr.rba_status <> 'DRAFT')`;
         }
@@ -1001,49 +1051,80 @@ function createReportService(pool) {
         };
     }
 
-    async function listHistory({ userId, role }) {
+    async function listHistory({ userId, role, page: pageInput = 1, page_size: pageSizeInput = 50 }) {
+        const page = parsePage(pageInput, 1, 100000);
+        const pageSize = parsePage(pageSizeInput, 50, 100);
+        if (page === null || pageSize === null) {
+            throw serviceError("Report history pagination is invalid.", "REPORT_INVALID_PAGINATION", 400);
+        }
+        const offset = (page - 1) * pageSize;
         if (role === "ADMIN") {
-            const result = await pool.query(
-                `SELECT h.report_id, h.generated_by, u.full_name AS generated_by_name,
+            const [countResult, result] = await Promise.all([
+                pool.query("SELECT count(*)::int AS total_count FROM report_generation_history"),
+                pool.query(
+                    `SELECT h.report_id, h.generated_by, u.full_name AS generated_by_name,
                         h.generator_role, h.report_key, h.export_format, h.applied_filters,
                         h.scope_fund_ids, h.generation_status, h.result_count, h.generated_at,
                         (SELECT count(*)::integer FROM report_download_events d
                          WHERE d.report_id = h.report_id AND d.outcome = 'SUCCEEDED') AS download_count
                  FROM report_generation_history h LEFT JOIN users u ON u.user_id = h.generated_by
-                 ORDER BY h.generated_at DESC LIMIT 200`
-            );
-            return result.rows;
+                 ORDER BY h.generated_at DESC LIMIT $1 OFFSET $2`,
+                    [pageSize, offset]
+                ),
+            ]);
+            const totalCount = countResult.rows[0]?.total_count || 0;
+            return {
+                records: result.rows,
+                pagination: { page, page_size: pageSize, total_count: totalCount, total_pages: Math.ceil(totalCount / pageSize) },
+            };
         }
 
         const fundIds = await getFundScope(userId, role);
-        const result = await pool.query(
-            `SELECT h.report_id, h.generated_by, u.full_name AS generated_by_name,
+        const scopeFilter = `h.generated_by = $1 AND h.generator_role = $2
+             AND jsonb_typeof(h.scope_fund_ids) = 'array'
+             AND jsonb_typeof(h.applied_filters) = 'object'
+             AND NOT EXISTS (
+                 SELECT 1
+                 FROM jsonb_array_elements_text(
+                     CASE WHEN jsonb_typeof(h.scope_fund_ids) = 'array'
+                          THEN h.scope_fund_ids ELSE '[]'::jsonb END
+                 ) AS saved_scope(fund_id)
+                 WHERE NOT (saved_scope.fund_id = ANY($3::text[]))
+             )
+             AND (
+                 CASE WHEN jsonb_typeof(h.scope_fund_ids) = 'array'
+                      THEN jsonb_array_length(h.scope_fund_ids) ELSE 0 END > 0
+                 OR h.result_count = 0
+             )
+             AND (
+                 NOT (h.applied_filters ? 'fund_id')
+                 OR h.applied_filters->>'fund_id' = ANY($3::text[])
+             )`;
+        const scopeParams = [userId, role, fundIds];
+        const [countResult, result] = await Promise.all([
+            pool.query(
+                `SELECT count(*)::int AS total_count
+                 FROM report_generation_history h
+                 WHERE ${scopeFilter}`,
+                scopeParams
+            ),
+            pool.query(
+                `SELECT h.report_id, h.generated_by, u.full_name AS generated_by_name,
                     h.generator_role, h.report_key, h.export_format, h.applied_filters,
                     h.scope_fund_ids, h.generation_status, h.result_count, h.generated_at,
                     (SELECT count(*)::integer FROM report_download_events d
                      WHERE d.report_id = h.report_id AND d.outcome = 'SUCCEEDED') AS download_count
              FROM report_generation_history h LEFT JOIN users u ON u.user_id = h.generated_by
-             WHERE h.generated_by = $1 AND h.generator_role = $2
-             ORDER BY h.generated_at DESC LIMIT 100`,
-            [userId, role]
-        );
-        return result.rows.filter((history) => {
-            if (!Array.isArray(history.scope_fund_ids) ||
-                !history.scope_fund_ids.every((fundId) =>
-                    typeof fundId === "string" && fundIds.includes(fundId))) {
-                return false;
-            }
-            if (!history.applied_filters || typeof history.applied_filters !== "object" ||
-                Array.isArray(history.applied_filters)) {
-                return false;
-            }
-            if (Object.hasOwn(history.applied_filters, "fund_id") &&
-                (typeof history.applied_filters.fund_id !== "string" ||
-                 !fundIds.includes(history.applied_filters.fund_id))) {
-                return false;
-            }
-            return history.scope_fund_ids.length > 0 || history.result_count === 0;
-        });
+             WHERE ${scopeFilter}
+             ORDER BY h.generated_at DESC LIMIT $4 OFFSET $5`,
+                [...scopeParams, pageSize, offset]
+            ),
+        ]);
+        const totalCount = countResult.rows[0]?.total_count || 0;
+        return {
+            records: result.rows,
+            pagination: { page, page_size: pageSize, total_count: totalCount, total_pages: Math.ceil(totalCount / pageSize) },
+        };
     }
 
     async function download({ userId, role, reportId, language }) {

@@ -17,6 +17,7 @@ const KNOWN_PATHS = new Set([
     "/manager/reports", "/manager/audit-logs", "/manager/notifications", "/manager/profile",
     "/manager/notification-audit-log", "/manager/reports-exports", "/manager/report-history",
     "/regulator/dashboard", "/regulator/analytics", "/regulator/funds", "/regulator/compliance-reports",
+    "/regulator/regulatory-parameters", "/regulator/kyc-oversight",
     "/regulator/audit-logs", "/regulator/notifications", "/regulator/profile",
     "/regulator/notification-audit-log", "/regulator/reports", "/regulator/report-history",
     "/admin/dashboard", "/admin/analytics", "/admin/users", "/admin/roles", "/admin/settings",

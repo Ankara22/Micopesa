@@ -71,7 +71,11 @@ test("regulator compliance overview and report list bind every aggregate and row
         }]);
         assert.match(calls[3].sql, /GROUP BY kyc_status/);
         assert.match(calls[4].sql, /entity_name = 'KYC_RECORD'/);
-        assert.doesNotMatch(calls[3].sql + calls[4].sql, /national_id|email|phone|full_name|user_id|kyc_id/);
+        assert.doesNotMatch(JSON.stringify(overview.body.data.kyc_status_counts), /national_id|email|phone|user_id|kyc_id/i);
+        assert.doesNotMatch(JSON.stringify(overview.body.data.kyc_review_history), /national_id|email|phone|user_id|kyc_id/i);
+        assert.match(calls[3].sql, /rfa\.regulator_user_id = \$1/);
+        assert.match(calls[4].sql, /JOIN kyc_records k ON k\.kyc_id = al\.entity_id/);
+        assert.match(calls[4].sql, /rfa\.regulator_user_id = \$1/);
 
         calls.length = 0;
         const filteredList = response();
@@ -156,6 +160,234 @@ test("regulator report details return not found outside the active assigned-fund
     }
 });
 
+test("regulator KYC oversight exposes only aggregate and redacted data in assigned active funds", async () => {
+    const originalQuery = pool.query;
+    const calls = [];
+    pool.query = async (sql, values = []) => {
+        calls.push({ sql, values });
+        if (sql.startsWith("SELECT count(DISTINCT rfa.fund_id)")) {
+            return { rows: [{ active_assigned_fund_count: 1 }] };
+        }
+        if (sql.startsWith("SELECT kyc_status")) {
+            return { rows: [{ kyc_status: "VERIFIED", count: 2 }] };
+        }
+        if (sql.startsWith("SELECT count(*)::int AS total_count")) {
+            return { rows: [{ total_count: 1 }] };
+        }
+        if (sql.startsWith("SELECT al.log_id")) {
+            return {
+                rows: [{
+                    log_id: "log-1",
+                    action_type: "APPROVE",
+                    kyc_status: "VERIFIED",
+                    reviewer_role: "ADMIN",
+                    timestamp: "2026-03-01T00:00:00Z",
+                }],
+            };
+        }
+        throw new Error(`Unexpected KYC oversight query: ${sql}`);
+    };
+
+    try {
+        const result = response();
+        await regulator.getKycOversight({
+            user: { userId: "regulator-1" },
+            query: { page: "1", page_size: "25" },
+        }, result);
+
+        assert.equal(result.statusCode, 200);
+        assert.deepEqual(result.body.data.kyc_status_counts, [{ kyc_status: "VERIFIED", count: 2 }]);
+        assert.deepEqual(result.body.data.review_history, [{
+            log_id: "log-1",
+            action_type: "APPROVE",
+            kyc_status: "VERIFIED",
+            reviewer_role: "ADMIN",
+            timestamp: "2026-03-01T00:00:00Z",
+        }]);
+        assert.equal(result.body.data.pagination.total_count, 1);
+        assert.ok(calls.every(({ sql }) => /rfa\.regulator_user_id = \$1/.test(sql)));
+        assert.ok(calls.filter(({ sql }) => sql.includes("JOIN kyc_records k")).every(({ sql }) =>
+            /f\.fund_status = 'ACTIVE'/.test(sql)
+        ));
+        assert.match(calls.find(({ sql }) => sql.startsWith("SELECT kyc_status")).sql, /fa\.effective_from <= CURRENT_DATE/);
+        assert.match(calls.find(({ sql }) => sql.startsWith("SELECT al.log_id")).sql, /JOIN kyc_records k ON k\.kyc_id = al\.entity_id/);
+        assert.deepEqual(calls.map(({ values }) => values[0]), [
+            "regulator-1", "regulator-1", "regulator-1", "regulator-1",
+        ]);
+        assert.doesNotMatch(JSON.stringify(result.body), /national_id|email|phone|account_id|user_id|kyc_id/i);
+        const historyQuery = calls.find(({ sql }) => sql.startsWith("SELECT al.log_id"));
+        assert.doesNotMatch(historyQuery.sql.slice(0, historyQuery.sql.indexOf("FROM audit_logs")), /user_id|kyc_id|email|phone/i);
+    } finally {
+        pool.query = originalQuery;
+    }
+});
+
+test("regulator internal controls are read-only and explicitly distinguish system checks from statutory thresholds", async () => {
+    const originalQuery = pool.query;
+    const calls = [];
+    pool.query = async (sql, values = []) => {
+        calls.push({ sql, values });
+        if (sql.includes("FROM pension_ledger WHERE singleton_key IS TRUE")) {
+            return { rows: [{ status: "ACTIVE" }] };
+        }
+        if (sql.startsWith("SELECT f.fund_status")) {
+            return { rows: [{ fund_status: "ACTIVE", fund_count: 1 }] };
+        }
+        if (sql.includes("WITH scoped_accounts AS")) {
+            return { rows: [{ evaluated_accounts: 1, valid_accounts: 1, invalid_accounts: 0 }] };
+        }
+        if (sql.includes("FROM mpesa_payment_attempts a")) {
+            return { rows: [{ evaluated_count: 1, unresolved_count: 0 }] };
+        }
+        if (sql.includes("FROM compliance_reports cr")) {
+            return { rows: [{ incomplete_submissions: 0 }] };
+        }
+        throw new Error(`Unexpected internal control query: ${sql}`);
+    };
+
+    try {
+        const result = response();
+        await regulator.getInternalControlChecks({ user: { userId: "regulator-1" } }, result);
+
+        assert.equal(result.statusCode, 200);
+        assert.equal(result.body.data.formal_parameters.status, "NOT_CONFIGURED");
+        assert.equal(result.body.data.checks.length, 5);
+        assert.equal(result.body.data.checks.find(({ key }) => key === "ledger_readiness").status, "PASS");
+        assert.equal(result.body.data.checks.find(({ key }) => key === "payment_reconciliation").status, "PASS");
+        assert.equal(result.body.data.formal_parameters.observed_value,
+            "No authoritative RBA parameter configuration is available.");
+        assert.ok(calls.every(({ sql }) => !/^(?:UPDATE|INSERT|DELETE|ALTER|CREATE|DROP)/i.test(sql.trim())));
+        assert.match(calls[1].sql, /rfa\.regulator_user_id = \$1/);
+        assert.match(calls[2].sql, /rfa\.regulator_user_id = \$1/);
+        assert.match(calls[3].sql, /f\.fund_status = 'ACTIVE'/);
+        assert.doesNotMatch(JSON.stringify(result.body.data), /account_id|attempt_id|user_id|kyc_id/i);
+    } finally {
+        pool.query = originalQuery;
+    }
+});
+
+test("regulator dashboard uses a read-only repeatable snapshot and returns assigned-scope summaries", async () => {
+    const originalConnect = pool.connect;
+    const statements = [];
+    pool.connect = async () => ({
+        async query(sql, values = []) {
+            statements.push({ sql, values });
+            if (sql === "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY" || sql === "COMMIT") {
+                return { rows: [] };
+            }
+            if (sql.includes("AS assigned_fund_count")) {
+                return { rows: [{ assigned_fund_count: 2, active_assigned_fund_count: 1 }] };
+            }
+            if (sql.includes("AS total_fund_count")) {
+                return { rows: [{ total_fund_count: 2, active_fund_count: 1, inactive_fund_count: 1 }] };
+            }
+            if (sql.includes("AS account_count")) {
+                return { rows: [{ account_count: 3, active_account_count: 2, worker_count: 3 }] };
+            }
+            if (sql.includes("AS workflow_awaiting_review_count")) {
+                assert.match(sql, /rfa\.regulator_user_id = \$1/);
+                return { rows: [{
+                    workflow_total_count: 2,
+                    workflow_draft_count: 1,
+                    workflow_submitted_count: 1,
+                    workflow_awaiting_review_count: 1,
+                    workflow_incomplete_submission_count: 0,
+                    workflow_approved_count: 0,
+                    workflow_returned_count: 0,
+                    workflow_rejected_count: 0,
+                    synthetic_demo_total_count: 1,
+                    synthetic_demo_draft_count: 1,
+                    synthetic_demo_submitted_count: 0,
+                    synthetic_demo_awaiting_review_count: 0,
+                    synthetic_demo_incomplete_submission_count: 0,
+                    synthetic_demo_approved_count: 0,
+                    synthetic_demo_returned_count: 0,
+                    synthetic_demo_rejected_count: 0,
+                    legacy_history_count: 0,
+                }] };
+            }
+            if (sql.startsWith("SELECT cr.report_id, cr.report_type")) {
+                return { rows: [{
+                    report_id: "assigned-report",
+                    report_type: "RBA",
+                    report_category: "GENERAL_COMPLIANCE",
+                    is_synthetic_demo: false,
+                    submitted_at: "2026-03-01T00:00:00Z",
+                    rba_status: "SUBMITTED",
+                }] };
+            }
+            if (sql.startsWith("SELECT al.log_id, cr.report_type")) {
+                return { rows: [{
+                    log_id: "report-event",
+                    report_type: "RBA",
+                    report_category: "GENERAL_COMPLIANCE",
+                    is_synthetic_demo: false,
+                    rba_status: "SUBMITTED",
+                    action_type: "SUBMIT",
+                    timestamp: "2026-03-01T00:00:00Z",
+                }] };
+            }
+            if (sql.includes("AS events_last_24h")) {
+                return { rows: [{ events_last_24h: 2, last_event_at: "2026-03-01T00:00:00Z" }] };
+            }
+            if (sql.startsWith("SELECT k.kyc_status, count(*)")) {
+                return { rows: [{ kyc_status: "VERIFIED", count: 2 }] };
+            }
+            if (sql.startsWith("SELECT al.log_id, al.action_type")) {
+                return { rows: [{
+                    log_id: "kyc-event",
+                    action_type: "APPROVE",
+                    kyc_status: "VERIFIED",
+                    reviewer_role: "ADMIN",
+                    timestamp: "2026-03-01T00:00:00Z",
+                }] };
+            }
+            if (sql.includes("FROM pension_ledger WHERE singleton_key IS TRUE")) {
+                return { rows: [{ status: "ACTIVE" }] };
+            }
+            if (sql.startsWith("SELECT f.fund_status, count(*)")) {
+                return { rows: [{ fund_status: "ACTIVE", fund_count: 1 }] };
+            }
+            if (sql.includes("AS evaluated_accounts")) {
+                return { rows: [{ evaluated_accounts: 1, valid_accounts: 1, invalid_accounts: 0 }] };
+            }
+            if (sql.includes("AS evaluated_count")) {
+                return { rows: [{ evaluated_count: 1, unresolved_count: 0 }] };
+            }
+            if (sql.includes("AS submitted_count")) {
+                return { rows: [{ submitted_count: 1, incomplete_submissions: 0 }] };
+            }
+            if (sql === "ROLLBACK") return { rows: [] };
+            throw new Error(`Unexpected dashboard query: ${sql}`);
+        },
+        release() {},
+    });
+
+    try {
+        const result = response();
+        await regulator.getDashboardOverview({ user: { userId: "regulator-1" } }, result);
+
+        assert.equal(result.statusCode, 200);
+        assert.equal(result.body.data.scope.has_active_fund_scope, true);
+        assert.equal(result.body.data.fund_overview.active_fund_count, 1);
+        assert.equal(result.body.data.account_overview.worker_count, 3);
+        assert.equal(result.body.data.awaiting_review.count, 1);
+        assert.equal(result.body.data.report_summary.workflow.draft_count, 1);
+        assert.equal(result.body.data.report_summary.workflow.awaiting_review_count, 1);
+        assert.equal(result.body.data.report_summary.synthetic_demo.draft_count, 1);
+        assert.equal(result.body.data.awaiting_review.synthetic_demo_count, 0);
+        assert.equal(result.body.data.kyc.status_counts[0].count, 2);
+        assert.equal(result.body.data.control_checks.checks.find(({ key }) => key === "ledger_readiness").status, "PASS");
+        assert.equal(statements[0].sql, "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+        assert.equal(statements.at(-1).sql, "COMMIT");
+        assert.ok(statements.every(({ values }) => values.length === 0 || values[0] === "regulator-1"));
+        assert.ok(statements.every(({ sql }) => !/^(?:UPDATE|INSERT|DELETE|ALTER|CREATE|DROP)/i.test(sql.trim())));
+        assert.ok(statements.some(({ sql }) => sql.includes("rfa.regulator_user_id = $1")));
+    } finally {
+        pool.connect = originalConnect;
+    }
+});
+
 test("regulator fund details and allocations are limited to active assignments", async () => {
     const originalQuery = pool.query;
     const assignments = [{ regulator_user_id: "regulator-1", fund_id: "fund-1", active: true }];
@@ -169,17 +401,19 @@ test("regulator fund details and allocations are limited to active assignments",
         fund_status: "ACTIVE",
     };
     const allocation = {
-        allocation_id: "allocation-1",
-        account_id: "account-1",
-        fund_id: "fund-1",
+        distribution_key: "67.50|2026-01-01|ongoing",
         percentage: "100.00",
         effective_from: "2026-01-01",
         effective_to: null,
+        allocation_count: 2,
     };
     const calls = [];
     pool.query = async (sql, values = []) => {
         calls.push({ sql, values });
-        const [fundId, role, userId] = values;
+        const [fundId] = values;
+        const regulatorAllocationsQuery = sql.includes("rfa.regulator_user_id = $2");
+        const role = regulatorAllocationsQuery ? "REGULATOR" : values[1];
+        const userId = regulatorAllocationsQuery ? values[1] : values[2];
         const isAssigned = assignments.some((assignment) =>
             assignment.regulator_user_id === userId && assignment.fund_id === fundId && assignment.active
         );
@@ -215,7 +449,9 @@ test("regulator fund details and allocations are limited to active assignments",
         assert.equal(assignedAllocations.statusCode, 200);
         assert.deepEqual(assignedAllocations.body.data, [allocation]);
         assert.equal(calls.length, 1);
+        assert.deepEqual(calls[0].values, ["fund-1", "regulator-1"]);
         assert.match(calls[0].sql, /rfa\.active = TRUE/);
+        assert.doesNotMatch(JSON.stringify(assignedAllocations.body.data), /account_id|allocation_id/);
 
         for (const [userId, fundId] of [["regulator-2", "fund-1"], ["regulator-1", "fund-2"]]) {
             const deniedFund = response();

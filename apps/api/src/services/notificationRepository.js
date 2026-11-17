@@ -31,6 +31,18 @@ function repositoryError(message, code, statusCode) {
     return error;
 }
 
+function parsePositiveInteger(value, maximum) {
+    if ((typeof value !== "string" && typeof value !== "number") || !/^\d+$/.test(String(value))) return null;
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) && parsed >= 1 && parsed <= maximum ? parsed : null;
+}
+
+function isValidDate(value) {
+    if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+    const date = new Date(`${value}T00:00:00.000Z`);
+    return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
 function validPhoneSql(column) {
     return `(${normalizedPhoneSql(column)}) ~ '^[+]254[17][0-9]{8}$'`;
 }
@@ -1121,7 +1133,31 @@ function createNotificationRepository(pool, { environment = process.env } = {}) 
         });
     }
 
-    async function listNotificationAudit({ userId, role }) {
+    async function listNotificationAudit({
+        userId,
+        role,
+        page = "1",
+        page_size: pageSizeInput = "50",
+        start_date: startDate,
+        end_date: endDate,
+        authorization_outcome: authorizationOutcome,
+        channel,
+        delivery_status: deliveryStatus,
+    }) {
+        const parsedPage = parsePositiveInteger(page, 100000);
+        const pageSize = parsePositiveInteger(pageSizeInput, 100);
+        if (
+            !parsedPage || !pageSize ||
+            (startDate !== undefined && !isValidDate(startDate)) ||
+            (endDate !== undefined && !isValidDate(endDate)) ||
+            (startDate && endDate && startDate > endDate) ||
+            (authorizationOutcome !== undefined && !["AUTHORIZED", "DENIED"].includes(authorizationOutcome)) ||
+            (channel !== undefined && !CHANNELS.has(channel)) ||
+            (deliveryStatus !== undefined && !["PENDING", "PROVIDER_ACCEPTED", "DELIVERED", "FAILED", "UNKNOWN", "SKIPPED"].includes(deliveryStatus))
+        ) {
+            throw repositoryError("Invalid notification audit filters or pagination.", "NOTIFICATION_INVALID_AUDIT_FILTERS", 400);
+        }
+
         let scope = "";
         const params = [];
         if (role === "ADMIN") {
@@ -1148,8 +1184,50 @@ function createNotificationRepository(pool, { environment = process.env } = {}) 
         } else {
             throw repositoryError("This role cannot view notification audit records.", "NOTIFICATION_FORBIDDEN", 403);
         }
-        const result = await pool.query(
-            `SELECT nae.audit_event_id, nae.request_id, nae.sender_user_id,
+
+        const conditions = [];
+        if (scope) conditions.push(scope.slice("WHERE ".length));
+        if (startDate) {
+            params.push(startDate);
+            conditions.push(`nae.created_at >= $${params.length}::date`);
+        }
+        if (endDate) {
+            params.push(endDate);
+            conditions.push(`nae.created_at < ($${params.length}::date + INTERVAL '1 day')`);
+        }
+        if (authorizationOutcome) {
+            params.push(authorizationOutcome);
+            conditions.push(`nae.authorization_outcome = $${params.length}`);
+        }
+        if (channel) {
+            params.push(channel);
+            conditions.push(`nae.channels ? $${params.length}`);
+        }
+        if (deliveryStatus) {
+            conditions.push(`EXISTS (
+                SELECT 1
+                FROM jsonb_array_elements_text(nae.notification_ids) AS audit_notification_id(notification_id)
+                JOIN notifications n ON n.notification_id = audit_notification_id.notification_id
+                WHERE n.delivery_status = $${params.length + 1}
+            )`);
+            params.push(deliveryStatus);
+        }
+        const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+        const from = `FROM notification_audit_events nae
+                     LEFT JOIN users su ON su.user_id = nae.sender_user_id
+                     LEFT JOIN users ru ON ru.user_id = nae.recipient_user_id
+                     LEFT JOIN funds f ON f.fund_id = nae.scope_fund_id`;
+        const offset = (parsedPage - 1) * pageSize;
+        const [countResult, result] = await Promise.all([
+            pool.query(
+                `SELECT count(*)::int AS total_count,
+                        count(*) FILTER (WHERE nae.authorization_outcome = 'AUTHORIZED')::int AS authorized_count,
+                        count(*) FILTER (WHERE nae.authorization_outcome = 'DENIED')::int AS denied_count
+                 ${from} ${where}`,
+                params
+            ),
+            pool.query(
+                `SELECT nae.audit_event_id, nae.request_id, nae.sender_user_id,
                     su.full_name AS sender_name, nae.sender_role,
                     nae.recipient_user_id, ru.full_name AS recipient_name,
                     CASE WHEN ru.email IS NOT NULL THEN
@@ -1177,12 +1255,27 @@ function createNotificationRepository(pool, { environment = process.env } = {}) 
              LEFT JOIN users su ON su.user_id = nae.sender_user_id
              LEFT JOIN users ru ON ru.user_id = nae.recipient_user_id
              LEFT JOIN funds f ON f.fund_id = nae.scope_fund_id
-             ${scope}
+             ${where}
              ORDER BY nae.created_at DESC
-             LIMIT 500`,
-            params
-        );
-        return result.rows;
+             LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+               [...params, pageSize, offset]
+            ),
+        ]);
+        const totalCount = countResult.rows[0]?.total_count || 0;
+        return {
+            records: result.rows,
+            pagination: {
+               page: parsedPage,
+               page_size: pageSize,
+               total_count: totalCount,
+               total_pages: Math.ceil(totalCount / pageSize),
+            },
+            summary: {
+               total_count: totalCount,
+               authorized_count: countResult.rows[0]?.authorized_count || 0,
+               denied_count: countResult.rows[0]?.denied_count || 0,
+            },
+        };
     }
 
     async function queueAdminNotifications({

@@ -2,6 +2,16 @@ const pool = require("../db/database");
 const { writeAuditLog } = require("../utils/auditLog");
 
 const REPORT_TYPES = new Set(["RBA", "NSSF", "INTERNAL"]);
+const REPORT_CATEGORIES = new Set([
+    "QUARTERLY_CONTRIBUTION_RECONCILIATION",
+    "INVESTMENT_PERFORMANCE",
+    "ASSETS_AND_LIABILITIES",
+    "COMPLIANCE_CHECKLIST",
+    "GENERAL_COMPLIANCE",
+]);
+const SYNTHETIC_DEMO_CLASSIFICATION = "SYNTHETIC_DEMO";
+const SYNTHETIC_DEMO_DISCLOSURE =
+    "SYNTHETIC DEMONSTRATION ONLY - NOT A GENUINE REGULATORY SUBMISSION.";
 const CONTENT_FIELDS = [
     "executive_summary",
     "financial_summary",
@@ -25,6 +35,26 @@ function validateDate(value, field, optional = false) {
         return { error: `${field} must be a valid YYYY-MM-DD date` };
     }
     return value;
+}
+
+function validateReportMetadata(reportType, content, { requireDisclosure = false } = {}) {
+    if (content?.demo_classification === undefined) return null;
+    if (content.demo_classification !== SYNTHETIC_DEMO_CLASSIFICATION) {
+        return "demo_classification must be SYNTHETIC_DEMO";
+    }
+    if (reportType !== "INTERNAL") {
+        return "Synthetic demonstration reports must use the INTERNAL report type.";
+    }
+    if (!REPORT_CATEGORIES.has(content.report_category)) {
+        return "Select a valid report category for this synthetic demonstration.";
+    }
+    if (
+        requireDisclosure &&
+        CONTENT_FIELDS.some((field) => !content[field]?.startsWith(SYNTHETIC_DEMO_DISCLOSURE))
+    ) {
+        return "Every section of a synthetic demonstration must retain its disclosure that it is not a genuine regulatory submission.";
+    }
+    return null;
 }
 
 function validateReportFields(body, { partial = false } = {}) {
@@ -67,6 +97,18 @@ function validateReportFields(body, { partial = false } = {}) {
                 }
                 safeContent[field] = value.trim();
             }
+            if (content.report_category !== undefined) {
+                if (!REPORT_CATEGORIES.has(content.report_category)) {
+                    return { error: "report_category is not supported" };
+                }
+                safeContent.report_category = content.report_category;
+            }
+            if (content.demo_classification !== undefined) {
+                if (content.demo_classification !== SYNTHETIC_DEMO_CLASSIFICATION) {
+                    return { error: "demo_classification must be SYNTHETIC_DEMO" };
+                }
+                safeContent.demo_classification = content.demo_classification;
+            }
             fields.report_content = safeContent;
         }
     }
@@ -85,7 +127,7 @@ function validateCompleteReport(report) {
             return `Complete the ${field.replaceAll("_", " ")} section before submitting.`;
         }
     }
-    return null;
+    return validateReportMetadata(report.report_type, report.report_content, { requireDisclosure: true });
 }
 
 async function getOwnedReport(client, reportId, userId, { lock = false } = {}) {
@@ -149,7 +191,13 @@ async function getReportDetails(client, reportId) {
         report.is_legacy || (report.rba_status !== "DRAFT" && !hasReviewData)
     );
     return {
-        report: { ...report, is_legacy_history: isLegacyHistory, reviewable },
+        report: {
+            ...report,
+            report_category: report.report_content?.report_category || null,
+            is_synthetic_demo: report.report_content?.demo_classification === SYNTHETIC_DEMO_CLASSIFICATION,
+            is_legacy_history: isLegacyHistory,
+            reviewable,
+        },
         submissions: submissionsResult.rows,
         reviews: reviewsResult.rows,
     };
@@ -159,6 +207,11 @@ async function listManagerReports(req, res) {
     try {
         const result = await pool.query(
             `SELECT cr.report_id, cr.fund_id, f.fund_name, cr.is_legacy, cr.report_type,
+                    cr.report_content->>'report_category' AS report_category,
+                    COALESCE(
+                        cr.report_content->>'demo_classification' = 'SYNTHETIC_DEMO',
+                        FALSE
+                    ) AS is_synthetic_demo,
                     cr.period_start, cr.period_end, cr.rba_status,
                     cr.generated_at, cr.submitted_at, cr.last_submitted_at,
                     latest_review.decision AS latest_decision,
@@ -191,6 +244,11 @@ async function createDraft(req, res) {
     }
     const validated = validateReportFields(body, { partial: true });
     if (validated.error) return res.status(400).json({ status: "error", message: validated.error });
+    const metadataError = validateReportMetadata(
+        validated.fields.report_type,
+        validated.fields.report_content
+    );
+    if (metadataError) return res.status(400).json({ status: "error", message: metadataError });
 
     const client = await pool.connect();
     try {
@@ -269,6 +327,21 @@ async function updateDraft(req, res) {
             period_end: fields.period_end === undefined ? current.period_end : fields.period_end,
             report_content: fields.report_content === undefined ? current.report_content : fields.report_content,
         };
+        if (
+            current.report_content?.demo_classification === SYNTHETIC_DEMO_CLASSIFICATION &&
+            merged.report_content?.demo_classification !== SYNTHETIC_DEMO_CLASSIFICATION
+        ) {
+            await client.query("ROLLBACK");
+            return res.status(400).json({
+                status: "error",
+                message: "Synthetic demonstration classification cannot be removed.",
+            });
+        }
+        const metadataError = validateReportMetadata(merged.report_type, merged.report_content);
+        if (metadataError) {
+            await client.query("ROLLBACK");
+            return res.status(400).json({ status: "error", message: metadataError });
+        }
         if (merged.period_start && merged.period_end && merged.period_end < merged.period_start) {
             await client.query("ROLLBACK");
             return res.status(400).json({ status: "error", message: "period_end must not be before period_start" });

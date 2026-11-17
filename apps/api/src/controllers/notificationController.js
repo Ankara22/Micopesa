@@ -414,10 +414,16 @@ function createNotificationController({
         async listNotificationAudit(req, res) {
             try {
                 const data = await repository.listNotificationAudit({
+                    ...req.query,
                     userId: req.user.userId,
                     role: req.user.role,
                 });
-                return res.status(200).json({ status: "success", data });
+                return res.status(200).json({
+                    status: "success",
+                    data: data.records,
+                    pagination: data.pagination,
+                    summary: data.summary,
+                });
             } catch (error) {
                 return sendError(res, error, "Could not retrieve notification audit records.");
             }

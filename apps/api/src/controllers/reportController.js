@@ -55,8 +55,14 @@ function createReportController({ service }) {
                 const data = await service.listHistory({
                     userId: req.user.userId,
                     role: req.user.role,
+                    page: req.query.page,
+                    page_size: req.query.page_size,
                 });
-                return res.status(200).json({ status: "success", data });
+                return res.status(200).json({
+                    status: "success",
+                    data: data.records,
+                    pagination: data.pagination,
+                });
             } catch (error) {
                 return handleError(res, error, "Could not retrieve report history.");
             }

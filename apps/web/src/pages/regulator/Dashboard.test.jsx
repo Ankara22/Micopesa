@@ -1,198 +1,197 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "../../i18n";
 import RegulatorDashboard from "./Dashboard";
 
 const mocks = vi.hoisted(() => ({
-    getComplianceOverview: vi.fn(),
-    getComplianceReports: vi.fn(),
-    getOperationalLogs: vi.fn(),
-    listFunds: vi.fn(),
-    getFundAllocations: vi.fn(),
+    getRegulatorDashboard: vi.fn(),
     useAuth: vi.fn(),
 }));
 
 vi.mock("../../services/regulatorApi", () => ({
-    getComplianceOverview: mocks.getComplianceOverview,
-    getComplianceReports: mocks.getComplianceReports,
-}));
-vi.mock("../../services/auditLogService", () => ({
-    getOperationalLogs: mocks.getOperationalLogs,
-}));
-vi.mock("../../services/fundService", () => ({
-    listFunds: mocks.listFunds,
-    getFundAllocations: mocks.getFundAllocations,
+    getRegulatorDashboard: mocks.getRegulatorDashboard,
 }));
 vi.mock("../../context/AuthContext", () => ({ useAuth: mocks.useAuth }));
+
+function dashboardData() {
+    return {
+        evaluated_at: "2026-11-17T10:00:00Z",
+        scope: { assigned_fund_count: 2, active_assigned_fund_count: 2, has_active_fund_scope: true },
+        fund_overview: { total_fund_count: 2, active_fund_count: 2, inactive_fund_count: 0 },
+        account_overview: { account_count: 4, active_account_count: 4, worker_count: 4 },
+        report_summary: {
+            workflow: {
+                total_count: 2,
+                draft_count: 0,
+                submitted_count: 1,
+                awaiting_review_count: 1,
+                incomplete_submission_count: 0,
+                approved_count: 0,
+                returned_count: 0,
+                rejected_count: 0,
+            },
+            synthetic_demo: {
+                total_count: 1,
+                draft_count: 0,
+                submitted_count: 1,
+                awaiting_review_count: 1,
+                incomplete_submission_count: 0,
+                approved_count: 0,
+                returned_count: 0,
+                rejected_count: 0,
+            },
+            legacy_history_count: 0,
+        },
+        awaiting_review: {
+            count: 1,
+            synthetic_demo_count: 1,
+            recent: [
+                {
+                    report_id: "report-1",
+                    report_type: "RBA",
+                    report_category: "GENERAL_COMPLIANCE",
+                    is_synthetic_demo: false,
+                    submitted_at: "2026-11-16T10:00:00Z",
+                    rba_status: "SUBMITTED",
+                },
+                {
+                    report_id: "report-2",
+                    report_type: "INTERNAL",
+                    report_category: "QUARTERLY_CONTRIBUTION_RECONCILIATION",
+                    is_synthetic_demo: true,
+                    submitted_at: "2026-11-16T11:00:00Z",
+                    rba_status: "SUBMITTED",
+                },
+            ],
+        },
+        recent_compliance_activity: [{
+            log_id: "activity-1",
+            report_type: "RBA",
+            report_category: "GENERAL_COMPLIANCE",
+            is_synthetic_demo: false,
+            rba_status: "SUBMITTED",
+            action_type: "SUBMIT",
+            timestamp: "2026-11-16T10:00:00Z",
+        }],
+        audit_summary: { events_last_24h: 1, last_event_at: "2026-11-16T10:00:00Z" },
+        kyc: {
+            status_counts: [{ kyc_status: "VERIFIED", count: 2 }],
+            recent_review_history: [{
+                log_id: "kyc-log-1",
+                action_type: "APPROVE",
+                kyc_status: "VERIFIED",
+                reviewer_role: "ADMIN",
+                timestamp: "2026-11-16T09:00:00Z",
+            }],
+        },
+        control_checks: {
+            summary: {
+                evaluated_count: 3,
+                passed_count: 2,
+                failed_count: 0,
+                attention_required_count: 1,
+                unevaluated_count: 0,
+                not_configured_count: 2,
+            },
+            checks: [{
+                key: "fund_status",
+                name: "Assigned fund configuration",
+                observed_value: "ACTIVE: 2",
+                status: "PASS",
+            }],
+        },
+    };
+}
+
 function renderDashboard() {
     return render(<MemoryRouter><RegulatorDashboard /></MemoryRouter>);
 }
 
 describe("RegulatorDashboard", () => {
-    afterEach(cleanup);
+    afterEach(() => {
+        cleanup();
+        i18n.changeLanguage("en");
+    });
 
     beforeEach(async () => {
         vi.clearAllMocks();
         await i18n.changeLanguage("en");
         mocks.useAuth.mockReturnValue({ user: { full_name: "Achieng Regulator" } });
-        mocks.getComplianceOverview.mockResolvedValue({
-            audit_health: { events_last_24h: 14, last_event_at: "2026-04-03T10:00:00Z" },
-            rba_reports_by_status: [
-                { rba_status: "SUBMITTED", count: 3 },
-                { rba_status: "ACCEPTED", count: 2 },
-            ],
-            latest_rba_report: { rba_status: "SUBMITTED" },
-            kyc_status_counts: [
-                { kyc_status: "PENDING", count: 2 },
-                { kyc_status: "VERIFIED", count: 8 },
-                { kyc_status: "REJECTED", count: 1 },
-            ],
-            kyc_review_history: [
-                { action_type: "APPROVE", kyc_status: "VERIFIED", timestamp: "2026-04-03T11:00:00Z" },
-                { action_type: "REJECT", kyc_status: "REJECTED", timestamp: "2026-04-02T11:00:00Z" },
-            ],
-            rba_parameter_checks: { status: "NOT_CONFIGURED", details: "No check configuration is available." },
-        });
-        mocks.getComplianceReports.mockResolvedValue([
-            {
-                report_id: "report-1",
-                report_type: "RBA",
-                period_start: "2026-01-01",
-                period_end: "2026-03-31",
-                generated_at: "2026-04-01T10:00:00Z",
-                fund_name: "Worker Growth",
-                manager_name: "Achieng Manager",
-                rba_status: "SUBMITTED",
-                last_submitted_at: "2026-04-01T10:00:00Z",
-            },
-            {
-                report_id: "report-2",
-                report_type: "NSSF",
-                period_start: "2026-01-01",
-                period_end: "2026-03-31",
-                generated_at: "2026-04-02T10:00:00Z",
-                fund_name: "Community Growth",
-                manager_name: "Kamau Manager",
-                rba_status: "ACCEPTED",
-                last_submitted_at: "2026-04-02T10:00:00Z",
-            },
-            {
-                report_id: "report-3",
-                report_type: "INTERNAL",
-                period_start: "2026-01-01",
-                period_end: "2026-03-31",
-                generated_at: "2026-04-03T10:00:00Z",
-                rba_status: "DRAFT",
-            },
-        ]);
-        mocks.getOperationalLogs.mockResolvedValue([{
-            log_id: "log-1",
-            action_type: "GENERATE_REPORT",
-            full_name: "Manager Name",
-            entity_name: "COMPLIANCE_REPORTS",
-            timestamp: "2026-04-03T10:00:00Z",
-        }]);
-        mocks.listFunds.mockResolvedValue([{
-            fund_id: "fund-1",
-            fund_name: "Growth Fund",
-            fund_status: "ACTIVE",
-            risk_level: "MEDIUM",
-            expected_return: "8.25",
-        }]);
-        mocks.getFundAllocations.mockResolvedValue([
-            { allocation_id: "allocation-1", percentage: "60", effective_from: "2026-01-01" },
-            { allocation_id: "allocation-2", percentage: "40", effective_from: "2026-03-01" },
-        ]);
+        mocks.getRegulatorDashboard.mockResolvedValue(dashboardData());
     });
 
-    it("shows submitted report status, manager and date, and links to read-only detail pages", async () => {
+    it("shows assigned-scope summaries and links to the detailed oversight pages", async () => {
         renderDashboard();
 
-        expect(await screen.findByRole("heading", { name: "Welcome, Achieng" })).toBeInTheDocument();
-        expect(screen.getByText("Audit events (24 hours)").parentElement).toHaveTextContent("14");
-        expect(screen.getByText("Recorded RBA reports").parentElement).toHaveTextContent("5");
-        expect(screen.getByRole("heading", { name: "KYC verification overview" })).toBeInTheDocument();
-        expect(screen.getByRole("list", { name: "KYC records by status" })).toHaveTextContent("Pending2Verified8Rejected1");
-        expect(screen.getByRole("heading", { name: "Recent KYC review history" })).toBeInTheDocument();
-        expect(screen.getAllByText("KYC review recorded")).toHaveLength(2);
-        expect(screen.getByText(/worker identifiers and National IDs are not displayed/i)).toBeInTheDocument();
-        expect(screen.queryByText("kyc-record-1")).not.toBeInTheDocument();
-        expect(screen.queryByRole("heading", { name: "RBA Reports by Status" })).not.toBeInTheDocument();
-        expect(screen.getByText("Recent compliance reports")).toBeInTheDocument();
-        expect(screen.getByText("Recent audit activity")).toBeInTheDocument();
-        expect(screen.getByText("GENERATE_REPORT")).toBeInTheDocument();
-        expect(screen.getByText("Manager Name · Compliance report")).toBeInTheDocument();
-        expect(screen.getByText("Fund oversight")).toBeInTheDocument();
-        expect(screen.getByText("Growth Fund")).toBeInTheDocument();
-        expect(screen.getByText(/Medium · 2 allocation records · Configured expected return 8\.25%/))
-            .toBeInTheDocument();
-        expect(await screen.findByRole("heading", { name: "Submitted reports awaiting review" })).toBeInTheDocument();
-        const reportRow = screen.getByRole("row", { name: /Worker Growth Achieng Manager Submitted/ });
-        expect(reportRow).toHaveTextContent("Worker Growth");
-        expect(reportRow).toHaveTextContent("Achieng Manager");
-        expect(reportRow).toHaveTextContent("Submitted");
-        expect(reportRow.textContent).toMatch(/2026/);
-        expect(screen.queryByRole("row", { name: /Community Growth/ })).not.toBeInTheDocument();
-        expect(screen.queryByRole("row", { name: /report-3/ })).not.toBeInTheDocument();
-        expect(screen.getByRole("link", { name: "View all reports" })).toHaveAttribute("href", "/regulator/compliance-reports");
-        expect(screen.getByRole("link", { name: /Fund Oversight/ })).toHaveAttribute("href", "/regulator/funds");
-        expect(screen.getByRole("link", { name: /Analytics/ })).toHaveAttribute("href", "/regulator/analytics");
-        expect(screen.getByRole("link", { name: /Compliance Reports/ })).toHaveAttribute("href", "/regulator/compliance-reports");
-        expect(screen.getByRole("link", { name: /Audit Logs/ })).toHaveAttribute("href", "/regulator/audit-logs");
-        expect(screen.getAllByRole("table")).toHaveLength(2);
-        expect(screen.queryByRole("img", { name: /report/i })).not.toBeInTheDocument();
+        expect(await screen.findByRole("heading", { name: "Live oversight summary" })).toBeInTheDocument();
+        expect(mocks.getRegulatorDashboard).toHaveBeenCalledTimes(1);
+        const overview = screen.getByRole("region", { name: "Scoped system overview" });
+        expect(within(overview).getByText("2")).toBeInTheDocument();
+        expect(within(overview).getAllByText("4")).toHaveLength(2);
+
+        const reports = screen.getByRole("region", { name: "Compliance report register" });
+        expect(within(reports).getByText("RBA")).toBeInTheDocument();
+        expect(within(reports).getByText("Synthetic demo — not a genuine regulatory submission")).toBeInTheDocument();
+        expect(within(reports).getByText("Synthetic demonstration reports contain fictional information and are not genuine regulatory submissions. Their lifecycle totals are separated below.")).toBeInTheDocument();
+        expect(within(reports).getAllByText("drafts")).toHaveLength(2);
+        expect(within(reports).getAllByText("returned for revision")).toHaveLength(2);
+        expect(within(reports).getByRole("link", { name: "Review compliance reports" }))
+            .toHaveAttribute("href", "/regulator/compliance-reports");
+        expect(screen.getByRole("heading", { name: "Recent compliance activity" })).toBeInTheDocument();
+        expect(screen.getByRole("heading", { name: "Application-level control checks" })).toBeInTheDocument();
+        expect(screen.getByRole("link", { name: "Open KYC oversight" }))
+            .toHaveAttribute("href", "/regulator/kyc-oversight");
+
+        const links = [
+            ["Analytics", "/regulator/analytics"],
+            ["Fund Oversight", "/regulator/funds"],
+            ["Compliance Reports", "/regulator/compliance-reports"],
+            ["Regulatory Parameters", "/regulator/regulatory-parameters"],
+            ["KYC Oversight", "/regulator/kyc-oversight"],
+            ["Operational Audit Logs", "/regulator/audit-logs"],
+            ["Regulatory Notifications", "/regulator/notifications"],
+            ["Notification Audit Log", "/regulator/notification-audit-log"],
+            ["Reports and Exports", "/regulator/reports"],
+            ["Report History", "/regulator/report-history"],
+        ];
+        for (const [label, path] of links) {
+            expect(screen.getByRole("link", { name: new RegExp(label) })).toHaveAttribute("href", path);
+        }
     });
 
-    it("displays parameter-check state without implying enforcement or approval", async () => {
+    it("shows the request failure instead of successful zero values", async () => {
+        mocks.getRegulatorDashboard.mockRejectedValue(new Error("Dashboard request failed."));
         renderDashboard();
-        expect(await screen.findAllByText("Not configured")).toHaveLength(2);
-        expect(screen.getAllByText("The database schema contains no RBA-specific limits or parameter configuration to evaluate."))
-            .toHaveLength(2);
-        expect(screen.queryByRole("button", { name: /approve|suspend|enforce/i })).not.toBeInTheDocument();
-    });
 
-    it("shows loading and retryable compliance errors", async () => {
-        mocks.getComplianceOverview.mockRejectedValue(new Error("Compliance overview unavailable"));
-        renderDashboard();
-        expect(await screen.findAllByText("Unable to load the compliance overview right now. Please try again.")).toHaveLength(1);
-        expect(screen.getAllByRole("button", { name: "Try again" })).toHaveLength(1);
-    });
-
-    it("shows a retryable error when submitted reports cannot be loaded", async () => {
-        mocks.getComplianceReports.mockRejectedValue(new Error("Submitted reports unavailable"));
-        renderDashboard();
-        expect(await screen.findAllByText("Unable to load compliance reports right now. Please try again.")).toHaveLength(2);
-        expect(screen.getByText("Unable to load submitted reports")).toBeInTheDocument();
-        expect(screen.queryByText("No compliance reports are available in the report register.")).not.toBeInTheDocument();
+        expect(await screen.findByRole("alert")).toHaveTextContent("Dashboard request failed.");
+        expect(screen.queryByText("0", { exact: true })).not.toBeInTheDocument();
         expect(screen.queryByText("No submitted reports are awaiting review.")).not.toBeInTheDocument();
     });
 
-    it("shows an empty state when no submissions await review", async () => {
-        mocks.getComplianceOverview.mockResolvedValue({
-            audit_health: { events_last_24h: 0 },
-            rba_reports_by_status: [],
+    it("explains an empty authorized fund scope without rendering zeroed oversight cards", async () => {
+        mocks.getRegulatorDashboard.mockResolvedValue({
+            ...dashboardData(),
+            scope: { assigned_fund_count: 0, active_assigned_fund_count: 0, has_active_fund_scope: false },
         });
-        mocks.getComplianceReports.mockResolvedValue([]);
-        mocks.getOperationalLogs.mockResolvedValue([]);
-        mocks.listFunds.mockResolvedValue([]);
         renderDashboard();
 
-        expect(await screen.findByText("No compliance reports are available in the report register.")).toBeInTheDocument();
-        expect(screen.getByText("No operational audit events are available.")).toBeInTheDocument();
-        expect(screen.getByText("No fund records are available.")).toBeInTheDocument();
-        expect(screen.queryByTestId("report-status-chart")).not.toBeInTheDocument();
-        expect(await screen.findByText("No submitted reports are awaiting review.")).toBeInTheDocument();
-        expect(screen.queryAllByRole("table")).toHaveLength(0);
+        expect(await screen.findByText("No active assigned funds are available for this regulator.")).toBeInTheDocument();
+        expect(screen.queryByText("0", { exact: true })).not.toBeInTheDocument();
+        expect(screen.queryByRole("table")).not.toBeInTheDocument();
     });
 
-    it("updates the submitted-report view in Kiswahili without navigating away", async () => {
+    it("keeps all navigation links available in Kiswahili", async () => {
         renderDashboard();
-        expect(await screen.findByRole("heading", { name: "Submitted reports awaiting review" })).toBeInTheDocument();
+        await screen.findByRole("heading", { name: "Live oversight summary" });
 
         await i18n.changeLanguage("sw");
 
-        expect(await screen.findByRole("heading", { name: "Ripoti zilizowasilishwa zinazosubiri kukaguliwa" })).toBeInTheDocument();
-        expect(screen.getByRole("link", { name: "Tazama ripoti zote" })).toHaveAttribute("href", "/regulator/compliance-reports");
+        expect(await screen.findByRole("link", { name: /Vigezo vya Udhibiti/ }))
+            .toHaveAttribute("href", "/regulator/regulatory-parameters");
+        expect(screen.getByRole("link", { name: /Uangalizi wa KYC/ }))
+            .toHaveAttribute("href", "/regulator/kyc-oversight");
+        expect(screen.getByRole("link", { name: /Ripoti na Upakuaji/ }))
+            .toHaveAttribute("href", "/regulator/reports");
     });
 });
