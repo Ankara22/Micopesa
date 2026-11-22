@@ -27,14 +27,27 @@ export async function getReportAnalytics(filters = {}) {
     );
     const response = await api.get("/api/reports/analytics", { params });
     const data = response.data?.data;
-    if (
-        !data ||
-        !["fund_comparison", "compliance_trends", "compliance_evidence", "compliance_activity", "risk_summary"]
-            .every((key) => Array.isArray(data[key]))
-    ) {
+    const managerAnalytics = data &&
+        Array.isArray(data.contribution_trends) &&
+        isAnalyticsCount(data.fund_summary?.managed_funds) &&
+        isAnalyticsCount(data.fund_summary?.allocated_workers) &&
+        Array.isArray(data.fund_performance);
+    const regulatorAnalytics = data &&
+        ["fund_comparison", "compliance_trends", "compliance_evidence", "compliance_activity", "risk_summary"]
+            .every((key) => Array.isArray(data[key]));
+    const adminAnalytics = data &&
+        ["notification_outcomes", "mpesa_statuses", "activity", "user_trends"]
+            .every((key) => Array.isArray(data[key]));
+    if (!managerAnalytics && !regulatorAnalytics && !adminAnalytics) {
         throw new Error("The analytics response was incomplete.");
     }
     return data;
+}
+
+function isAnalyticsCount(value) {
+    return (typeof value === "number" || (typeof value === "string" && value.trim() !== "")) &&
+        Number.isFinite(Number(value)) &&
+        Number(value) >= 0;
 }
 
 export async function getReportHistory(params = {}) {

@@ -1429,9 +1429,7 @@ function createMpesaPaymentAttemptRepository(
         attemptId,
         verificationId,
         simulatorConfirmation = null,
-    }, {
-        environmentProvider: readinessEnvironmentProvider = environmentProvider,
-    } = {}) {
+    }) {
         const normalizedAttemptId = requireIdentifier(attemptId, "Payment attempt ID");
         const normalizedVerificationId = Number(verificationId);
         if (!Number.isSafeInteger(normalizedVerificationId) || normalizedVerificationId <= 0) {
@@ -1456,6 +1454,7 @@ function createMpesaPaymentAttemptRepository(
         try {
             await client.query("BEGIN");
             transactionStarted = true;
+            await client.query(LEDGER_DISPATCH_LOCK_QUERY);
 
             const attemptResult = await client.query(
                 `SELECT attempt_id, account_id, contribution_id, transaction_id,
@@ -1545,6 +1544,10 @@ function createMpesaPaymentAttemptRepository(
                     "PAYMENT_SETTLEMENT_CONFLICT",
                     409
                 );
+            }
+
+            if (attempt.attempt_status !== "SETTLED") {
+                await assertPensionLedgerActive(client);
             }
 
             const simulatorInitiationResult = await client.query(
@@ -1682,7 +1685,6 @@ function createMpesaPaymentAttemptRepository(
                 let simulatorConfirmationId = null;
                 let settlementProviderMode = null;
                 let settlementDescription = evidence.provider_result_description;
-                let ledgerReadinessChecked = false;
                 if (callbackVerified) {
                     if (simulatorInitiation) {
                         throw createRepositoryError(
@@ -1740,8 +1742,6 @@ function createMpesaPaymentAttemptRepository(
                         );
                     }
                     settlementDescription = simulatorConfirmation.providerResultDescription;
-                    await enforcePensionLedgerReadiness(client, readinessEnvironmentProvider);
-                    ledgerReadinessChecked = true;
                     const completedSimulatorVerification = await client.query(
                         `UPDATE mpesa_payment_verifications
                          SET verification_status = 'UNVERIFIED',
@@ -1877,10 +1877,6 @@ function createMpesaPaymentAttemptRepository(
                     }
                 }
 
-                if (!ledgerReadinessChecked) {
-                    await enforcePensionLedgerReadiness(client, readinessEnvironmentProvider);
-                }
-
                 const updatedTransaction = await client.query(
                     `UPDATE transactions
                      SET transaction_status = 'COMPLETED',
@@ -1928,22 +1924,6 @@ function createMpesaPaymentAttemptRepository(
                     );
                 }
 
-                const balanceUpdate = await client.query(
-                    `UPDATE pension_accounts
-                     SET current_balance = current_balance + $2::numeric
-                     WHERE account_id = $1
-                       AND account_status = 'ACTIVE'
-                     RETURNING current_balance`,
-                    [attempt.account_id, centsToDecimal(expectedCents)]
-                );
-                if (!balanceUpdate.rows[0]) {
-                    throw createRepositoryError(
-                        "Pension account balance could not be updated.",
-                        "PAYMENT_ACCOUNT_MISMATCH",
-                        409
-                    );
-                }
-
                 const movementResult = await client.query(
                     `INSERT INTO pension_account_movements (
                          ledger_id, account_id, movement_type, amount, currency,
@@ -1979,6 +1959,19 @@ function createMpesaPaymentAttemptRepository(
                         409
                     );
                 }
+                const balanceResult = await client.query(
+                    `SELECT current_balance
+                     FROM pension_accounts
+                     WHERE account_id = $1`,
+                    [attempt.account_id]
+                );
+                if (!balanceResult.rows[0]) {
+                    throw createRepositoryError(
+                        "Pension account balance could not be read after ledger settlement.",
+                        "PAYMENT_ACCOUNT_MISMATCH",
+                        409
+                    );
+                }
                 const settledAttempt = await client.query(
                     `UPDATE mpesa_payment_attempts
                      SET attempt_status = 'SETTLED', updated_at = now()
@@ -1999,7 +1992,7 @@ function createMpesaPaymentAttemptRepository(
                 return {
                     attempt_id: normalizedAttemptId,
                     alreadySettled: false,
-                    account_balance: balanceUpdate.rows[0].current_balance,
+                    account_balance: balanceResult.rows[0].current_balance,
                     contribution_id: linked.contribution_id,
                     contribution_status: "COMPLETED",
                     transaction_status: "COMPLETED",

@@ -40,7 +40,7 @@ test("Admin read endpoints return their documented response shapes without dispa
                 user_id: "worker-1",
                 role: "WORKER",
                 sms_recipient_allowed: true,
-                email_recipient_allowed: false,
+                email_recipient_allowed: true,
             }];
         },
         async isExternalSmsSchemaAvailable() {
@@ -101,7 +101,7 @@ test("admin recipient diagnostics distinguish a missing provider opt-in without 
                 email_enabled: true,
                 push_subscription_count: 0,
                 sms_recipient_allowed: true,
-                email_recipient_allowed: false,
+                email_recipient_allowed: true,
             }];
         },
     }, config);
@@ -125,7 +125,7 @@ test("admin recipient diagnostics distinguish a missing provider opt-in without 
     assert.equal(diagnostic.email_delivery_diagnostic.reason_code, null);
     assert.equal(diagnostic.email_delivery_diagnostic.provider, "GMAIL");
     assert.equal(diagnostic.sms_recipient_allowed, true);
-    assert.equal(diagnostic.email_recipient_allowed, false);
+    assert.equal(diagnostic.email_recipient_allowed, true);
     assert.deepEqual(diagnostic.email_delivery_diagnostic.missing_variables, []);
     assert.deepEqual(diagnostic.email_delivery_diagnostic.invalid_variables, []);
     assert.equal(diagnostic.push_delivery_enabled, false);
@@ -276,7 +276,7 @@ test("Admin read endpoint database errors return generic messages and log only s
     assert.doesNotMatch(JSON.stringify(logged), /SQL parameters|private data|recipient search/);
 });
 
-test("recipient lookup reports development allowlist eligibility without returning contacts", async () => {
+test("verified account contacts do not require development recipient allowlists", async () => {
     let query;
     const repository = createNotificationRepository({
         async query(sql, params) {
@@ -289,11 +289,11 @@ test("recipient lookup reports development allowlist eligibility without returni
                     delivery_phone: "+254712345678",
                     delivery_email: "blocked@example.test",
                     phone_registered: true,
-                    phone_verified: false,
-                    phone_available: false,
+                    phone_verified: true,
+                    phone_available: true,
                     email_registered: true,
-                    email_verified: false,
-                    email_available: false,
+                    email_verified: true,
+                    email_available: true,
                     sms_enabled: false,
                     email_enabled: true,
                     push_subscription_count: 0,
@@ -306,8 +306,6 @@ test("recipient lookup reports development allowlist eligibility without returni
     }, {
         environment: {
             NODE_ENV: "development",
-            COMMUNICATIONS_DEV_ALLOWED_PHONES: "+254712345678",
-            COMMUNICATIONS_DEV_ALLOWED_EMAILS: "allowed@example.test",
         },
     });
 
@@ -321,14 +319,15 @@ test("recipient lookup reports development allowlist eligibility without returni
     assert.ok(query.sql.includes("COALESCE(u.email, u.pending_email)"));
     assert.equal(query.params[0], "%Worker%");
     assert.equal(recipients[0].phone_registered, true);
-    assert.equal(recipients[0].phone_verified, false);
+    assert.equal(recipients[0].phone_verified, true);
+    assert.equal(recipients[0].phone_available, true);
     assert.equal(recipients[0].sms_enabled, false);
     assert.equal(recipients[0].email_registered, true);
-    assert.equal(recipients[0].email_verified, false);
-    assert.equal(recipients[0].email_available, false);
+    assert.equal(recipients[0].email_verified, true);
+    assert.equal(recipients[0].email_available, true);
     assert.equal(recipients[0].email_enabled, true);
     assert.equal(recipients[0].sms_recipient_allowed, true);
-    assert.equal(recipients[0].email_recipient_allowed, false);
+    assert.equal(recipients[0].email_recipient_allowed, true);
     assert.doesNotMatch(JSON.stringify(recipients), /0712345678|worker@example\.test/);
     assert.doesNotMatch(JSON.stringify(recipients), /blocked@example\.test|delivery_phone|delivery_email/);
 });

@@ -2,6 +2,7 @@ const sanitizeHtml = require("sanitize-html");
 const mobileSasaService = require("./mobileSasaService");
 const { getSmtpConfigurationStatus, sendSmtpEmail } = require("./smtpEmailTransport");
 const {
+    assertDevelopmentDeliveryEnabled,
     assertDevelopmentRecipientAllowed,
     normalizeRecipient,
 } = require("./communicationDeliveryPolicy");
@@ -49,7 +50,7 @@ function getEmailProviderConfigurationStatus(environment = process.env) {
 
 async function sendAdminEmail(
     { to, subject, text, html: rawHtml },
-    { environment = process.env, emailService } = {}
+    { environment = process.env, emailService, verifiedRecipient = false } = {}
 ) {
     if (environment.NODE_ENV === "production" &&
         environment.EMAIL_NOTIFICATIONS_ENABLED !== "true") {
@@ -64,7 +65,11 @@ async function sendAdminEmail(
             (typeof rawHtml !== "string" || rawHtml.length > MAX_HTML_LENGTH))) {
         throw createEmailError("Email notification data is invalid.", "EMAIL_INVALID_INPUT");
     }
-    assertDevelopmentRecipientAllowed("EMAIL", recipient, environment);
+    if (verifiedRecipient === true) {
+        assertDevelopmentDeliveryEnabled("EMAIL", environment);
+    } else {
+        assertDevelopmentRecipientAllowed("EMAIL", recipient, environment);
+    }
 
     const selectedProvider = environment.EMAIL_PROVIDER?.trim().toUpperCase() || "GMAIL";
     const html = typeof rawHtml === "string" && rawHtml.trim()

@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import AuthLayout from "./AuthLayout";
 import { useAuth } from "../../context/AuthContext";
 import { DASHBOARD_BY_ROLE } from "../../routes/roleRoutes";
+import { isWithinPasswordByteLimit, MAX_PASSWORD_BYTES } from "../../utils/passwordValidation";
 import "./auth.css";
 
 function ChangeTemporaryPassword() {
@@ -18,6 +19,10 @@ function ChangeTemporaryPassword() {
         setError("");
         if (password.length < 8) {
             setError("Choose a password with at least 8 characters.");
+            return;
+        }
+        if (!isWithinPasswordByteLimit(password)) {
+            setError("Choose a password of no more than 72 UTF-8 bytes.");
             return;
         }
         if (password !== confirmation) {
@@ -53,6 +58,7 @@ function ChangeTemporaryPassword() {
                             type="password"
                             autoComplete="new-password"
                             minLength={8}
+                            maxLength={MAX_PASSWORD_BYTES}
                             value={password}
                             onChange={(event) => setPassword(event.target.value)}
                             disabled={submitting}
@@ -66,6 +72,7 @@ function ChangeTemporaryPassword() {
                             type="password"
                             autoComplete="new-password"
                             minLength={8}
+                            maxLength={MAX_PASSWORD_BYTES}
                             value={confirmation}
                             onChange={(event) => setConfirmation(event.target.value)}
                             disabled={submitting}

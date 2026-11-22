@@ -11,6 +11,7 @@ const enabledEnvironment = {
     MPESA_DARAJA_ENVIRONMENT: "sandbox",
     MPESA_SANDBOX_ENABLED: "true",
     MPESA_PROVIDER_DISPATCH_ENABLED: "true",
+    MPESA_LEDGER_ENFORCEMENT_ENABLED: "false",
 };
 
 function response() {

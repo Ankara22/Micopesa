@@ -6,6 +6,7 @@ const { writeAuditLog } = require("../utils/auditLog");
 const { hashOpaque } = require("../services/authEmailService");
 const authEmailService = require("../services/authEmailService");
 const { loadAdminSettings } = require("../services/adminSettingsService");
+const { lockUserIdentities } = require("../utils/userIdentityLock");
 const {
     normalizeKenyanPhone,
     normalizedPhoneSql,
@@ -18,20 +19,10 @@ const DUMMY_PASSWORD_HASH = bcrypt.hashSync(
     SALT_ROUNDS
 );
 const MIN_PASSWORD_LENGTH = 8;
+const MAX_PASSWORD_BYTES = 72;
 const INVALID_EMAIL_VERIFICATION_MESSAGE =
-    "This verification link is invalid or expired, or its registration details are incomplete.";
-const VALID_ROLES = ["WORKER", "FUND_MANAGER", "REGULATOR", "ADMIN"];
-const VALID_OCCUPATIONS = [
-    "BODA_BODA_OPERATOR",
-    "MARKET_VENDOR",
-    "JUA_KALI_ARTISAN",
-    "DOMESTIC_WORKER",
-    "CASUAL_LABOURER",
-    "SMALL_SCALE_FARMER",
-    "OTHER_INFORMAL_WORKER",
-];
-
-const PUBLIC_REGISTRATION_ROLE = "WORKER";
+    "This verification link is invalid or expired.";
+const VALID_ROLES = ["WORKER", "FUND_MANAGER", "REGULATOR", "ADMIN", "PAYOUT_OFFICER"];
 
 function normalizeEmail(value) {
     if (typeof value !== "string") return null;
@@ -39,179 +30,8 @@ function normalizeEmail(value) {
     return email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : null;
 }
 
-function validateNationalId(value) {
-    return typeof value === "string" && /^\d{7,8}$/.test(value.trim());
-}
-
-function getWorkerAge(dateOfBirth, now = new Date()) {
-    if (typeof dateOfBirth !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(dateOfBirth)) {
-        return null;
-    }
-
-    const [year, month, day] = dateOfBirth.split("-").map(Number);
-    const date = new Date(Date.UTC(year, month - 1, day));
-    if (
-        date.getUTCFullYear() !== year ||
-        date.getUTCMonth() !== month - 1 ||
-        date.getUTCDate() !== day
-    ) {
-        return null;
-    }
-
-    const currentDate = new Date(Date.UTC(
-        now.getUTCFullYear(),
-        now.getUTCMonth(),
-        now.getUTCDate()
-    ));
-    if (date > currentDate) return null;
-
-    let age = currentDate.getUTCFullYear() - year;
-    if (
-        currentDate.getUTCMonth() < month - 1 ||
-        (currentDate.getUTCMonth() === month - 1 && currentDate.getUTCDate() < day)
-    ) {
-        age -= 1;
-    }
-    return age;
-}
-
-/**
- * POST /api/auth/register
- * Body: { full_name, email, phone, password, occupation, national_id, date_of_birth }
- *
- * Public registration always creates a WORKER. Privileged roles must be
- * assigned through a separately authorized administrative or provisioning
- * workflow.
- */
-async function register(req, res) {
-    const { full_name, phone, occupation } = req.body || {};
-    const email = normalizeEmail(req.body?.email);
-    const nationalId = typeof req.body?.national_id === "string"
-        ? req.body.national_id.trim()
-        : "";
-    const dateOfBirth = typeof req.body?.date_of_birth === "string"
-        ? req.body.date_of_birth.trim()
-        : "";
-
-    if (!full_name || !phone || !email) {
-        return res.status(400).json({
-            status: "error",
-            message: "full_name, a valid email, and phone are required",
-        });
-    }
-
-    if (!validateNationalId(nationalId)) {
-        return res.status(400).json({
-            status: "error",
-            code: "INVALID_NATIONAL_ID",
-            message: "National ID must contain 7 or 8 digits",
-        });
-    }
-
-    const workerAge = getWorkerAge(dateOfBirth);
-    if (workerAge === null) {
-        return res.status(400).json({
-            status: "error",
-            code: "INVALID_DATE_OF_BIRTH",
-            message: "Date of birth must be a valid calendar date",
-        });
-    }
-    if (workerAge < 18 || workerAge > 60) {
-        return res.status(400).json({
-            status: "error",
-            code: "WORKER_AGE_OUT_OF_RANGE",
-            message: "Workers must be between 18 and 60 years old",
-        });
-    }
-
-    if (!VALID_OCCUPATIONS.includes(occupation)) {
-        return res.status(400).json({
-            status: "error",
-            message: `occupation must be one of: ${VALID_OCCUPATIONS.join(", ")}`,
-        });
-    }
-
-    const acknowledgement = {
-        status: "accepted",
-        message: "If we can complete your registration, we will send verification instructions to the provided email address.",
-    };
-    const respondAccepted = () => res.status(202).json(acknowledgement);
-
-    try {
-        try {
-            await authEmailService.enforceRequestLimits({
-                req,
-                action: "REGISTRATION",
-                email,
-            });
-        } catch (error) {
-            if (error.status === 429) return respondAccepted();
-            throw error;
-        }
-
-        const token = crypto.randomBytes(32).toString("base64url");
-        const tokenHash = hashOpaque(token);
-        const client = await pool.connect();
-        let transactionStarted = false;
-        try {
-            await client.query("BEGIN");
-            transactionStarted = true;
-            await client.query("DELETE FROM pending_registrations WHERE expires_at <= now()");
-            const existingIdentity = await client.query(
-                `SELECT 1
-                 FROM users
-                 WHERE lower(email) = lower($1)
-                    OR lower(pending_email) = lower($1)
-                    OR ${NORMALIZED_PHONE_SQL} = ${normalizedPhoneSql("$2")}
-                 UNION ALL
-                 SELECT 1
-                 FROM pending_registrations
-                 WHERE expires_at > now()
-                   AND (
-                       lower(email) = lower($1)
-                       OR ${NORMALIZED_PHONE_SQL} = ${normalizedPhoneSql("$2")}
-                   )
-                 LIMIT 1`,
-                [email, phone.trim()]
-            );
-            if (existingIdentity.rows.length > 0) {
-                await client.query("COMMIT");
-                transactionStarted = false;
-                return respondAccepted();
-            }
-            await client.query(
-                `INSERT INTO pending_registrations
-                    (full_name, email, phone, occupation, national_id, date_of_birth,
-                     token_hash, expires_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, now() + interval '30 minutes')`,
-                [full_name.trim(), email, phone.trim(), occupation, nationalId, dateOfBirth, tokenHash]
-            );
-            await client.query("COMMIT");
-            transactionStarted = false;
-        } catch (error) {
-            if (transactionStarted) await client.query("ROLLBACK").catch(() => {});
-            throw error;
-        } finally {
-            client.release();
-        }
-
-        try {
-            await authEmailService.sendPendingRegistrationEmail({ email, token });
-        } catch (error) {
-            console.error("Registration verification delivery failed.", {
-                code: typeof error?.code === "string" ? error.code : "EMAIL_DELIVERY_FAILED",
-            });
-            return respondAccepted();
-        }
-
-        return respondAccepted();
-    } catch (error) {
-        console.error("Registration failed:", { code: error.code || "UNKNOWN" });
-        return res.status(500).json({
-            status: "error",
-            message: "Registration failed due to a server error",
-        });
-    }
+function isWithinPasswordByteLimit(value) {
+    return typeof value === "string" && Buffer.byteLength(value, "utf8") <= MAX_PASSWORD_BYTES;
 }
 
 /**
@@ -234,10 +54,20 @@ async function login(req, res) {
             message: "identifier and password are required",
         });
     }
+    if (!isWithinPasswordByteLimit(password)) {
+        return res.status(401).json({
+            status: "error",
+            message: "Invalid phone number or password",
+        });
+    }
     const email = identifier.includes("@") ? identifier.toLowerCase() : null;
     const normalizedPhone = email ? null : normalizeKenyanPhone(identifier);
 
     try {
+        await authEmailService.enforceRequestLimits({
+            req,
+            action: "LOGIN",
+        });
         const result = await pool.query(
             `SELECT user_id, full_name, phone, email, pending_email, phone_verified_at,
                     password_hash, role, occupation, account_status, email_verified,
@@ -304,8 +134,6 @@ async function login(req, res) {
                 message: "This account is not active",
             });
         }
-
-        const settings = await loadAdminSettings();
         if (user.locked_until && new Date(user.locked_until).getTime() > Date.now()) {
             return res.status(401).json({
                 status: "error",
@@ -364,6 +192,9 @@ async function login(req, res) {
             },
         });
     } catch (error) {
+        if (error.status === 429) {
+            return res.status(429).json({ status: "error", message: error.message });
+        }
         const missingColumn = error?.code === "42703" && typeof error.message === "string"
             ? error.message.match(/^column "([A-Za-z_][A-Za-z0-9_]*)" does not exist$/)
             : null;
@@ -382,30 +213,53 @@ async function login(req, res) {
  * POST /api/auth/logout
  * Requires authentication.
  *
- * JWTs are stateless, so this records an explicit logout but does not revoke
- * the presented token server-side. The client discards its token after this
- * authenticated request completes.
+ * The auth-version increment revokes every active token for this account.
  */
 async function logout(req, res) {
+    let client;
+    let transactionStarted = false;
     try {
-        await writeAuditLog(pool, {
+        client = await pool.connect();
+        await client.query("BEGIN");
+        transactionStarted = true;
+        const revoked = await client.query(
+            `UPDATE users
+             SET auth_version = auth_version + 1, updated_at = now()
+             WHERE user_id = $1
+             RETURNING user_id`,
+            [req.user.userId]
+        );
+        if (!revoked.rows[0]) {
+            await client.query("ROLLBACK");
+            transactionStarted = false;
+            return res.status(401).json({
+                status: "error",
+                message: "The authenticated session is no longer valid.",
+            });
+        }
+        await writeAuditLog(client, {
             userId: req.user.userId,
             actionType: "LOGOUT",
             entityName: "AUTHENTICATION",
             entityId: req.user.userId,
-            details: { role: req.user.role },
+            details: { role: req.user.role, revokedSessions: "ALL" },
         });
+        await client.query("COMMIT");
+        transactionStarted = false;
     } catch (error) {
+        if (transactionStarted) await client?.query("ROLLBACK").catch(() => {});
         console.error("Logout audit write failed:", error?.code || "AUTH_LOGOUT_AUDIT_FAILED");
         return res.status(500).json({
             status: "error",
             message: "Logout could not be recorded. Please try again.",
         });
+    } finally {
+        client?.release();
     }
 
     return res.status(200).json({
         status: "success",
-        message: "Logout recorded successfully. Please discard your access token on the client.",
+        message: "Logout recorded successfully. All active sessions have been revoked.",
     });
 }
 
@@ -422,7 +276,8 @@ async function getMe(req, res) {
             `SELECT user_id, full_name, phone,
                     (phone_verified_at IS NOT NULL) AS phone_verified,
                     email, email_verified, pending_email,
-                    role, occupation, account_status, is_temp_password, force_password_change,
+                    role, occupation, account_status,
+                    is_temp_password, force_password_change,
                     created_at, updated_at,
                     (profile_photo_ref IS NOT NULL) AS profile_photo_available
              FROM users
@@ -452,10 +307,12 @@ async function getMe(req, res) {
 
 async function changeTemporaryPassword(req, res) {
     const newPassword = req.body?.new_password;
-    if (typeof newPassword !== "string" || newPassword.length < MIN_PASSWORD_LENGTH) {
+    if (typeof newPassword !== "string" ||
+        newPassword.length < MIN_PASSWORD_LENGTH ||
+        !isWithinPasswordByteLimit(newPassword)) {
         return res.status(400).json({
             status: "error",
-            message: `new_password must be at least ${MIN_PASSWORD_LENGTH} characters long`,
+            message: `new_password must be at least ${MIN_PASSWORD_LENGTH} characters and no more than ${MAX_PASSWORD_BYTES} UTF-8 bytes`,
         });
     }
 
@@ -564,12 +421,6 @@ async function requestPublicEmailVerification(req, res) {
                 } catch (error) {
                     authEmailService.logEmailDeliveryFailure("EMAIL_VERIFICATION", error);
                 }
-            } else {
-                try {
-                    await authEmailService.resendPendingRegistrationEmail({ email });
-                } catch (error) {
-                    authEmailService.logEmailDeliveryFailure("REGISTRATION_VERIFICATION", error);
-                }
             }
         }
         return res.status(200).json({ status: "success", message: genericMessage });
@@ -587,10 +438,12 @@ async function resetPassword(req, res) {
     if (typeof token !== "string" || token.length < 40 || token.length > 100) {
         return res.status(400).json({ status: "error", message: "This password-reset link is invalid or expired. Request a new link." });
     }
-    if (typeof password !== "string" || password.length < MIN_PASSWORD_LENGTH) {
+    if (typeof password !== "string" ||
+        password.length < MIN_PASSWORD_LENGTH ||
+        !isWithinPasswordByteLimit(password)) {
         return res.status(400).json({
             status: "error",
-            message: `password must be at least ${MIN_PASSWORD_LENGTH} characters long`,
+            message: `password must be at least ${MIN_PASSWORD_LENGTH} characters and no more than ${MAX_PASSWORD_BYTES} UTF-8 bytes`,
         });
     }
 
@@ -683,70 +536,20 @@ async function verifyEmail(req, res) {
         });
     }
     const client = await pool.connect();
-    let registrationCompletion = false;
     try {
         await client.query("BEGIN");
-        const pendingResult = await client.query(
-            `SELECT pending_registration_id, full_name, email, phone,
-                    occupation, national_id, date_of_birth
-             FROM pending_registrations
-             WHERE token_hash = $1 AND expires_at > now()
-             FOR UPDATE`,
+        const authTokenLookup = await client.query(
+            `SELECT auth_token_id, user_id, email_address
+             FROM auth_tokens
+             WHERE token_hash = $1 AND purpose = 'EMAIL_VERIFICATION'
+               AND consumed_at IS NULL AND expires_at > now()`,
             [tokenHash]
         );
-        const pendingRegistration = pendingResult.rows[0];
-        if (pendingRegistration) {
-            registrationCompletion = true;
-            const password = req.body?.password;
-            if (typeof password !== "string" || password.length < MIN_PASSWORD_LENGTH) {
-                await client.query("ROLLBACK");
-                return res.status(400).json({
-                    status: "error",
-                    message: INVALID_EMAIL_VERIFICATION_MESSAGE,
-                });
-            }
-            const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
-            const userResult = await client.query(
-                `INSERT INTO users (full_name, phone, email, password_hash, role, occupation,
-                                    login_method, email_verified)
-                 VALUES ($1, $2, $3, $4, $5, $6, 'EMAIL', TRUE)
-                 RETURNING user_id`,
-                [
-                    pendingRegistration.full_name,
-                    pendingRegistration.phone,
-                    pendingRegistration.email,
-                    passwordHash,
-                    PUBLIC_REGISTRATION_ROLE,
-                    pendingRegistration.occupation,
-                ]
-            );
-            const userId = userResult.rows[0].user_id;
-            await client.query(
-                `INSERT INTO pension_accounts (user_id, current_balance, retirement_age)
-                 VALUES ($1, 0.00, 60)`,
-                [userId]
-            );
-            await client.query(
-                `INSERT INTO notification_preferences (user_id, sms_enabled, email_enabled)
-                 VALUES ($1, FALSE, FALSE)`,
-                [userId]
-            );
-            await client.query(
-                `INSERT INTO kyc_records (user_id, national_id, date_of_birth, kyc_status)
-                 VALUES ($1, $2, $3, 'PENDING')`,
-                [userId, pendingRegistration.national_id, pendingRegistration.date_of_birth]
-            );
-            await client.query(
-                "DELETE FROM pending_registrations WHERE pending_registration_id = $1",
-                [pendingRegistration.pending_registration_id]
-            );
-            await client.query("COMMIT");
-            return res.status(200).json({
-                status: "success",
-                message: "Email address verified successfully.",
+        if (authTokenLookup.rows[0]) {
+            await lockUserIdentities(client, {
+                emails: [authTokenLookup.rows[0].email_address],
             });
         }
-
         const result = await client.query(
             `SELECT auth_token_id, user_id, email_address
              FROM auth_tokens
@@ -800,19 +603,6 @@ async function verifyEmail(req, res) {
     } catch (error) {
         await client.query("ROLLBACK").catch(() => {});
         if (error.code === "23505") {
-            if (registrationCompletion) {
-                console.error("Registration completion uniqueness conflict.", {
-                    code: error.code,
-                    constraint: error.constraint,
-                    table: error.table,
-                    schema: error.schema,
-                });
-                return res.status(409).json({
-                    status: "error",
-                    code: "REGISTRATION_COMPLETION_UNAVAILABLE",
-                    message: "We could not complete your registration. Please contact support.",
-                });
-            }
             return res.status(400).json({
                 status: "error",
                 message: INVALID_EMAIL_VERIFICATION_MESSAGE,
@@ -868,7 +658,6 @@ async function resendEmailVerification(req, res) {
 }
 
 module.exports = {
-    register,
     login,
     logout,
     getMe,

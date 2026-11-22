@@ -8,6 +8,7 @@ const {
     getNotificationSmsProvider,
 } = require("./notificationChannelConfiguration");
 const SAFE_ERROR_CODES = new Set([
+    "EMAIL_RETRYABLE_REJECTION",
     "EMAIL_SMTP_DELIVERY_FAILED",
     "EMAIL_SMTP_CONFIGURATION_MISSING",
     "EMAIL_SMTP_CONFIGURATION_INVALID",
@@ -44,6 +45,8 @@ const SAFE_ERROR_CODES = new Set([
     "SMS_NETWORK_ERROR",
     "SMS_PRODUCTION_ONLY",
     "SMS_DEVELOPMENT_DELIVERY_DISABLED",
+    "SMS_DEVELOPMENT_ALLOWLIST_EMPTY",
+    "SMS_DEVELOPMENT_RECIPIENT_NOT_ALLOWED",
     "SMS_PROVIDER_REJECTED",
     "SMS_PROVIDER_AUTH_FAILED",
     "SMS_RETRYABLE_REJECTION",
@@ -90,6 +93,9 @@ function classifyEmailFailure(error) {
         if (smtpCode === "EAUTH" || [534, 535].includes(responseCode)) {
             code = "EMAIL_PROVIDER_AUTH_FAILED";
             failureCategory = "authentication_failure";
+        } else if (responseCode !== null && responseCode >= 400 && responseCode < 500) {
+            code = "EMAIL_RETRYABLE_REJECTION";
+            failureCategory = "temporary_provider_rejection";
         } else if (responseCode !== null) {
             code = "EMAIL_PROVIDER_REJECTED";
             failureCategory = "smtp_rejection";
@@ -120,8 +126,15 @@ function classifyEmailFailure(error) {
         code === "EMAIL_PROVIDER_REJECTED" ||
         code === "EMAIL_SMTP_PROVIDER_REJECTED"
     ) {
-        code = "EMAIL_PROVIDER_REJECTED";
-        failureCategory = "provider_rejection";
+        if (responseCode !== null && responseCode >= 400 && responseCode < 500) {
+            code = "EMAIL_RETRYABLE_REJECTION";
+            failureCategory = "temporary_provider_rejection";
+        } else {
+            code = "EMAIL_PROVIDER_REJECTED";
+            failureCategory = "provider_rejection";
+        }
+    } else if (code === "EMAIL_RETRYABLE_REJECTION") {
+        failureCategory = "temporary_provider_rejection";
     } else if (
         code.includes("CONFIGURATION") ||
         code.includes("DEVELOPMENT_") ||
@@ -151,6 +164,7 @@ function classifyEmailFailure(error) {
         ...(responseCode !== null ? { responseCode } : {}),
         deliveryOutcomeUnknown: ![
             "EMAIL_PROVIDER_REJECTED",
+            "EMAIL_RETRYABLE_REJECTION",
             "EMAIL_PROVIDER_REJECTED",
             "EMAIL_PROVIDER_AUTH_FAILED",
             "EMAIL_CONFIGURATION_MISSING",
@@ -324,7 +338,11 @@ function createSmsDeliveryDispatcher({
                 });
             }
             try {
-                if (["SMS_RETRYABLE_REJECTION", "PUSH_RETRYABLE_REJECTION"].includes(code)) {
+                if ([
+                    "SMS_RETRYABLE_REJECTION",
+                    "EMAIL_RETRYABLE_REJECTION",
+                    "PUSH_RETRYABLE_REJECTION",
+                ].includes(code)) {
                     await repository.retryRejected(notification, {
                         errorCode: code,
                         delayMs: retryDelayMs(notification.attempt_count),
@@ -340,6 +358,8 @@ function createSmsDeliveryDispatcher({
                     "SMS_ENVIRONMENT_MISMATCH",
                     "SMS_PRODUCTION_ONLY",
                     "SMS_DEVELOPMENT_DELIVERY_DISABLED",
+                    "SMS_DEVELOPMENT_ALLOWLIST_EMPTY",
+                    "SMS_DEVELOPMENT_RECIPIENT_NOT_ALLOWED",
                     "SMS_SANDBOX_CREDENTIALS",
                     "EMAIL_SMTP_RECIPIENT_REJECTED",
                     "EMAIL_SMTP_AUTH_FAILED",

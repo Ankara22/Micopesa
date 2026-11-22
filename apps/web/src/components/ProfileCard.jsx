@@ -315,7 +315,11 @@ function ProfileCard() {
                 </div>
             </header>
 
-            {isWorker && <KycStatusBanner status={profile.kyc_status} />}
+            {isWorker && (
+                <>
+                    <KycStatusBanner status={profile.kyc_status} />
+                </>
+            )}
 
             <div className="profile-grid">
                 <Card title={profileText("personalInfo", "Personal information")} className="profile-card">

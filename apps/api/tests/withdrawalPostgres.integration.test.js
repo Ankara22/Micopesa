@@ -142,14 +142,15 @@ function createResponse() {
 async function createFixture(balance = 100) {
     assert.equal(verifiedTarget, true, "database target must be verified before fixture writes");
     const suffix = `${Date.now()}${++fixtureSequence}${Math.floor(Math.random() * 100000)}`.slice(-10);
+    const workerPhone = `2547${suffix.slice(0, 8)}`;
     const client = await verificationPool.connect();
     try {
         await client.query("BEGIN");
         const workerResult = await client.query(
-            `INSERT INTO users (full_name, phone, password_hash, role, occupation)
-             VALUES ('Withdrawal Integration Worker', $1, 'integration-test-hash', 'WORKER', 'OTHER_INFORMAL_WORKER')
+            `INSERT INTO users (full_name, phone, phone_verified_at, password_hash, role, occupation)
+             VALUES ('Withdrawal Integration Worker', $1, now(), 'integration-test-hash', 'WORKER', 'OTHER_INFORMAL_WORKER')
              RETURNING user_id`,
-            [`254${suffix}`]
+            [workerPhone]
         );
         const managerResult = await client.query(
             `INSERT INTO users (full_name, phone, password_hash, role)
@@ -163,11 +164,24 @@ async function createFixture(balance = 100) {
              RETURNING account_id`,
             [workerResult.rows[0].user_id, balance]
         );
+        const fundResult = await client.query(
+            `INSERT INTO funds (managed_by, fund_name, administrator_name, risk_level, expected_return)
+             VALUES ($1, $2, 'Integration Test Administrator', 'LOW', 5.00)
+             RETURNING fund_id`,
+            [managerResult.rows[0].user_id, `Withdrawal Integration Fund ${suffix}`]
+        );
+        await client.query(
+            `INSERT INTO fund_allocations (account_id, fund_id, percentage)
+             VALUES ($1, $2, 100.00)`,
+            [accountResult.rows[0].account_id, fundResult.rows[0].fund_id]
+        );
         await client.query("COMMIT");
         return {
             workerId: workerResult.rows[0].user_id,
+            workerPhone,
             managerId: managerResult.rows[0].user_id,
             accountId: accountResult.rows[0].account_id,
+            fundId: fundResult.rows[0].fund_id,
         };
     } catch (error) {
         await client.query("ROLLBACK");
@@ -181,10 +195,10 @@ async function createClaim(fixture, { amount, status = "PENDING", reviewedBy = n
     const result = await verificationPool.query(
         `INSERT INTO withdrawal_claims
             (account_id, reviewed_by, amount_requested, destination_phone, withdrawal_reason, claim_status, reviewed_at)
-         VALUES ($1, $2, $3, '254700000001', 'Integration test claim', $4,
+         VALUES ($1, $2, $3, $4, 'Integration test claim', $5,
                  CASE WHEN $2::varchar IS NULL THEN NULL ELSE now() END)
          RETURNING claim_id`,
-        [fixture.accountId, reviewedBy, amount, status]
+        [fixture.accountId, reviewedBy, amount, fixture.workerPhone, status]
     );
     return result.rows[0].claim_id;
 }
@@ -206,6 +220,8 @@ async function cleanupFixture(fixture) {
             );
         }
         await client.query("DELETE FROM withdrawal_claims WHERE account_id = $1", [fixture.accountId]);
+        await client.query("DELETE FROM fund_allocations WHERE account_id = $1", [fixture.accountId]);
+        await client.query("DELETE FROM funds WHERE fund_id = $1", [fixture.fundId]);
         await client.query("DELETE FROM pension_accounts WHERE account_id = $1", [fixture.accountId]);
         await client.query("DELETE FROM users WHERE user_id = ANY($1::varchar[])", [
             [fixture.workerId, fixture.managerId],
@@ -235,7 +251,7 @@ async function submit(fixture, amount) {
         user: { userId: fixture.workerId },
         body: {
             amount_requested: amount,
-            destination_phone: "254700000001",
+            destination_phone: fixture.workerPhone,
             withdrawal_reason: "Integration test request",
         },
     }, response);
@@ -362,14 +378,14 @@ test("approval never debits balance or marks a claim paid", async () => {
     });
 });
 
-test("failed submission and review transactions leave no partial claims or audit entries", async () => {
+test("invalid submission and unassigned reviewer leave no partial claims or audit entries", async () => {
     if (!verifiedTarget) return;
     await withFixture(async (fixture) => {
         const originalConsoleError = console.error;
         console.error = () => {};
         try {
-            const failedSubmission = await submit(fixture, 0.001);
-            assert.equal(failedSubmission.statusCode, 500);
+            const invalidSubmission = await submit(fixture, 0.001);
+            assert.equal(invalidSubmission.statusCode, 400);
             const pendingCount = await verificationPool.query(
                 "SELECT count(*)::int AS count FROM withdrawal_claims WHERE account_id = $1",
                 [fixture.accountId]
@@ -377,12 +393,12 @@ test("failed submission and review transactions leave no partial claims or audit
             assert.equal(pendingCount.rows[0].count, 0);
 
             const claimId = await createClaim(fixture, { amount: 40 });
-            const failedReview = await fundManagerController.reviewWithdrawal({
+            const unassignedReview = await fundManagerController.reviewWithdrawal({
                 user: { userId: "nonexistent-integration-manager" },
                 params: { id: claimId },
                 body: { decision: "APPROVED" },
             }, createResponse());
-            assert.equal(failedReview.statusCode, 500);
+            assert.equal(unassignedReview.statusCode, 404);
             assert.equal((await getClaim(claimId)).claim_status, "PENDING");
             assert.equal(await getAuditCount(claimId), 0);
             assert.equal(await getBalance(fixture.accountId), 100);

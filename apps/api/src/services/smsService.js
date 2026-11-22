@@ -203,7 +203,9 @@ async function sendSms(
     const selectedProvider = typeof provider === "string"
         ? provider.trim().toUpperCase()
         : "";
-    assertDevelopmentRecipientAllowed("SMS", recipient, environment);
+    assertDevelopmentRecipientAllowed("SMS", recipient, environment, {
+        verifiedRecipient: notificationDelivery,
+    });
     if (selectedProvider === "MOBILE_SASA") {
         return mobileSasaService.sendSms(
             { to: recipient, message, trackingId },

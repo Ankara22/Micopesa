@@ -16,11 +16,18 @@ function queryable(result, error = null) {
     };
 }
 
-test("ledger enforcement defaults off and accepts only explicit boolean strings", () => {
-    assert.equal(isPensionLedgerEnforcementEnabled({}), false);
+test("ledger enforcement defaults on and cannot be disabled in production", () => {
+    assert.equal(isPensionLedgerEnforcementEnabled({}), true);
     assert.equal(isPensionLedgerEnforcementEnabled({
         MPESA_LEDGER_ENFORCEMENT_ENABLED: "false",
     }), false);
+    assert.throws(
+        () => isPensionLedgerEnforcementEnabled({
+            NODE_ENV: "production",
+            MPESA_LEDGER_ENFORCEMENT_ENABLED: "false",
+        }),
+        { code: "PENSION_LEDGER_ENFORCEMENT_CONFIG_INVALID", statusCode: 503 }
+    );
     assert.equal(isPensionLedgerEnforcementEnabled({
         MPESA_LEDGER_ENFORCEMENT_ENABLED: "true",
     }), true);
@@ -42,6 +49,14 @@ test("ledger enforcement defaults off and accepts only explicit boolean strings"
         }),
         { code: "PENSION_LEDGER_ENFORCEMENT_CONFIG_INVALID", statusCode: 503 }
     );
+});
+
+test("default readiness guard checks the ledger", async () => {
+    const guard = createPensionLedgerReadinessGuard({
+        assertPensionLedgerActive: createPensionLedgerReadinessChecker(),
+    });
+
+    assert.equal(await guard(queryable({ rows: [{ status: "ACTIVE" }] })), true);
 });
 
 test("readiness checker accepts exactly one ACTIVE ledger", async () => {

@@ -589,3 +589,15 @@ test("Mobile Sasa email rejects a suppressed or failed recipient", async () => {
         }),
     }), { code: "EMAIL_SUPPRESSED" });
 });
+
+test("Mobile Sasa email reports HTTP 429 as a retryable rejection", async () => {
+    await assert.rejects(() => mobileSasaService.sendEmail({
+        to: "worker@example.test",
+        subject: "Account update",
+        text: "Account update",
+        html: "<p>Account update</p>",
+    }, {
+        environment: emailEnvironment,
+        fetchImpl: async () => response({}, { ok: false, status: 429 }),
+    }), { code: "EMAIL_RETRYABLE_REJECTION" });
+});

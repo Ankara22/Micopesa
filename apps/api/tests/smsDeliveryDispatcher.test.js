@@ -410,6 +410,101 @@ test("explicit transient rejection uses exponential bounded retries", async () =
     assert.equal(retryDelayMs(20), 900000);
 });
 
+test("SMS rejection does not prevent independent email delivery", async () => {
+    const environment = {
+        ...productionEnvironment,
+        NOTIFICATION_DISPATCHER_ENABLED: "true",
+        EMAIL_NOTIFICATIONS_ENABLED: "true",
+        EMAIL_PROVIDER: "MOBILE_SASA",
+        MOBILESASA_EMAIL_ENABLED: "true",
+        MOBILE_SASA_EMAIL_API_TOKEN: "mbs_test-token",
+        MOBILE_SASA_EMAIL_FROM: "billing@example.test",
+        NOTIFICATION_SMS_PROVIDER: "MOBILE_SASA",
+        MOBILESASA_NOTIFICATION_SMS_ENABLED: "true",
+        MOBILE_SASA_SMS_API_TOKEN: "mbs_test-token",
+        MOBILE_SASA_SMS_SENDER_ID: "MicoPesa",
+    };
+    const notifications = [
+        {
+            notification_id: "sms_001",
+            notification_type: "SMS",
+            recipient_phone: "+254712345678",
+            message: "Financial notice",
+            delivery_status: "PENDING",
+            attempt_count: 0,
+        },
+        {
+            notification_id: "email_001",
+            notification_type: "EMAIL",
+            recipient_email: "worker@example.test",
+            email_subject: "Financial notice",
+            message: "Financial notice",
+            delivery_status: "PENDING",
+            attempt_count: 0,
+        },
+    ];
+    const { dispatcher, state } = createHarness({
+        environment,
+        notifications,
+        sendSms: async () => {
+            throw Object.assign(new Error("Rate limited"), {
+                code: "SMS_RETRYABLE_REJECTION",
+            });
+        },
+    });
+
+    await dispatcher.runOnce();
+
+    assert.equal(state.notifications.find(({ notification_id }) =>
+        notification_id === "sms_001").delivery_status, "PENDING");
+    assert.equal(state.notifications.find(({ notification_id }) =>
+        notification_id === "email_001").delivery_status, "PROVIDER_ACCEPTED");
+    assert.deepEqual(state.persistCalls.map(([operation, id]) => [operation, id]).sort(), [
+        ["accepted", "email_001"],
+        ["retry", "sms_001"],
+    ]);
+});
+
+test("temporary SMTP recipient rejection is retried with a bounded delay", async () => {
+    const environment = {
+        NODE_ENV: "production",
+        NOTIFICATION_DISPATCHER_ENABLED: "true",
+        EMAIL_NOTIFICATIONS_ENABLED: "true",
+        EMAIL_PROVIDER: "MOBILE_SASA",
+        MOBILESASA_EMAIL_ENABLED: "true",
+        MOBILE_SASA_EMAIL_API_TOKEN: "mbs_test-token",
+        MOBILE_SASA_EMAIL_FROM: "billing@example.test",
+    };
+    const { dispatcher, state } = createHarness({
+        environment,
+        notifications: [{
+            notification_id: "email_retry_001",
+            notification_type: "EMAIL",
+            recipient_email: "worker@example.test",
+            email_subject: "Financial notice",
+            message: "Financial notice",
+            delivery_status: "PENDING",
+            attempt_count: 0,
+        }],
+        sendEmail: async () => {
+            throw Object.assign(new Error("Temporary SMTP rejection"), {
+                code: "EMAIL_SMTP_DELIVERY_FAILED",
+                responseCode: 450,
+            });
+        },
+    });
+
+    await dispatcher.runOnce();
+
+    assert.equal(state.notifications[0].delivery_status, "PENDING");
+    assert.deepEqual(state.persistCalls[0], [
+        "retry",
+        "email_retry_001",
+        "EMAIL_RETRYABLE_REJECTION",
+        30000,
+    ]);
+});
+
 test("provider timeout becomes UNKNOWN and is not resent after restart", async () => {
     let sends = 0;
     const sendSms = async () => {

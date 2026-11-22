@@ -40,6 +40,7 @@ function createHarness({
         readiness: 0,
         createEnvironmentProviders: [],
         retryEnvironmentProviders: [],
+        notifications: [],
     };
     const persistenceErrors = [...acceptedPersistenceErrors];
     if (acceptedPersistenceError) persistenceErrors.push(acceptedPersistenceError);
@@ -108,9 +109,14 @@ function createHarness({
     const environmentProvider = () => ({
         MPESA_LEDGER_ENFORCEMENT_ENABLED: enforcementEnabled ? "true" : "false",
     });
+    const notificationEnqueuer = async (input) => {
+        calls.notifications.push(input);
+        return { queued: 1 };
+    };
     const service = createMpesaPaymentOrchestrationService({
         paymentAttemptRepository: repository,
         providerService,
+        notificationEnqueuer,
         amountValidator(value) {
             if (!Number.isSafeInteger(Number(value)) || Number(value) <= 0) {
                 throw new Error("Invalid mocked amount");
@@ -148,6 +154,11 @@ test("accepted prompt persists provider IDs but keeps the transaction pending", 
     assert.equal(result.outcome_unknown, false);
     assert.equal(result.checkout_request_id, "ws_CO_mock_001");
     assert.equal(calls.provider.length, 1);
+    assert.deepEqual(calls.notifications, [{
+        userId: "worker_001",
+        eventType: "CONTRIBUTION_SUBMITTED",
+        referenceId: "contribution_001",
+    }]);
     assert.equal(calls.readiness, 0);
     assert.equal(calls.accepted.length, 1);
     assert.equal(calls.accepted[0].providerResultCode, "0");
@@ -339,6 +350,7 @@ test("duplicate requests for pending, accepted, or unknown attempts do not call 
         assert.equal(result.created, false);
         assert.equal(calls.provider.length, 0);
         assert.equal(calls.started.length, 0);
+        assert.equal(calls.notifications.length, 0);
     }
 });
 
@@ -372,6 +384,7 @@ test("a conflicting idempotency request fails before provider initiation", async
         providerService: { initiateStkPush: async () => assert.fail("provider must not be called") },
         amountValidator: (value) => value,
         phoneNormalizer: (value) => value,
+        environmentProvider: () => ({ MPESA_LEDGER_ENFORCEMENT_ENABLED: "false" }),
     });
     await assert.rejects(harness.service.initiateWorkerPayment(paymentRequest()), {
         code: "IDEMPOTENCY_KEY_CONFLICT",

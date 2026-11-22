@@ -1,11 +1,17 @@
 const pool = require("../db/database");
+const { parseAmountCents } = require("../services/contributionAllocationService");
 const {
     calculateAvailableBalance,
     getWithdrawalAvailability,
     reviewWithdrawalClaim: reviewClaimTransaction,
 } = require("../services/withdrawalService");
+const { createWithdrawalPayoutOtpService } = require("../services/withdrawalPayoutOtpService");
+const { enqueueBusinessNotification } = require("../services/notificationEventService");
+const payoutOtpService = createWithdrawalPayoutOtpService();
 
 const ELIGIBLE_ACCOUNT_STATUSES = ["ACTIVE"];
+const CLAIM_ID_PATTERN = /^[A-Za-z0-9_-]{1,25}$/;
+const IDEMPOTENCY_KEY_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 async function findAccountForUser(userId) {
     const result = await pool.query(
@@ -91,8 +97,9 @@ async function checkEligibility(req, res) {
  */
 async function submitClaim(req, res) {
     const { userId } = req.user;
-    const { amount_requested, destination_phone, withdrawal_reason } = req.body;
-    const amount = Number(amount_requested);
+    const { amount_requested, destination_phone, withdrawal_reason } = req.body || {};
+    const parsedAmount = parseAmountCents(amount_requested);
+    const amount = parsedAmount ? Number(parsedAmount.text) : null;
 
     if (amount_requested === undefined || !withdrawal_reason) {
         return res.status(400).json({
@@ -111,10 +118,10 @@ async function submitClaim(req, res) {
         return res.status(400).json({ status: "error", message: "withdrawal_reason must be between 3 and 255 characters" });
     }
 
-    if (!Number.isFinite(amount) || amount <= 0) {
+    if (amount === null) {
         return res.status(400).json({
             status: "error",
-            message: "amount_requested must be a positive number",
+            message: "amount_requested must be a positive amount with no more than two decimal places",
         });
     }
 
@@ -194,10 +201,15 @@ async function submitClaim(req, res) {
              VALUES ($1, $2, $3, $4)
              RETURNING claim_id, account_id, amount_requested, destination_phone,
                        withdrawal_reason, claim_status, requested_at`,
-            [account.account_id, amount, profile.phone, withdrawal_reason.trim()]
+            [account.account_id, parsedAmount.text, profile.phone, withdrawal_reason.trim()]
         );
 
         await client.query("COMMIT");
+        void enqueueBusinessNotification({
+            userId,
+            eventType: "WITHDRAWAL_SUBMITTED",
+            referenceId: result.rows[0].claim_id,
+        });
         return res.status(201).json({
             status: "success",
             message: "Withdrawal claim submitted successfully",
@@ -233,11 +245,21 @@ async function getMyClaims(req, res) {
         }
 
         const result = await pool.query(
-            `SELECT claim_id, account_id, reviewed_by, transaction_id, amount_requested,
-                    destination_phone, withdrawal_reason, claim_status, requested_at, reviewed_at, processed_at
-             FROM withdrawal_claims
-             WHERE account_id = $1
-             ORDER BY requested_at DESC`,
+            `SELECT wc.claim_id, wc.account_id, wc.reviewed_by, wc.transaction_id,
+                    wc.amount_requested, wc.destination_phone, wc.withdrawal_reason,
+                    wc.claim_status, wc.requested_at, wc.reviewed_at, wc.processed_at,
+                    otp.status AS payout_otp_status, otp.expires_at AS payout_otp_expires_at,
+                    otp.verified_at AS payout_otp_verified_at
+             FROM withdrawal_claims wc
+             LEFT JOIN LATERAL (
+                 SELECT status, expires_at, verified_at
+                 FROM withdrawal_payout_otp_authorizations
+                 WHERE claim_id = wc.claim_id
+                 ORDER BY created_at DESC
+                 LIMIT 1
+             ) otp ON true
+             WHERE wc.account_id = $1
+             ORDER BY wc.requested_at DESC`,
             [account.account_id]
         );
 
@@ -312,6 +334,13 @@ async function reviewClaim(req, res, decision) {
         const newStatus = decision === "approve" ? "APPROVED" : "REJECTED";
         const claim = await reviewClaimTransaction(client, { userId, claimId, decision: newStatus });
         await client.query("COMMIT");
+        void enqueueBusinessNotification({
+            userId: claim.user_id,
+            eventType: newStatus === "APPROVED"
+                ? "WITHDRAWAL_APPROVED"
+                : "WITHDRAWAL_REJECTED",
+            referenceId: claim.claim_id,
+        });
         return res.status(200).json({
             status: "success",
             message: `Claim ${newStatus.toLowerCase()} successfully`,
@@ -340,6 +369,126 @@ async function rejectClaim(req, res) {
     return reviewClaim(req, res, "reject");
 }
 
+function sendPayoutOtpError(res, error, operation) {
+    if (error?.statusCode && error?.code) {
+        return res.status(error.statusCode).json({
+            status: "error",
+            code: error.code,
+            message: error.message,
+            ...(Number.isInteger(error.retryAfterSeconds)
+                ? { retryAfterSeconds: error.retryAfterSeconds }
+                : {}),
+        });
+    }
+    console.error(`Failed to ${operation} withdrawal OTP:`, {
+        code: typeof error?.code === "string" ? error.code : "WITHDRAWAL_OTP_INTERNAL_ERROR",
+    });
+    return res.status(500).json({
+        status: "error",
+        code: "WITHDRAWAL_OTP_INTERNAL_ERROR",
+        message: "Withdrawal OTP processing failed. The withdrawal remains unpaid; contact support if the problem persists.",
+    });
+}
+
+async function getPayoutAuthorizationQueue(req, res) {
+    try {
+        const claims = await payoutOtpService.getAuthorizationQueue();
+        return res.status(200).json({ status: "success", data: claims });
+    } catch (error) {
+        return sendPayoutOtpError(res, error, "load");
+    }
+}
+
+async function createPayoutOtp(req, res) {
+    const { claimId } = req.params;
+    const idempotencyKey = req.get("Idempotency-Key");
+    if (!CLAIM_ID_PATTERN.test(claimId)) {
+        return res.status(400).json({ status: "error", message: "claimId is invalid" });
+    }
+    if (typeof idempotencyKey !== "string" || !IDEMPOTENCY_KEY_PATTERN.test(idempotencyKey)) {
+        return res.status(400).json({
+            status: "error",
+            message: "A UUID Idempotency-Key header is required.",
+        });
+    }
+    try {
+        const result = await payoutOtpService.issueOtp({
+            claimId,
+            payoutOfficerUserId: req.user.userId,
+            idempotencyKey,
+        });
+        return res.status(200).json({
+            status: "success",
+            message: result.replayed
+                ? "This authorization request was already processed."
+                : "OTP accepted by the configured SMS provider. The withdrawal is still unpaid.",
+            data: result,
+        });
+    } catch (error) {
+        return sendPayoutOtpError(res, error, "issue");
+    }
+}
+
+async function resendPayoutOtp(req, res) {
+    const { claimId } = req.params;
+    const idempotencyKey = req.get("Idempotency-Key");
+    if (!CLAIM_ID_PATTERN.test(claimId)) {
+        return res.status(400).json({ status: "error", message: "claimId is invalid" });
+    }
+    if (typeof idempotencyKey !== "string" || !IDEMPOTENCY_KEY_PATTERN.test(idempotencyKey)) {
+        return res.status(400).json({
+            status: "error",
+            message: "A UUID Idempotency-Key header is required.",
+        });
+    }
+    try {
+        const result = await payoutOtpService.issueOtp({
+            claimId,
+            payoutOfficerUserId: req.user.userId,
+            idempotencyKey,
+            resend: true,
+        });
+        return res.status(200).json({
+            status: "success",
+            message: result.replayed
+                ? "This resend request was already processed."
+                : "A new OTP was accepted by the configured SMS provider. The withdrawal is still unpaid.",
+            data: result,
+        });
+    } catch (error) {
+        return sendPayoutOtpError(res, error, "resend");
+    }
+}
+
+async function verifyPayoutOtp(req, res) {
+    const { claimId } = req.params;
+    if (!CLAIM_ID_PATTERN.test(claimId)) {
+        return res.status(400).json({ status: "error", message: "claimId is invalid" });
+    }
+    try {
+        const result = await payoutOtpService.verifyOtp({
+            claimId,
+            workerUserId: req.user.userId,
+            code: req.body?.code,
+        });
+        if (result?.status === "VERIFIED" &&
+            typeof result.authorizationAttemptId === "string") {
+            void enqueueBusinessNotification({
+                userId: req.user.userId,
+                eventType: "WITHDRAWAL_OTP_AUTHORIZED",
+                referenceId: result.authorizationAttemptId,
+            });
+        }
+        return res.status(200).json({
+            status: "success",
+            message: "OTP verified. This authorizes the withdrawal only; payout processing remains disabled.",
+            data: result,
+        });
+    } catch (error) {
+        return sendPayoutOtpError(res, error, "verify");
+    }
+}
+
 module.exports = {
     checkEligibility,
     submitClaim,
@@ -347,4 +496,8 @@ module.exports = {
     getPendingClaims,
     approveClaim,
     rejectClaim,
+    getPayoutAuthorizationQueue,
+    createPayoutOtp,
+    resendPayoutOtp,
+    verifyPayoutOtp,
 };

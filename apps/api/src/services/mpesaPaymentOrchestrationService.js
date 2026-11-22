@@ -1,8 +1,11 @@
 const { createPensionLedgerReadinessGuard } = require("./mpesaLedgerReadiness");
+const { enqueueBusinessNotification } = require("./notificationEventService");
 
 function createMpesaPaymentOrchestrationService({
     paymentAttemptRepository,
     providerService,
+    notificationEnqueuer = enqueueBusinessNotification,
+    logger = console,
     amountValidator = require("./mpesaService").validateAmount,
     phoneNormalizer = require("./mpesaService").normalizePhoneNumber,
     environmentProvider = () => process.env,
@@ -67,6 +70,20 @@ function createMpesaPaymentOrchestrationService({
 
     async function dispatchPaymentAttempt(pending, validatedAmount, normalizedPhone) {
         if (!pending.created) return toPendingResult(pending.attempt, { created: false });
+
+        try {
+            await notificationEnqueuer({
+                userId: pending.workerId,
+                eventType: "CONTRIBUTION_SUBMITTED",
+                referenceId: pending.attempt.contribution_id,
+            });
+        } catch (error) {
+            const code = typeof error?.code === "string" &&
+                /^NOTIFICATION_[A-Z0-9_]{1,60}$/.test(error.code)
+                ? error.code
+                : "NOTIFICATION_ENQUEUE_FAILED";
+            logger.error("Contribution submission notification could not be enqueued.", { code });
+        }
 
         const dispatch = await paymentAttemptRepository.markProviderRequestStarted(
             pending.attempt.attempt_id

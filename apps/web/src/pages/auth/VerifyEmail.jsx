@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import AuthLayout from "./AuthLayout";
 import { verifyEmail } from "../../services/authEmailApi";
+import { isWithinPasswordByteLimit, MAX_PASSWORD_BYTES } from "../../utils/passwordValidation";
 import { useTranslation } from "react-i18next";
 import "./auth.css";
 
@@ -54,6 +55,10 @@ function VerifyEmail() {
         setFormError("");
         if (password.length < MIN_PASSWORD_LENGTH) {
             setFormError("auth.verify.passwordTooShort");
+            return;
+        }
+        if (!isWithinPasswordByteLimit(password)) {
+            setFormError("auth.verify.passwordTooLong");
             return;
         }
         if (password !== confirmPassword) {
@@ -135,6 +140,7 @@ function VerifyEmail() {
                                 disabled={state.submitting}
                                 required
                                 minLength={MIN_PASSWORD_LENGTH}
+                                maxLength={MAX_PASSWORD_BYTES}
                             />
                         </div>
                         <div className="auth-field">
@@ -148,6 +154,7 @@ function VerifyEmail() {
                                 disabled={state.submitting}
                                 required
                                 minLength={MIN_PASSWORD_LENGTH}
+                                maxLength={MAX_PASSWORD_BYTES}
                             />
                         </div>
                         <button type="submit" className="auth-submit" disabled={state.submitting}>

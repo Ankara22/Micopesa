@@ -328,11 +328,11 @@ async function requestJson(url, body, {
                     failureCategory: "authentication_failure",
                     deliveryOutcomeUnknown: false,
                 }
-                : httpStatus === 429
+                : [408, 425, 429].includes(httpStatus)
                     ? {
-                        message: "The Mobile Sasa provider explicitly rate-limited the request.",
+                        message: "The Mobile Sasa provider temporarily rejected the request.",
                         code: `${errorPrefix}_RETRYABLE_REJECTION`,
-                        failureCategory: "rate_limiting",
+                        failureCategory: "temporary_provider_rejection",
                         deliveryOutcomeUnknown: false,
                     }
                     : Number.isInteger(httpStatus) && httpStatus >= 400 && httpStatus < 500
@@ -416,7 +416,9 @@ async function sendSmsRequest(
         );
     }
     if (!testOnly && isDevelopmentDeliveryRuntime(environment)) {
-        assertDevelopmentRecipientAllowed("SMS", to, environment);
+        assertDevelopmentRecipientAllowed("SMS", to, environment, {
+            verifiedRecipient: notificationDelivery,
+        });
     } else if (!testOnly && environment.NODE_ENV !== "production") {
         throw smsFailure(
             "SMS sending is disabled for this runtime.",
@@ -670,12 +672,15 @@ async function sendEmail(
     });
 
     if (!response.ok) {
+        const retryableRejection = [408, 425, 429].includes(response.status);
         throw providerError(
             response.status >= 400 && response.status < 500
                 ? "The Mobile Sasa provider did not accept the email."
                 : "The Mobile Sasa email outcome could not be established.",
-            response.status >= 400 && response.status < 500
-                ? "EMAIL_PROVIDER_REJECTED"
+            retryableRejection
+                ? "EMAIL_RETRYABLE_REJECTION"
+                : response.status >= 400 && response.status < 500
+                    ? "EMAIL_PROVIDER_REJECTED"
                 : "EMAIL_UNKNOWN_OUTCOME"
         );
     }

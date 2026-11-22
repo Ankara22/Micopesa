@@ -4,6 +4,7 @@ const {
     initializeTestModeJwtSecret,
 } = require("./utils/testModeConfiguration");
 const { testModeDispatchGuard } = require("./middleware/testModeDispatchGuard");
+const { createCorsOptions } = require("./config/corsConfiguration");
 const testMode = process.env.MICOPESA_TEST_MODE === "true";
 assertSafeTestModeConfiguration();
 require("./config/loadEnvironment");
@@ -58,6 +59,7 @@ const PORT = process.env.PORT || 5000;
 
 
 app.use(cors({
+    ...createCorsOptions(process.env),
     exposedHeaders: [
         "X-Report-Truncated",
         "X-Report-Row-Count",
@@ -157,7 +159,8 @@ if (require.main === module) {
                 provider: getNotificationSmsProvider(process.env),
                 notificationDelivery: true,
             }),
-            sendEmail: sendAdminEmail,
+            // The dispatcher revalidates the current verified account email before sending.
+            sendEmail: (message) => sendAdminEmail(message, { verifiedRecipient: true }),
             sendPush: (notification) => webPushService.sendToUser(notification),
         });
         smsDispatcher.start();

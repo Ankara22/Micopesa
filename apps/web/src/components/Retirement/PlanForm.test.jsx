@@ -33,6 +33,9 @@ describe("retirement plan form loading", () => {
         rerender(<PlanForm profileAge={36} onSaved={onSaved} />);
         expect(age).toHaveValue(36);
         expect(age).toHaveAttribute("readonly");
+        fireEvent.change(screen.getByLabelText("Target retirement age"), { target: { value: "65" } });
+        fireEvent.change(screen.getByLabelText("Retirement savings goal (KSh)"), { target: { value: "100000.00" } });
+        fireEvent.change(screen.getByLabelText("Planned monthly contribution (KSh)"), { target: { value: "1000.00" } });
 
         fireEvent.submit(container.querySelector("form"));
         await waitFor(() => {
@@ -47,6 +50,8 @@ describe("retirement plan form loading", () => {
         const { container } = render(<PlanForm onSaved={onSaved} />);
         const form = container.querySelector("form");
         const submitButton = screen.getByRole("button", { name: "Calculate Projection" });
+        fireEvent.change(screen.getByLabelText("Retirement savings goal (KSh)"), { target: { value: "100000" } });
+        fireEvent.change(screen.getByLabelText("Planned monthly contribution (KSh)"), { target: { value: "1000" } });
 
         fireEvent.submit(form);
         fireEvent.submit(form);
@@ -60,5 +65,18 @@ describe("retirement plan form loading", () => {
         expect(toastMock.success).toHaveBeenCalledWith(
             "Your retirement plan and projection have been updated."
         );
+    });
+
+    it("rejects exponent-form amounts before saving a plan", () => {
+        const onSaved = vi.fn();
+        const { container } = render(<PlanForm onSaved={onSaved} />);
+        fireEvent.change(screen.getByLabelText("Retirement savings goal (KSh)"), { target: { value: "1e3" } });
+        fireEvent.change(screen.getByLabelText("Planned monthly contribution (KSh)"), { target: { value: "0" } });
+        fireEvent.submit(container.querySelector("form"));
+
+        expect(toastMock.error).toHaveBeenCalledWith(
+            "Enter KES amounts using no more than two decimal places and within the supported limit.",
+        );
+        expect(onSaved).not.toHaveBeenCalled();
     });
 });

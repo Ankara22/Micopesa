@@ -293,10 +293,45 @@ function ComplianceReview() {
 
             <Modal
                 open={Boolean(selectedReportId)}
+                size="review"
                 title="Compliance report review"
                 onClose={() => {
                     if (!saving) closeReport();
                 }}
+                footer={
+                    reportDetails?.report.reviewable &&
+                    currentSubmission?.submission_id &&
+                    reportDetails.report.rba_status === "SUBMITTED" ? (
+                        <div className="compliance-actions">
+                            {!decision ? (
+                                <>
+                                    <Button onClick={() => setDecision("ACCEPTED")}>Accept</Button>
+                                    <Button variant="danger" onClick={() => setDecision("REJECTED")}>Reject</Button>
+                                    <Button variant="secondary" onClick={() => setDecision("REVISION_REQUESTED")}>Request revisions</Button>
+                                </>
+                            ) : (
+                                <>
+                                    <Button
+                                        type="button"
+                                        variant="secondary"
+                                        disabled={saving}
+                                        onClick={() => { setDecision(""); setReason(""); }}
+                                    >
+                                        Cancel
+                                    </Button>
+                                    <Button
+                                        type="submit"
+                                        form="compliance-decision-form"
+                                        variant={decision === "REJECTED" ? "danger" : "primary"}
+                                        loading={saving}
+                                    >
+                                        Record decision
+                                    </Button>
+                                </>
+                            )}
+                        </div>
+                    ) : null
+                }
             >
                 {detailsLoading && <LoadingState message={t("regulator.review.loadingDetails")} />}
                 {detailsError && (
@@ -385,14 +420,8 @@ function ComplianceReview() {
                         {reportDetails.report.reviewable && currentSubmission?.submission_id && reportDetails.report.rba_status === "SUBMITTED" && (
                             <section className="compliance-decision">
                                 <h3>Record review decision</h3>
-                                {!decision ? (
-                                    <div className="compliance-actions">
-                                        <Button onClick={() => setDecision("ACCEPTED")}>Accept</Button>
-                                        <Button variant="danger" onClick={() => setDecision("REJECTED")}>Reject</Button>
-                                        <Button variant="secondary" onClick={() => setDecision("REVISION_REQUESTED")}>Request revisions</Button>
-                                    </div>
-                                ) : (
-                                    <form className="form-grid" onSubmit={saveDecision}>
+                                {decision && (
+                                    <form id="compliance-decision-form" className="form-grid" onSubmit={saveDecision}>
                                         <p>Decision: <strong>{decision.replaceAll("_", " ")}</strong></p>
                                         {decision !== "ACCEPTED" && (
                                             <FormField
@@ -407,10 +436,6 @@ function ComplianceReview() {
                                                 disabled={saving}
                                             />
                                         )}
-                                        <div className="form-actions">
-                                            <Button type="button" variant="secondary" disabled={saving} onClick={() => { setDecision(""); setReason(""); }}>Cancel</Button>
-                                            <Button type="submit" variant={decision === "REJECTED" ? "danger" : "primary"} loading={saving}>Record decision</Button>
-                                        </div>
                                     </form>
                                 )}
                             </section>

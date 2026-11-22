@@ -6,7 +6,7 @@ const authEmailService = require("../services/authEmailService");
 const { getTransactionalSmsProvider } = smsService;
 const { writeAuditLog } = require("../utils/auditLog");
 
-const STAFF_ROLES = ["FUND_MANAGER", "REGULATOR", "ADMIN"];
+const STAFF_ROLES = ["FUND_MANAGER", "REGULATOR", "ADMIN", "PAYOUT_OFFICER"];
 const SALT_ROUNDS = 10;
 
 function normalizeKenyanPhone(value) {

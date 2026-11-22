@@ -4,6 +4,7 @@ import Card from "../ui/Card";
 import FormField from "../ui/FormField";
 import Button from "../ui/Button";
 import { useToast } from "../ui/ToastContext";
+import { isValidMoneyInput } from "../../utils/moneyValidation";
 import "./retirement.css";
 
 function PlanForm({ plan, projection, profileAge = null, onSaved }) {
@@ -25,14 +26,21 @@ function PlanForm({ plan, projection, profileAge = null, onSaved }) {
     async function handleSubmit(event) {
         event.preventDefault();
         if (submissionInProgressRef.current) return;
+        const targetAmount = String(form.target_amount ?? "").trim();
+        const monthlyContribution = String(form.monthly_contribution_target ?? "").trim();
+        if (!isValidMoneyInput(targetAmount) ||
+            !isValidMoneyInput(monthlyContribution, { allowZero: true })) {
+            toast.error(t("worker.retirement.invalidMoney"));
+            return;
+        }
         submissionInProgressRef.current = true;
         setSubmitting(true);
 
         try {
             const result = await onSaved({
                 target_retirement_age: Number(form.target_retirement_age),
-                target_amount: Number(form.target_amount),
-                monthly_contribution_target: Number(form.monthly_contribution_target),
+                target_amount: targetAmount,
+                monthly_contribution_target: monthlyContribution,
             });
             if (result) toast.success(t("worker.retirement.saveSuccess"));
             else toast.error(t("worker.retirement.saveRefreshError"));

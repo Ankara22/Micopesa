@@ -18,9 +18,17 @@ function isPensionLedgerEnforcementEnabled(environment = process.env) {
     }
 
     const value = environment[ENFORCEMENT_SETTING];
-    if (value === undefined) return false;
+    if (value === undefined) return true;
     if (value === "true") return true;
-    if (value === "false") return false;
+    if (value === "false") {
+        if (environment.NODE_ENV === "production") {
+            throw createReadinessError(
+                "PENSION_LEDGER_ENFORCEMENT_CONFIG_INVALID",
+                `${ENFORCEMENT_SETTING} cannot be disabled in production.`
+            );
+        }
+        return false;
+    }
 
     throw createReadinessError(
         "PENSION_LEDGER_ENFORCEMENT_CONFIG_INVALID",

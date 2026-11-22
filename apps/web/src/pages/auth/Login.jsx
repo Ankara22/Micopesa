@@ -3,13 +3,26 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../../context/AuthContext";
 import { DASHBOARD_BY_ROLE, ROLE_PATH_PREFIX } from "../../routes/roleRoutes";
 import { requestEmailVerificationForAddress } from "../../services/authEmailApi";
+import { normalizeKenyanPhone } from "../../utils/kenyanPhone";
 import AuthLayout from "./AuthLayout";
 import { useTranslation } from "react-i18next";
 import "./auth.css";
 
+function sanitizePhoneIdentifier(value) {
+    const digitsAndPluses = value.replace(/[^0-9+]/g, "");
+    return digitsAndPluses.startsWith("+")
+        ? `+${digitsAndPluses.slice(1).replace(/\+/g, "")}`
+        : digitsAndPluses.replace(/\+/g, "");
+}
+
 function Login() {
     const { t } = useTranslation();
-    const { login } = useAuth();
+    const {
+        login,
+        sessionRestoreError,
+        retrySessionRestore,
+        isLoading: isRestoringSession,
+    } = useAuth();
     const navigate = useNavigate();
     const location = useLocation();
 
@@ -40,6 +53,13 @@ function Login() {
         }
     }
 
+    async function handleRetrySessionRestore() {
+        const restoredUser = await retrySessionRestore();
+        if (restoredUser?.role) {
+            navigate(DASHBOARD_BY_ROLE[restoredUser.role] || "/", { replace: true });
+        }
+    }
+
     async function handleSubmit(event) {
         event.preventDefault();
         if (submissionInProgress.current) return;
@@ -48,6 +68,16 @@ function Login() {
         const normalizedIdentifier = identifier.trim();
         if (!normalizedIdentifier || !password) {
             setFormError(identifierType === "email" ? "auth.login.emailRequired" : "auth.login.phoneRequired");
+            return;
+        }
+        if (identifierType === "phone" && !normalizeKenyanPhone(normalizedIdentifier)) {
+            setFormError("auth.login.invalidPhone");
+            return;
+        }
+        if (identifierType === "email" &&
+            (normalizedIdentifier.length > 254 ||
+                !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedIdentifier))) {
+            setFormError("auth.login.invalidEmail");
             return;
         }
 
@@ -106,6 +136,21 @@ function Login() {
                         {t(formError)}
                     </div>
                 )}
+                {sessionRestoreError && (
+                    <div className="auth-error" role="alert">
+                        <p>{t(sessionRestoreError)}</p>
+                        <button
+                            type="button"
+                            className="auth-link-button"
+                            onClick={handleRetrySessionRestore}
+                            disabled={isRestoringSession}
+                        >
+                            {t(isRestoringSession
+                                ? "auth.login.restoringSession"
+                                : "auth.login.retrySessionRestore")}
+                        </button>
+                    </div>
+                )}
 
                 <form className="auth-form" onSubmit={handleSubmit} noValidate aria-busy={isSubmitting}>
                     <div className="auth-field">
@@ -114,10 +159,16 @@ function Login() {
                             id="login-identifier"
                             name="identifier"
                             type={identifierType === "email" ? "email" : "tel"}
+                            inputMode={identifierType === "email" ? "email" : "numeric"}
                             autoComplete={identifierType === "email" ? "email" : "tel"}
                             placeholder={t(identifierType === "email" ? "auth.login.emailPlaceholder" : "auth.login.phonePlaceholder")}
                             value={identifier}
-                            onChange={(e) => setIdentifier(e.target.value)}
+                            onChange={(event) => {
+                                const value = event.target.value;
+                                setIdentifier(
+                                    identifierType === "email" ? value : sanitizePhoneIdentifier(value)
+                                );
+                            }}
                             disabled={isSubmitting}
                             aria-describedby={formError ? "login-error" : undefined}
                             required

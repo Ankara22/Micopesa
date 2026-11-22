@@ -1,16 +1,18 @@
 const crypto = require("node:crypto");
-const { promisify } = require("node:util");
 const bcrypt = require("bcrypt");
 const pool = require("../db/database");
 const defaultSmsService = require("./smsService");
+const {
+    generateSixDigitCode,
+    hashOneTimeCode,
+    verifyOneTimeCode,
+} = require("../utils/oneTimeCode");
 const {
     normalizeKenyanPhone,
     normalizedPhoneSql,
     NORMALIZED_PHONE_SQL,
 } = require("../utils/kenyanPhone");
 
-const scrypt = promisify(crypto.scrypt);
-const PHONE_CODE_BYTES = 32;
 const PHONE_CODE_TTL_MS = 10 * 60 * 1000;
 const RESEND_INTERVAL_MS = 60 * 1000;
 const SEND_WINDOW_MS = 60 * 60 * 1000;
@@ -75,29 +77,6 @@ function classifySmsDispatchError(error) {
         return { code: "PHONE_CHANGE_SMS_OUTCOME_UNKNOWN", providerErrorCode };
     }
     return { code: "PHONE_CHANGE_SMS_DELIVERY_FAILED", providerErrorCode };
-}
-
-async function hashCode(code, salt = crypto.randomBytes(16)) {
-    return {
-        salt,
-        hash: await scrypt(code, salt, PHONE_CODE_BYTES, {
-            N: 16384,
-            r: 8,
-            p: 1,
-            maxmem: 32 * 1024 * 1024,
-        }),
-    };
-}
-
-async function codeMatches(code, salt, expectedHash) {
-    const actualHash = await scrypt(code, salt, PHONE_CODE_BYTES, {
-        N: 16384,
-        r: 8,
-        p: 1,
-        maxmem: 32 * 1024 * 1024,
-    });
-    return expectedHash.length === actualHash.length &&
-        crypto.timingSafeEqual(expectedHash, actualHash);
 }
 
 function timestamp(value) {
@@ -273,8 +252,8 @@ async function startPhoneChange({
             );
         }
 
-        otp = crypto.randomInt(0, 1000000).toString().padStart(6, "0");
-        const { salt, hash } = await hashCode(otp);
+        otp = generateSixDigitCode();
+        const { salt, hash } = await hashOneTimeCode(otp);
         await client.query(
             `INSERT INTO phone_change_verifications
                 (user_id, pending_phone, code_hash, code_salt, expires_at,
@@ -441,7 +420,7 @@ async function verifyPhoneChange({ userId, code }, {
             ) };
         }
 
-        if (!await codeMatches(code, challenge.code_salt, challenge.code_hash)) {
+        if (!await verifyOneTimeCode(code, challenge.code_salt, challenge.code_hash)) {
             const nextAttemptCount = attemptCount + 1;
             const lockedUntilValue = nextAttemptCount >= MAX_ATTEMPTS_PER_WINDOW
                 ? new Date(currentTime.getTime() + LOCKOUT_MS)

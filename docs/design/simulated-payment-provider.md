@@ -59,10 +59,10 @@ The simulator only reports itself available, initiates attempts, or confirms
 outcomes when the pension ledger is `ACTIVE`. This is required even when
 `MPESA_LEDGER_ENFORCEMENT_ENABLED` is unset or false: the database settlement
 trigger rejects financial movements unless the ledger is active.
-`MPESA_LEDGER_ENFORCEMENT_ENABLED=true` additionally enables the shared
-application-level readiness guard for payment attempts and settlement. Do not
-turn off enforcement or activate the ledger just to make a demo available;
-complete and review the ledger cutover prerequisites first.
+The application readiness guard also defaults to enabled. An exact `false` is
+accepted only outside production and can never bypass the settlement's active
+ledger check. Do not turn off enforcement or activate the ledger just to make
+a demo available; complete and review the ledger cutover prerequisites first.
 
 The public `/api/mpesa/stkpush` endpoint is governed separately by Daraja
 configuration and dispatch safeguards: it returns HTTP 503 when dispatch is

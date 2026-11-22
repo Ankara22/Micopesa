@@ -54,7 +54,7 @@ function FundAllocationHistory({ fund, onClose }) {
     ];
 
     return (
-        <Modal open title={t("dashboards.manager.fundsPage.historyTitle", { fund: fund.fund_name })} onClose={onClose}>
+        <Modal size="wide" open title={t("dashboards.manager.fundsPage.historyTitle", { fund: fund.fund_name })} onClose={onClose}>
             <DataTable
                 columns={columns}
                 rows={allocations}

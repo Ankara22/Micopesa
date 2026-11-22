@@ -20,7 +20,10 @@ async function getWithdrawalAvailability(client, accountId) {
 
 async function reviewWithdrawalClaim(client, { userId, claimId, decision }) {
     const claimReference = await client.query(
-        "SELECT account_id FROM withdrawal_claims WHERE claim_id = $1",
+        `SELECT wc.account_id, pa.user_id
+         FROM withdrawal_claims wc
+         JOIN pension_accounts pa ON pa.account_id = wc.account_id
+         WHERE wc.claim_id = $1`,
         [claimId]
     );
     if (claimReference.rows.length === 0) {
@@ -115,7 +118,7 @@ async function reviewWithdrawalClaim(client, { userId, claimId, decision }) {
         entityId: claimId,
     });
 
-    return result.rows[0];
+    return { ...result.rows[0], user_id: claimReference.rows[0].user_id };
 }
 
 module.exports = {

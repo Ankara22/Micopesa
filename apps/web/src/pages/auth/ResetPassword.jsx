@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import AuthLayout from "./AuthLayout";
 import { resetPassword } from "../../services/authEmailApi";
+import { isWithinPasswordByteLimit, MAX_PASSWORD_BYTES } from "../../utils/passwordValidation";
 import { useTranslation } from "react-i18next";
 import "./auth.css";
 
@@ -26,6 +27,10 @@ function ResetPassword() {
         }
         if (password.length < MIN_PASSWORD_LENGTH) {
             setError("auth.reset.passwordTooShort");
+            return;
+        }
+        if (!isWithinPasswordByteLimit(password)) {
+            setError("auth.reset.passwordTooLong");
             return;
         }
         if (password !== confirmation) {
@@ -59,12 +64,14 @@ function ResetPassword() {
                         <div className="auth-field">
                             <label htmlFor="new-password">{t("auth.reset.newPassword")}</label>
                             <input id="new-password" type="password" autoComplete="new-password" minLength={MIN_PASSWORD_LENGTH}
-                                value={password} onChange={(event) => setPassword(event.target.value)} disabled={submitting} required />
+                                maxLength={MAX_PASSWORD_BYTES} value={password}
+                                onChange={(event) => setPassword(event.target.value)} disabled={submitting} required />
                         </div>
                         <div className="auth-field">
                             <label htmlFor="confirm-new-password">{t("auth.reset.confirmPassword")}</label>
                             <input id="confirm-new-password" type="password" autoComplete="new-password"
-                                value={confirmation} onChange={(event) => setConfirmation(event.target.value)} disabled={submitting} required />
+                                maxLength={MAX_PASSWORD_BYTES} value={confirmation}
+                                onChange={(event) => setConfirmation(event.target.value)} disabled={submitting} required />
                         </div>
                         <button className="auth-submit" type="submit" disabled={submitting || !token}>
                             {submitting ? t("auth.reset.submitting") : t("auth.reset.submit")}

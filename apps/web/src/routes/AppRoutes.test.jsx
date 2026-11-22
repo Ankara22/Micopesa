@@ -73,7 +73,7 @@ describe("role feature routes", () => {
         renderRoute("/worker/funds", "WORKER");
 
         expect(await screen.findByRole("heading", { name: "My Funds & Allocation" })).toBeInTheDocument();
-        expect(screen.getByText("No active funds are available for a new allocation distribution.")).toBeInTheDocument();
+        expect(await screen.findByText("No active funds are available for a new allocation distribution.")).toBeInTheDocument();
     });
 
     it("renders manager analytics on its dedicated manager route", async () => {

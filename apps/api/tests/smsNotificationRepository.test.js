@@ -280,16 +280,24 @@ test("admin-requested pending messages still require enabled recipient preferenc
     assert.match(staleCheck, /np\.email_enabled IS TRUE/);
     assert.match(eligibilityQuery, /np\.sms_enabled IS TRUE/);
     assert.match(eligibilityQuery, /np\.email_enabled IS TRUE/);
+    assert.doesNotMatch(staleCheck, /sender\.role = 'ADMIN'/);
+    assert.doesNotMatch(eligibilityQuery, /sender\.role = 'ADMIN'/);
     assert.doesNotMatch(staleCheck, /admin_request_key IS NOT NULL OR/);
     assert.doesNotMatch(eligibilityQuery, /admin_request_key IS NOT NULL OR/);
 });
 
 test("essential events bypass only optional preference checks during claim and pre-dispatch validation", async () => {
     const essentialTypes = [
+        "CONTRIBUTION_SUBMITTED",
         "CONTRIBUTION_CONFIRMED",
         "KYC_VERIFIED",
         "KYC_REJECTED",
         "RETIREMENT_PLAN_SAVED",
+        "WITHDRAWAL_SUBMITTED",
+        "WITHDRAWAL_APPROVED",
+        "WITHDRAWAL_REJECTED",
+        "WITHDRAWAL_OTP_AUTHORIZED",
+        "PASSWORD_RESET_COMPLETED",
     ];
     const pool = createPool([pendingNotification({
         notification_event_type: "CONTRIBUTION_CONFIRMED",
@@ -327,6 +335,7 @@ test("essential events bypass only optional preference checks during claim and p
     assert.match(preDispatchPool.state.statements[0], /u\.email_verified IS TRUE/);
     assert.match(preDispatchPool.state.statements[0], /np\.email_enabled IS TRUE\s+OR COALESCE/);
     assert.match(preDispatchPool.state.statements[0], /n\.notification_event_type = ANY\(\$5::varchar\[\]\)/);
+    assert.doesNotMatch(preDispatchPool.state.statements[0], /sender\.role = 'ADMIN'/);
 });
 
 test("essential operational categories bypass optional preferences during claim and pre-dispatch validation", async () => {

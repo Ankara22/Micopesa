@@ -1,5 +1,6 @@
 const pool = require("../db/database");
 const { reviewWithdrawalClaim: reviewClaimTransaction } = require("../services/withdrawalService");
+const { enqueueBusinessNotification } = require("../services/notificationEventService");
 
 async function getPerformance(req, res) {
     const { userId } = req.user;
@@ -91,6 +92,13 @@ async function reviewWithdrawal(req, res) {
         await client.query("BEGIN");
         const claim = await reviewClaimTransaction(client, { userId, claimId: id, decision });
         await client.query("COMMIT");
+        void enqueueBusinessNotification({
+            userId: claim.user_id,
+            eventType: decision === "APPROVED"
+                ? "WITHDRAWAL_APPROVED"
+                : "WITHDRAWAL_REJECTED",
+            referenceId: claim.claim_id,
+        });
 
         return res.status(200).json({
             status: "success",

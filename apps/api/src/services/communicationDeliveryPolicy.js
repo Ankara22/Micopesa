@@ -74,23 +74,30 @@ function assertDevelopmentDeliveryEnabled(channel, environment = process.env) {
     }
 }
 
-function assertDevelopmentRecipientAllowed(channel, value, environment = process.env) {
+function assertDevelopmentRecipientAllowed(
+    channel,
+    value,
+    environment = process.env,
+    { verifiedRecipient = false } = {}
+) {
     if (environment.NODE_ENV === "production") return;
     assertDevelopmentDeliveryEnabled(channel, environment);
-    const allowlist = parseAllowlist(channel, environment);
-    if (!allowlist.length) {
-        throw createDeliveryError(
-            channel,
-            "DEVELOPMENT_ALLOWLIST_EMPTY",
-            `${channel} development delivery has no valid allowlisted recipients.`
-        );
-    }
     const recipient = normalizeRecipient(channel, value);
     if (!recipient) {
         throw createDeliveryError(
             channel,
             "INVALID_RECIPIENT",
             `A valid ${channel} recipient is required.`
+        );
+    }
+    if (verifiedRecipient === true) return;
+
+    const allowlist = parseAllowlist(channel, environment);
+    if (!allowlist.length) {
+        throw createDeliveryError(
+            channel,
+            "DEVELOPMENT_ALLOWLIST_EMPTY",
+            `${channel} development delivery has no valid allowlisted recipients.`
         );
     }
     if (!allowlist.includes(recipient)) {

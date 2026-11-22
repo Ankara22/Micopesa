@@ -78,15 +78,13 @@ function createSmsNotificationRepository(
                        (n.notification_type = 'SMS' AND NOT EXISTS (
                            SELECT 1
                            FROM users u
-                           LEFT JOIN users sender ON sender.user_id = n.created_by
                            LEFT JOIN notification_preferences np ON np.user_id = u.user_id
                            WHERE u.user_id = n.user_id
                              AND u.account_status = 'ACTIVE'
                              AND u.phone_verified_at IS NOT NULL
                              AND (${normalizedPhoneSql("u.phone")}) = n.recipient_phone
                              AND (
-                                 sender.role = 'ADMIN'
-                                 OR np.sms_enabled IS TRUE
+                                 np.sms_enabled IS TRUE
                                  OR COALESCE(
                                      n.notification_event_type = ANY($2::varchar[])
                                      OR n.notification_category = ANY($3::varchar[]), FALSE
@@ -97,7 +95,6 @@ function createSmsNotificationRepository(
                        (n.notification_type = 'EMAIL' AND NOT EXISTS (
                            SELECT 1
                            FROM users u
-                           LEFT JOIN users sender ON sender.user_id = n.created_by
                            LEFT JOIN notification_preferences np ON np.user_id = u.user_id
                            WHERE u.user_id = n.user_id
                              AND u.account_status = 'ACTIVE'
@@ -105,8 +102,7 @@ function createSmsNotificationRepository(
                              AND ${VALID_EMAIL_SQL}
                              AND lower(u.email) = lower(n.recipient_email)
                              AND (
-                                 sender.role = 'ADMIN'
-                                 OR np.email_enabled IS TRUE
+                                 np.email_enabled IS TRUE
                                  OR COALESCE(
                                      n.notification_event_type = ANY($2::varchar[])
                                      OR n.notification_category = ANY($3::varchar[]), FALSE
@@ -145,11 +141,6 @@ function createSmsNotificationRepository(
                            SELECT 1 FROM notification_preferences np
                            WHERE np.user_id = notifications.user_id
                              AND np.sms_enabled IS TRUE
-                       )
-                           OR EXISTS (
-                           SELECT 1 FROM users sender
-                           WHERE sender.user_id = notifications.created_by
-                             AND sender.role = 'ADMIN'
                        )))
                        OR (notification_type = 'EMAIL' AND (
                            COALESCE(
@@ -161,11 +152,6 @@ function createSmsNotificationRepository(
                            SELECT 1 FROM notification_preferences np
                            WHERE np.user_id = notifications.user_id
                              AND np.email_enabled IS TRUE
-                       )
-                           OR EXISTS (
-                           SELECT 1 FROM users sender
-                           WHERE sender.user_id = notifications.created_by
-                             AND sender.role = 'ADMIN'
                        )))
                        OR notification_type = 'PUSH'
                    )
@@ -253,8 +239,7 @@ function createSmsNotificationRepository(
             ? `u.phone_verified_at IS NOT NULL
                AND (${normalizedPhoneSql("u.phone")}) = n.recipient_phone
                AND (
-                   sender.role = 'ADMIN'
-                   OR np.sms_enabled IS TRUE
+                   np.sms_enabled IS TRUE
                    OR COALESCE(
                        n.notification_event_type = ANY($5::varchar[])
                        OR n.notification_category = ANY($6::varchar[]), FALSE
@@ -264,8 +249,7 @@ function createSmsNotificationRepository(
                AND ${VALID_EMAIL_SQL}
                AND lower(u.email) = lower(n.recipient_email)
                AND (
-                   sender.role = 'ADMIN'
-                   OR np.email_enabled IS TRUE
+                   np.email_enabled IS TRUE
                    OR COALESCE(
                        n.notification_event_type = ANY($5::varchar[])
                        OR n.notification_category = ANY($6::varchar[]), FALSE
@@ -276,7 +260,6 @@ function createSmsNotificationRepository(
                 `SELECT n.notification_id
                  FROM notifications n
                  JOIN users u ON u.user_id = n.user_id
-                 LEFT JOIN users sender ON sender.user_id = n.created_by
                  LEFT JOIN notification_preferences np ON np.user_id = n.user_id
                  WHERE n.notification_id = $1
                    AND n.claim_token = $2

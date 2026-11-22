@@ -64,6 +64,13 @@ Never put provider credentials in frontend variables, source control, or logs. E
 
 Existing users retain their existing phone/password login policy. An email is not trusted for login or password reset until it has completed the email-verification flow. Users can request a new link from their profile; administrator-created staff can retry onboarding through the protected administrator workflow. Incorrect passwords and unknown identifiers receive the same generic response; account-state details are disclosed only after the password is correct. Password-reset requests return the same public response whether or not an eligible account exists. Reset and verification tokens are single-use, expire after 30 minutes, and are stored as hashes.
 
+Login requests are rate-limited by source IP using the shared
+`auth_rate_limits` table; per-account failed-password lockout remains in place.
+The API fails closed if this limiter is unavailable. A successful logout
+increments `users.auth_version`, revoking all active tokens for that account
+(including tokens on other devices); the user must sign in again to create a
+new session.
+
 ## Manual recovery when verified email is unavailable
 
 Recovery is a controlled process outside the application. This repository does not implement a support ticket system, an Admin password-reset action, or a mechanism for operators to view or choose a user's password. Do not add an unrestricted reset control to the Admin dashboard.

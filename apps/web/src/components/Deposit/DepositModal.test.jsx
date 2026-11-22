@@ -215,6 +215,31 @@ describe("DepositModal", () => {
         expect(confirmSimulatedPayment).not.toHaveBeenCalled();
     });
 
+    it("rejects exponent-form amounts before starting a simulated payment", async () => {
+        getPaymentProvider.mockResolvedValue({
+            provider: "SIMULATOR",
+            environment: "simulator",
+            payment_enabled: true,
+            message_key: "MPESA_PAYMENTS_AVAILABLE",
+        });
+
+        render(
+            <ToastProvider>
+                <DepositModal open onClose={vi.fn()} />
+            </ToastProvider>,
+        );
+        fireEvent.change(await screen.findByLabelText("Amount (KES)"), {
+            target: { value: "1e3" },
+        });
+        fireEvent.click(screen.getByLabelText("I confirm this is my verified M-Pesa phone number."));
+        fireEvent.click(screen.getByRole("button", { name: "Run simulated payment" }));
+
+        expect(await screen.findByRole("alert")).toHaveTextContent(
+            "Enter a positive whole amount in Kenyan shillings.",
+        );
+        expect(initiateStkPush).not.toHaveBeenCalled();
+    });
+
     it("offers explicit simulated confirmation retry for a pending simulator outcome", async () => {
         const pendingPayment = {
             attempt_id: "attempt-sim-pending",

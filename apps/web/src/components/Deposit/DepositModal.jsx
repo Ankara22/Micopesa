@@ -326,8 +326,11 @@ function DepositModal({ open, onClose, onCompleted }) {
             restoringStatus
         ) return;
 
-        const parsedAmount = Number(amount);
-        if (!Number.isSafeInteger(parsedAmount) || parsedAmount <= 0) {
+        const amountText = amount.trim();
+        const parsedAmount = Number(amountText);
+        if (!/^\d+$/.test(amountText) ||
+            !Number.isSafeInteger(parsedAmount) ||
+            parsedAmount <= 0) {
             setStartErrorKey("worker.depositModal.invalidAmount");
             return;
         }

@@ -6,6 +6,7 @@ import KycReview from "./KycReview";
 
 const mocks = vi.hoisted(() => ({
     listPendingKycApplications: vi.fn(),
+    revealKycNationalId: vi.fn(),
     reviewKycApplication: vi.fn(),
     refetch: vi.fn(),
     submissions: [],
@@ -13,6 +14,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../../services/adminService", () => ({
     listPendingKycApplications: mocks.listPendingKycApplications,
+    revealKycNationalId: mocks.revealKycNationalId,
     reviewKycApplication: mocks.reviewKycApplication,
 }));
 vi.mock("../../hooks/useApi", () => ({
@@ -46,6 +48,10 @@ describe("Admin KYC review", () => {
         }];
         mocks.listPendingKycApplications.mockResolvedValue(mocks.submissions);
         mocks.reviewKycApplication.mockResolvedValue({ kyc_status: "VERIFIED" });
+        mocks.revealKycNationalId.mockResolvedValue({
+            kyc_id: "synthetic-kyc-1",
+            national_id: "12345678",
+        });
         mocks.refetch.mockResolvedValue([]);
     });
 
@@ -54,7 +60,7 @@ describe("Admin KYC review", () => {
 
         expect(screen.getByRole("heading", { name: "KYC review" })).toBeInTheDocument();
         expect(screen.getByText("Synthetic Worker")).toBeInTheDocument();
-        expect(screen.getByText("1990-04-15")).toBeInTheDocument();
+        expect(screen.getByText("15/04/1990")).toBeInTheDocument();
         expect(screen.getByText("****1234")).toBeInTheDocument();
         expect(screen.getByText("Possible duplicate")).toBeInTheDocument();
         expect(screen.getByText(/not government identity verification/)).toBeInTheDocument();
@@ -96,5 +102,24 @@ describe("Admin KYC review", () => {
             "This National ID already has a verified record. The application was not approved."
         );
         expect(mocks.refetch).not.toHaveBeenCalled();
+    });
+
+    it("reveals the full National ID only after recording an access reason", async () => {
+        renderPage();
+        fireEvent.click(screen.getByRole("button", { name: "Reveal National ID" }));
+        expect(screen.queryByText("12345678")).not.toBeInTheDocument();
+
+        fireEvent.change(screen.getByLabelText("Reason for access (10–500 characters)"), {
+            target: { value: "Verify a discrepancy in the pending application." },
+        });
+        fireEvent.click(screen.getAllByRole("button", { name: "Reveal National ID" })[1]);
+
+        expect(await screen.findByText("12345678")).toBeInTheDocument();
+        expect(mocks.revealKycNationalId).toHaveBeenCalledWith(
+            "synthetic-kyc-1",
+            "Verify a discrepancy in the pending application.",
+        );
+        fireEvent.click(screen.getAllByRole("button", { name: "Close" })[1]);
+        expect(screen.queryByText("12345678")).not.toBeInTheDocument();
     });
 });

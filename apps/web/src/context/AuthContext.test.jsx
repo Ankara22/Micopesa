@@ -32,6 +32,8 @@ function SessionProbe() {
         logout,
         beginProfileRequest,
         syncProfile,
+        sessionRestoreError,
+        retrySessionRestore,
     } = useAuth();
     const [profileResult, setProfileResult] = React.useState("");
     const [loginOutcome, setLoginOutcome] = React.useState("");
@@ -84,11 +86,13 @@ function SessionProbe() {
             <span data-testid="login-outcome">{loginOutcome}</span>
             <span data-testid="register-outcome">{registerOutcome}</span>
             <span data-testid="logout-outcome">{logoutOutcome}</span>
+            <span data-testid="session-restore-error">{sessionRestoreError || ""}</span>
             <button onClick={() => attemptLogin("account-a")}>Sign in as A</button>
             <button onClick={() => attemptLogin("account-b")}>Sign in as B</button>
             <button onClick={registerWorker}>Register new worker</button>
             <button onClick={loadProfile}>Load profile</button>
             <button onClick={signOut}>Sign out</button>
+            <button onClick={retrySessionRestore}>Retry session restore</button>
         </div>
     );
 }
@@ -160,8 +164,8 @@ describe("AuthContext session-bound profile synchronization", () => {
             if (url === "/api/auth/register") {
                 return Promise.resolve({
                     data: {
-                        status: "accepted",
-                        data: { user: { user_id: "new-user", role: "WORKER", email_verified: false } },
+                        status: "success",
+                        data: { challenge_id: "registration-challenge" },
                     },
                 });
             }
@@ -174,6 +178,44 @@ describe("AuthContext session-bound profile synchronization", () => {
                 isAccountB ? "token-b" : "token-a"
             ));
         });
+    });
+
+    it("keeps a saved token after transient restore failure and supports retry", async () => {
+        localStorage.setItem("micopesa_token", "saved-session-token");
+        apiMocks.get
+            .mockRejectedValueOnce({ status: 503 })
+            .mockResolvedValueOnce({
+                data: {
+                    data: {
+                        user: {
+                            user_id: "restored-user",
+                            role: "WORKER",
+                        },
+                    },
+                },
+            });
+
+        renderProbe();
+        await waitFor(() => {
+            expect(screen.getByTestId("session-restore-error")).toHaveTextContent(
+                "auth.login.sessionRestoreError"
+            );
+        });
+        expect(localStorage.getItem("micopesa_token")).toBe("saved-session-token");
+
+        fireEvent.click(screen.getByRole("button", { name: "Retry session restore" }));
+        await waitFor(() => expect(screen.getByTestId("user-id")).toHaveTextContent("restored-user"));
+        expect(localStorage.getItem("micopesa_token")).toBe("saved-session-token");
+    });
+
+    it("clears the saved token after confirmed authentication failure", async () => {
+        localStorage.setItem("micopesa_token", "expired-session-token");
+        apiMocks.get.mockRejectedValueOnce({ status: 401 });
+
+        renderProbe();
+
+        await waitFor(() => expect(localStorage.getItem("micopesa_token")).toBeNull());
+        expect(screen.getByTestId("user-id")).toHaveTextContent("signed-out");
     });
 
     it("does not create an authenticated session after email-policy registration", async () => {
@@ -196,8 +238,9 @@ describe("AuthContext session-bound profile synchronization", () => {
     it("does not expose registration email delivery outcomes", async () => {
         apiMocks.post.mockResolvedValueOnce({
             data: {
-                status: "accepted",
-                message: "If we can complete your registration, we will send verification instructions to the provided email address.",
+                status: "success",
+                message: "If the supplied details can be used, a verification code will be sent to the phone number.",
+                data: { challenge_id: "registration-challenge" },
             },
         });
         renderProbe();

@@ -7,12 +7,14 @@ const pool = require("../src/db/database");
 const adminUserRoutes = require("../src/routes/adminUserRoutes");
 const authRoutes = require("../src/routes/authRoutes");
 const { generateToken } = require("../src/utils/token");
+const authEmailService = require("../src/services/authEmailService");
 
 process.env.JWT_SECRET ||= "micopesa-admin-role-login-test-secret";
 
 const originalQuery = pool.query;
 const originalConnect = pool.connect;
 const originalCompare = bcrypt.compare;
+const originalEnforceRequestLimits = authEmailService.enforceRequestLimits;
 const originalJwtSecret = process.env.JWT_SECRET;
 const supportedRoles = ["WORKER", "FUND_MANAGER", "REGULATOR", "ADMIN"];
 const ROLE_TEST_PATH = {
@@ -26,6 +28,7 @@ after(() => {
     pool.query = originalQuery;
     pool.connect = originalConnect;
     bcrypt.compare = originalCompare;
+    authEmailService.enforceRequestLimits = originalEnforceRequestLimits;
     process.env.JWT_SECRET = originalJwtSecret;
 });
 
@@ -65,7 +68,7 @@ function createRoleApi(initialRole) {
             ] };
         }
         if (query.includes("UPDATE users SET failed_login_attempts")) return { rows: [] };
-        if (query.includes("SELECT user_id, role, account_status, auth_version")) {
+        if (/SELECT user_id, role, account_status(?:, approval_status)?, auth_version/.test(query)) {
             const user = users.get(values[0]);
             return { rows: user ? [user] : [] };
         }
@@ -92,6 +95,20 @@ function createRoleApi(initialRole) {
         async query(query, values = []) {
             if (query === "BEGIN" || query === "COMMIT" || query === "ROLLBACK") {
                 return { rows: [] };
+            }
+            if (query.includes("FROM users WHERE user_id = $1 FOR UPDATE")) {
+                const user = users.get(values[0]);
+                return {
+                    rows: user ? [{
+                        ...user,
+                        occupation: null,
+                        email_verified: false,
+                        phone_verified_at: "2026-01-01T00:00:00.000Z",
+                        is_temp_password: false,
+                        force_password_change: false,
+                        is_deleted: false,
+                    }] : [],
+                };
             }
             if (query.includes("UPDATE users SET role = $1")) {
                 const user = users.get(values[1]);
@@ -149,6 +166,7 @@ function createRoleApi(initialRole) {
 }
 
 test("Admin role changes persist to the authoritative user and govern login and old-role API access", async (t) => {
+    authEmailService.enforceRequestLimits = async () => {};
     for (const previousRole of supportedRoles) {
         for (const role of supportedRoles.filter((candidate) => candidate !== previousRole)) {
             await t.test(`${previousRole} changes to ${role}`, async () => {

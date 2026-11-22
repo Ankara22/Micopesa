@@ -68,10 +68,12 @@ function createPool({
         email_verified: true,
         sms_enabled: true,
         email_enabled: true,
+        role: "WORKER",
     },
     recipientByUser = null,
     preferences = { sms_enabled: false, email_enabled: false },
     failChannel = null,
+    eventDetails = {},
 } = {}) {
     const calls = [];
     const records = [];
@@ -99,6 +101,9 @@ function createPool({
         async query(sql, values = []) {
             calls.push({ sql, values });
             if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql)) return { rows: [] };
+            if (/^(SAVEPOINT|RELEASE SAVEPOINT|ROLLBACK TO SAVEPOINT) /.test(sql)) {
+                return { rows: [] };
+            }
             if (sql.includes("INSERT INTO notifications")) {
                 if (values[1] === failChannel) throw Object.assign(new Error("mock insert failure"), { code: "XX000" });
                 return queueRecord(values);
@@ -145,6 +150,47 @@ function createPool({
             }
             if (sql.includes("FROM notification_preferences")) {
                 return { rows: preferenceState ? [{ ...preferenceState }] : [] };
+            }
+            if (sql.includes("FROM contributions c")) {
+                const detail = Object.prototype.hasOwnProperty.call(eventDetails, "CONTRIBUTION_CONFIRMED")
+                    ? eventDetails.CONTRIBUTION_CONFIRMED
+                    : {
+                        amount: "1250.50",
+                        reference: "MPESA123",
+                        completed_at: "2026-03-01T12:34:56.000Z",
+                        balance: "8000.00",
+                    };
+                return { rows: detail ? [detail] : [] };
+            }
+            if (sql.includes("FROM kyc_records")) {
+                const detail = Object.prototype.hasOwnProperty.call(eventDetails, "KYC")
+                    ? eventDetails.KYC
+                    : {};
+                return { rows: detail ? [detail] : [] };
+            }
+            if (sql.includes("FROM worker_approval_reviews")) {
+                const detail = Object.prototype.hasOwnProperty.call(eventDetails, "WORKER_APPROVAL")
+                    ? eventDetails.WORKER_APPROVAL
+                    : {};
+                return { rows: detail ? [detail] : [] };
+            }
+            if (sql.includes("FROM worker_password_reset_challenges")) {
+                const detail = Object.prototype.hasOwnProperty.call(eventDetails, "PASSWORD_RESET")
+                    ? eventDetails.PASSWORD_RESET
+                    : {};
+                return { rows: detail ? [detail] : [] };
+            }
+            if (sql.includes("FROM withdrawal_payout_otp_authorizations")) {
+                const detail = Object.prototype.hasOwnProperty.call(eventDetails, "WITHDRAWAL_OTP_AUTHORIZED")
+                    ? eventDetails.WITHDRAWAL_OTP_AUTHORIZED
+                    : { claim_id: "claim-123", amount: "500.00" };
+                return { rows: detail ? [detail] : [] };
+            }
+            if (sql.includes("FROM withdrawal_claims wc")) {
+                const detail = Object.prototype.hasOwnProperty.call(eventDetails, values[2])
+                    ? eventDetails[values[2]]
+                    : { claim_id: "claim-123", amount: "500.00" };
+                return { rows: detail ? [detail] : [] };
             }
             if (sql.includes("FROM users u")) {
                 const selectedRecipient = recipientByUser
@@ -203,10 +249,124 @@ test("event notifications keep in-app delivery and enqueue opted-in verified cha
     assert.equal(mock.records.find((row) => row.channel === "SMS").phone, "+254712345678");
     const email = mock.records.find((row) => row.channel === "EMAIL");
     assert.equal(email.email, "worker@example.test");
-    assert.equal(email.text.includes("KES"), false);
-    assert.equal(email.html.includes("contribution-123"), false);
+    assert.match(email.text, /Amount: KES 1,250\.50/);
+    assert.match(email.text, /Transaction reference: MPESA123/);
+    assert.match(email.text, /Confirmed at: 2026-03-01T12:34:56\.000Z/);
+    assert.match(email.text, /Current balance: KES 8,000\.00/);
+    assert.equal(email.html.includes("MPESA123"), true);
     assert.equal(email.eventType, "CONTRIBUTION_CONFIRMED");
     assert.equal(new Set(mock.records.map((row) => row.eventKey)).size, 1);
+});
+
+test("submitted contributions queue essential notices without implying payment confirmation", async () => {
+    const mock = createPool({
+        preferences: { sms_enabled: false, email_enabled: false },
+    });
+    const service = createNotificationEventService(mock.pool);
+
+    const result = await service.enqueueEvent({
+        userId: "worker-1",
+        eventType: "CONTRIBUTION_SUBMITTED",
+        referenceId: "contribution-pending-123",
+    });
+
+    assert.deepEqual(result.channels, ["IN_APP", "SMS", "EMAIL"]);
+    assert.equal(result.queued, 3);
+    assert.ok(mock.records.every((record) =>
+        record.text.includes("Payment is not confirmed")
+    ));
+    assert.ok(mock.records.every((record) => record.text.includes("KES 1,250.50")));
+});
+
+test("event notifications require committed contribution data and include its confirmed details", async () => {
+    const mock = createPool({
+        preferences: { sms_enabled: true, email_enabled: true },
+    });
+    const service = createNotificationEventService(mock.pool);
+    const result = await service.enqueueEvent({
+        userId: "worker-1",
+        eventType: "CONTRIBUTION_CONFIRMED",
+        referenceId: "contribution-confirmed",
+    });
+    const failed = await createNotificationEventService(createPool({
+        eventDetails: { CONTRIBUTION_CONFIRMED: null },
+    }).pool).enqueueEvent({
+        userId: "worker-1",
+        eventType: "CONTRIBUTION_CONFIRMED",
+        referenceId: "contribution-pending",
+    });
+
+    assert.equal(result.queued, 3);
+    assert.match(mock.records[0].text, /KES 1,250\.50/);
+    assert.match(mock.records[0].text, /MPESA123/);
+    assert.match(mock.records[0].text, /Confirmed at: 2026-03-01T12:34:56\.000Z/);
+    assert.match(mock.records[0].text, /KES 8,000\.00/);
+    assert.deepEqual(failed, { queued: 0 });
+});
+
+test("legacy pending workers can receive financial notifications without approval-column queries", async () => {
+    const mock = createPool({
+        recipient: {
+            phone: "0712345678",
+            phone_verified_at: "2026-01-01T00:00:00Z",
+            email: "worker@example.test",
+            email_verified: true,
+            sms_enabled: true,
+            email_enabled: true,
+            role: "WORKER",
+            approval_status: "PENDING",
+        },
+        eventDetails: {
+            CONTRIBUTION_CONFIRMED: {
+                amount: "250.00",
+                reference: "PAY-123",
+                completed_at: "2026-03-01T12:34:56.000Z",
+                balance: "1,250.00",
+            },
+        },
+    });
+    const service = createNotificationEventService(mock.pool);
+
+    const result = await service.enqueueEvent({
+        userId: "worker-1",
+        eventType: "CONTRIBUTION_CONFIRMED",
+        referenceId: "contribution-123",
+    });
+
+    assert.equal(result.queued, 3);
+    assert.equal(mock.calls.some(({ sql }) => sql.includes("approval_status")), false);
+});
+
+test("withdrawal events report decisions and OTP verification without claiming a payout", async () => {
+    const mock = createPool({
+        preferences: { sms_enabled: true, email_enabled: true },
+        eventDetails: {
+            APPROVED: { claim_id: "claim-123", amount: "500.00" },
+            WITHDRAWAL_OTP_AUTHORIZED: { claim_id: "claim-123", amount: "500.00" },
+        },
+    });
+    const service = createNotificationEventService(mock.pool);
+    await service.enqueueEvent({
+        userId: "worker-1",
+        eventType: "WITHDRAWAL_APPROVED",
+        referenceId: "claim-123",
+    });
+    await service.enqueueEvent({
+        userId: "worker-1",
+        eventType: "WITHDRAWAL_OTP_AUTHORIZED",
+        referenceId: "authorization-123",
+    });
+    const approved = mock.records.find((row) =>
+        row.eventType === "WITHDRAWAL_APPROVED" && row.channel === "IN_APP"
+    );
+    const authorized = mock.records.find((row) =>
+        row.eventType === "WITHDRAWAL_OTP_AUTHORIZED" && row.channel === "IN_APP"
+    );
+
+    assert.match(approved.text, /Approval does not mean payment has been made/);
+    assert.match(authorized.text, /No payout has been made/);
+    assert.match(authorized.text, /no funds have been disbursed/i);
+    assert.match(authorized.text, /KES 500\.00/);
 });
 
 test("essential business events reach only verified channels when optional preferences are off", async () => {
@@ -312,6 +472,7 @@ test("event notifications use the selected active profile across roles without n
                 sms_enabled: true,
                 email_enabled: true,
                 role: profile.role,
+                approval_status: "APPROVED",
             },
         ])),
         preferences: { sms_enabled: true, email_enabled: true },
@@ -429,19 +590,26 @@ test("simulated contribution confirmation reaches mocked email transport without
     assert.deepEqual(persisted, [["email-notification-1", "mock-email-acceptance"]]);
 });
 
-test("event channel enqueue is atomic when one queue insert fails", async () => {
+test("a queue insertion failure in one channel does not block the other channels", async () => {
     const mock = createPool({
         preferences: { sms_enabled: true, email_enabled: true },
         failChannel: "EMAIL",
     });
     const service = createNotificationEventService(mock.pool);
 
-    await assert.rejects(() => service.enqueueEvent({
+    const result = await service.enqueueEvent({
         userId: "worker-1",
         eventType: "CONTRIBUTION_CONFIRMED",
         referenceId: "contribution-124",
-    }));
-    assert.equal(mock.calls.some((call) => call.sql === "ROLLBACK"), true);
+    });
+
+    assert.equal(result.queued, 2);
+    assert.deepEqual(result.channelErrors, [{
+        channel: "EMAIL",
+        errorCode: "NOTIFICATION_CHANNEL_QUEUE_FAILED",
+    }]);
+    assert.deepEqual(mock.records.map((record) => record.channel), ["IN_APP", "SMS"]);
+    assert.equal(mock.calls.some((call) => call.sql.startsWith("ROLLBACK TO SAVEPOINT")), true);
 });
 
 test("unverified contacts and disabled preferences cannot disable in-app events", async () => {
@@ -509,10 +677,16 @@ test("preference updates patch only the authenticated user's supplied channel fi
         "worker-1",
         ["SMS"],
         [
+            "CONTRIBUTION_SUBMITTED",
             "CONTRIBUTION_CONFIRMED",
             "KYC_VERIFIED",
             "KYC_REJECTED",
             "RETIREMENT_PLAN_SAVED",
+            "WITHDRAWAL_SUBMITTED",
+            "WITHDRAWAL_APPROVED",
+            "WITHDRAWAL_REJECTED",
+            "WITHDRAWAL_OTP_AUTHORIZED",
+            "PASSWORD_RESET_COMPLETED",
         ],
     ]);
     assert.match(
@@ -710,4 +884,34 @@ test("business event enqueue failures are logged safely and do not propagate", a
         code: "NOTIFICATION_ENQUEUE_FAILED",
     }]]);
     assert.equal(JSON.stringify(logs).includes("worker@example.test"), false);
+});
+
+test("partial business event queue failures are surfaced without suppressing successful channels", async () => {
+    const logs = [];
+    const enqueue = createBusinessNotificationEnqueuer({
+        async enqueueEvent() {
+            return {
+                queued: 2,
+                channels: ["IN_APP", "SMS", "EMAIL"],
+                channelErrors: [{
+                    channel: "EMAIL",
+                    errorCode: "NOTIFICATION_CHANNEL_QUEUE_FAILED",
+                }],
+            };
+        },
+    }, {
+        error: (...args) => logs.push(args),
+    });
+
+    const result = await enqueue({
+        userId: "worker-1",
+        eventType: "CONTRIBUTION_CONFIRMED",
+        referenceId: "contribution-123",
+    });
+
+    assert.equal(result.queued, 2);
+    assert.deepEqual(logs, [[
+        "Business notification channel could not be queued.",
+        { channel: "EMAIL", code: "NOTIFICATION_CHANNEL_QUEUE_FAILED" },
+    ]]);
 });

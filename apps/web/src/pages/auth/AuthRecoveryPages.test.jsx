@@ -10,8 +10,13 @@ const authEmailMocks = vi.hoisted(() => ({
     resetPassword: vi.fn(),
     verifyEmail: vi.fn(),
 }));
+const workerIdentityMocks = vi.hoisted(() => ({
+    completePhonePasswordReset: vi.fn(),
+    requestPhonePasswordReset: vi.fn(),
+}));
 
 vi.mock("../../services/authEmailApi", () => authEmailMocks);
+vi.mock("../../services/workerIdentityApi", () => workerIdentityMocks);
 
 function renderPage(path, element) {
     return render(
@@ -28,6 +33,12 @@ describe("email recovery pages", () => {
         cleanup();
         vi.clearAllMocks();
         vi.unstubAllEnvs();
+        workerIdentityMocks.requestPhonePasswordReset.mockResolvedValue({
+            data: { challenge_id: "phone-recovery-challenge" },
+        });
+        workerIdentityMocks.completePhonePasswordReset.mockResolvedValue({
+            message: "Password reset successfully.",
+        });
     });
 
     it("shows a generic reset-request success response and the legacy support path", async () => {
@@ -36,7 +47,7 @@ describe("email recovery pages", () => {
         });
         renderPage("/forgot-password", <ForgotPassword />);
 
-        expect(screen.getByText(/Recovery for users who cannot access a verified email is handled manually/)).toBeInTheDocument();
+        expect(screen.getByText(/Use the verified email or verified Kenyan phone number/)).toBeInTheDocument();
         expect(screen.getByText(/Manual recovery is unavailable here until this deployment publishes an official support channel/)).toBeInTheDocument();
         fireEvent.change(screen.getByLabelText("Email address"), { target: { value: "worker@example.com" } });
         fireEvent.click(screen.getByRole("button", { name: "Request reset link" }));
@@ -51,6 +62,43 @@ describe("email recovery pages", () => {
         expect(screen.getByRole("link", { name: "Contact MicoPesa support" }))
             .toHaveAttribute("href", "https://support.example.test/recovery");
         expect(screen.queryByText(/Manual recovery is unavailable/)).not.toBeInTheDocument();
+    });
+
+    it("supports verified-phone recovery without changing the existing email reset path", async () => {
+        renderPage("/forgot-password", <ForgotPassword />);
+        fireEvent.click(screen.getByRole("button", { name: "Recover by verified phone instead" }));
+        fireEvent.change(screen.getByLabelText("Verified Kenyan phone number"), {
+            target: { value: "0712345678" },
+        });
+        fireEvent.click(screen.getByRole("button", { name: "Send recovery code" }));
+
+        expect(await screen.findByLabelText("Six-digit recovery code")).toBeInTheDocument();
+        expect(screen.getByRole("status")).toHaveTextContent(
+            "If the verified phone belongs to an active account, a recovery code can be sent.",
+        );
+        expect(workerIdentityMocks.requestPhonePasswordReset).toHaveBeenCalledWith("+254712345678");
+
+        fireEvent.change(screen.getByLabelText("Six-digit recovery code"), {
+            target: { value: "12a3456" },
+        });
+        expect(screen.getByLabelText("Six-digit recovery code")).toHaveValue("123456");
+        fireEvent.change(screen.getByLabelText("New password"), {
+            target: { value: "new-secure-password" },
+        });
+        fireEvent.change(screen.getByLabelText("Confirm new password"), {
+            target: { value: "new-secure-password" },
+        });
+        fireEvent.click(screen.getByRole("button", { name: "Reset password" }));
+
+        expect(await screen.findByRole("status")).toHaveTextContent(
+            "Your password was reset successfully.",
+        );
+        expect(workerIdentityMocks.completePhonePasswordReset).toHaveBeenCalledWith({
+            challengeId: "phone-recovery-challenge",
+            phone: "+254712345678",
+            code: "123456",
+            password: "new-secure-password",
+        });
     });
 
     it("validates reset passwords before submitting and displays a successful reset", async () => {

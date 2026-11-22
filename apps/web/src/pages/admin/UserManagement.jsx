@@ -18,6 +18,7 @@ import { AdminCard, AdminPage } from "../../components/AdminPage";
 const STAFF_ROLES = [
     { value: "FUND_MANAGER", label: "Fund Manager" },
     { value: "REGULATOR", label: "Regulator" },
+    { value: "PAYOUT_OFFICER", label: "Payout Officer" },
     { value: "ADMIN", label: "Administrator" },
 ];
 
@@ -39,7 +40,6 @@ function UserManagement() {
     const [deleteConfirmation, setDeleteConfirmation] = useState("");
     const [deleteSubmitting, setDeleteSubmitting] = useState(false);
     const deletionInProgressRef = useRef(false);
-
     async function handleStaffSubmit(e) {
         e.preventDefault();
         if (staffSubmissionRef.current) return;
@@ -111,14 +111,13 @@ function UserManagement() {
         deletionInProgressRef.current = true;
         setDeleteSubmitting(true);
         try {
-            await deleteUser(deletingUser.user_id);
-            const deletedName = deletingUser.full_name;
+            const result = await deleteUser(deletingUser.user_id);
             setDeletingUser(null);
             setDeleteConfirmation("");
-            toast.success(`${deletedName} was permanently deleted.`);
+            toast.success(result.message || "The user account was deleted.");
             const refreshedUsers = await usersApi.refetch();
             if (!refreshedUsers) {
-                toast.error("The user was deleted, but the list could not be refreshed.");
+                toast.error("The deletion completed, but the user list could not be refreshed.");
             }
         } catch (error) {
             toast.error(error.message || "Failed to delete this user.");
@@ -145,41 +144,48 @@ function UserManagement() {
         {
             key: "account_status",
             header: "Status",
-            render: (row) => <span className="admin-status-pill" data-status={row.account_status}>{row.account_status}</span>,
+            render: (row) => {
+                const status = row.is_deleted ? "DELETED" : row.account_status;
+                return <span className="admin-status-pill" data-status={status}>{status}</span>;
+            },
         },
         {
             key: "actions",
             header: "Action",
             render: (row) => (
                 <div className="table-actions">
-                    <Button
-                        variant="secondary"
-                        size="sm"
-                        onClick={() => handleStatusToggle(row)}
-                        disabled={row.user_id === currentUser?.user_id || statusSubmittingId === row.user_id || Boolean(statusSubmittingId)}
-                        loading={statusSubmittingId === row.user_id}
-                    >
-                        {row.account_status === "ACTIVE" ? "Suspend" : "Activate"}
-                    </Button>
-                    {row.force_password_change && (
-                        <Button
-                            variant="secondary"
-                            size="sm"
-                            onClick={() => handleResendOnboarding(row)}
-                            disabled={Boolean(resendingId)}
-                            loading={resendingId === row.user_id}
-                        >
-                            Retry invite
-                        </Button>
-                    )}
-                    <Button
-                        variant="danger"
-                        size="sm"
-                        onClick={() => openDeleteModal(row)}
-                        disabled={row.user_id === currentUser?.user_id}
-                    >
-                        Delete
-                    </Button>
+                    {row.is_deleted
+                        ? <span>History retained</span>
+                        : <>
+                            <Button
+                                variant="secondary"
+                                size="sm"
+                                onClick={() => handleStatusToggle(row)}
+                                disabled={row.user_id === currentUser?.user_id || statusSubmittingId === row.user_id || Boolean(statusSubmittingId)}
+                                loading={statusSubmittingId === row.user_id}
+                            >
+                                {row.account_status === "ACTIVE" ? "Suspend" : "Activate"}
+                            </Button>
+                            {row.force_password_change && (
+                                <Button
+                                    variant="secondary"
+                                    size="sm"
+                                    onClick={() => handleResendOnboarding(row)}
+                                    disabled={Boolean(resendingId)}
+                                    loading={resendingId === row.user_id}
+                                >
+                                    Retry invite
+                                </Button>
+                            )}
+                            <Button
+                                variant="danger"
+                                size="sm"
+                                onClick={() => openDeleteModal(row)}
+                                disabled={row.user_id === currentUser?.user_id || deleteSubmitting}
+                            >
+                                Delete
+                            </Button>
+                        </>}
                 </div>
             ),
         },
@@ -188,7 +194,7 @@ function UserManagement() {
     return (
         <AdminPage
             title="User management"
-            subtitle="Create staff accounts, review account access, and manage onboarding."
+            subtitle="Create staff accounts, manage account access, and handle onboarding."
         >
             <div className="admin-stack">
                 <AdminCard
@@ -251,7 +257,7 @@ function UserManagement() {
                     </form>
                 </AdminCard>
 
-                <AdminCard title="All accounts" description="Suspend or reactivate access, retry pending staff invitations, or permanently remove an account.">
+                <AdminCard title="All accounts" description="Suspend or reactivate access, retry pending staff invitations, or delete an account. Protected history is retained when required.">
                     <DataTable
                         columns={columns}
                         rows={usersApi.data}
@@ -266,7 +272,7 @@ function UserManagement() {
 
             <Modal
                 open={Boolean(deletingUser)}
-                title="Permanently delete user"
+                title="Delete user account"
                 onClose={() => {
                     if (!deleteSubmitting) {
                         setDeletingUser(null);
@@ -278,15 +284,15 @@ function UserManagement() {
                     <form className="form-grid" onSubmit={handleDeleteSubmit}>
                         <div>
                             <p>
-                                You are about to permanently delete <strong>{deletingUser.full_name}</strong>
+                                You are about to delete <strong>{deletingUser.full_name}</strong>
                                 {" "}({deletingUser.user_id}).
                             </p>
                             <p role="alert">
-                                This cannot be undone. The user account and associated personal records will be removed.
+                                Accounts without protected history are permanently deleted. If protected history exists, it stays with the original user ID while access is revoked and contact details are released. A later signup creates a separate account with no inherited financial or KYC records.
                             </p>
                         </div>
                         <FormField
-                            id="delete-confirmation"
+                            id="deletion-confirmation"
                             label='Type DELETE to confirm'
                             value={deleteConfirmation}
                             onChange={(event) => setDeleteConfirmation(event.target.value)}
@@ -311,7 +317,7 @@ function UserManagement() {
                                 loading={deleteSubmitting}
                                 disabled={deleteSubmitting || deleteConfirmation !== "DELETE"}
                             >
-                                Delete permanently
+                                Delete account
                             </Button>
                         </div>
                     </form>

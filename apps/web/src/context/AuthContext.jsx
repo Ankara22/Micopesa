@@ -11,6 +11,7 @@ export function AuthProvider({ children }) {
     const [loginSessionId, setLoginSessionId] = useState(0);
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState(null);
+    const [sessionRestoreError, setSessionRestoreError] = useState(null);
 
     // Bumped on every explicit login/register/logout so that a slow,
     // still-in-flight request from an earlier session (e.g. the initial
@@ -21,6 +22,7 @@ export function AuthProvider({ children }) {
     const authUserRef = useRef(null);
     const profileRequestIdRef = useRef(0);
     const logoutInProgressRef = useRef(false);
+    const isMountedRef = useRef(false);
 
     const clearSession = useCallback(() => {
         const generation = ++sessionVersionRef.current;
@@ -31,6 +33,7 @@ export function AuthProvider({ children }) {
         setToken(null);
         setUser(null);
         setLoginSessionId(generation);
+        setSessionRestoreError(null);
     }, []);
 
     useEffect(() => {
@@ -41,56 +44,69 @@ export function AuthProvider({ children }) {
         return () => window.removeEventListener("micopesa:auth-invalid", handleInvalidSession);
     }, [clearSession]);
 
-    // On initial mount, if a token is already stored, verify it's still
-    // valid and restore the user session via GET /api/auth/me.
-    useEffect(() => {
-        let isMounted = true;
+    const restoreSession = useCallback(async () => {
+        const storedToken = localStorage.getItem(TOKEN_KEY);
         const versionAtStart = sessionVersionRef.current;
-
-        async function restoreSession() {
-            const storedToken = localStorage.getItem(TOKEN_KEY);
-
-            if (!storedToken) {
-                if (isMounted) setIsLoading(false);
-                return;
-            }
-
-            try {
-                const response = await api.get("/api/auth/me");
-                const isStale = sessionVersionRef.current !== versionAtStart;
-                if (isMounted && !isStale) {
-                    const currentUser = response.data.data.user;
-                    const generation = ++sessionVersionRef.current;
-                    profileRequestIdRef.current += 1;
-                    authSessionRef.current = {
-                        userId: currentUser.user_id,
-                        token: storedToken,
-                        generation,
-                    };
-                    authUserRef.current = currentUser;
-                    setUser(currentUser);
-                    setToken(storedToken);
-                    setLoginSessionId(generation);
-                }
-            } catch {
-                // Token is invalid/expired - clear it silently and fall
-                // back to the logged-out state (only if nothing newer has
-                // happened in the meantime).
-                if (isMounted && sessionVersionRef.current === versionAtStart) clearSession();
-            } finally {
-                if (isMounted) setIsLoading(false);
-            }
+        if (!storedToken) {
+            if (isMountedRef.current) setIsLoading(false);
+            return null;
         }
 
-        restoreSession();
+        setIsLoading(true);
+        setSessionRestoreError(null);
+        try {
+            const response = await api.get("/api/auth/me");
+            if (
+                !isMountedRef.current ||
+                sessionVersionRef.current !== versionAtStart ||
+                localStorage.getItem(TOKEN_KEY) !== storedToken
+            ) return;
 
-        return () => {
-            isMounted = false;
-        };
+            const currentUser = response.data.data.user;
+            const generation = ++sessionVersionRef.current;
+            profileRequestIdRef.current += 1;
+            authSessionRef.current = {
+                userId: currentUser.user_id,
+                token: storedToken,
+                generation,
+            };
+            authUserRef.current = currentUser;
+            setUser(currentUser);
+            setToken(storedToken);
+            setLoginSessionId(generation);
+            return currentUser;
+        } catch (restoreError) {
+            if (
+                !isMountedRef.current ||
+                sessionVersionRef.current !== versionAtStart
+            ) return;
+            const status = restoreError?.status ?? restoreError?.response?.status;
+            if (status === 401 || status === 403) {
+                clearSession();
+            } else {
+                setSessionRestoreError("auth.login.sessionRestoreError");
+            }
+            return null;
+        } finally {
+            if (isMountedRef.current) setIsLoading(false);
+        }
     }, [clearSession]);
+
+    useEffect(() => {
+        let cancelled = false;
+        isMountedRef.current = true;
+        queueMicrotask(() => {
+            if (!cancelled) restoreSession();
+        });
+        return () => {
+            cancelled = true;
+            isMountedRef.current = false;
+        };
+    }, [restoreSession]);
 
     const login = useCallback(async (identifier, password) => {
         setError(null);
+        setSessionRestoreError(null);
         clearSession();
         const loginGeneration = sessionVersionRef.current;
         try {
@@ -123,6 +139,7 @@ export function AuthProvider({ children }) {
                 success: false,
                 message: err.message,
                 status: Number.isInteger(err?.status) ? err.status : null,
+                code: err?.response?.data?.code || err?.data?.code || err?.code,
             };
         }
     }, [clearSession]);
@@ -238,6 +255,7 @@ export function AuthProvider({ children }) {
                 setToken(null);
                 setUser(null);
                 setLoginSessionId(generation);
+                setSessionRestoreError(null);
             }
             logoutInProgressRef.current = false;
         }
@@ -253,16 +271,21 @@ export function AuthProvider({ children }) {
                 national_id: nationalId,
                 date_of_birth: dateOfBirth,
             };
-            await api.post("/api/auth/register", payload);
+            const response = await api.post("/api/auth/register", payload);
+            const challengeId = response?.data?.data?.challenge_id;
+            if (typeof challengeId !== "string" || !challengeId) {
+                throw new Error("Unable to start registration. Please try again.");
+            }
             return {
                 success: true,
+                challengeId,
             };
         } catch (err) {
             setError(err.message);
             return {
                 success: false,
                 message: err.message,
-                code: err.response?.data?.code,
+                code: err?.response?.data?.code,
             };
         }
     }, []);
@@ -274,6 +297,8 @@ export function AuthProvider({ children }) {
         isAuthenticated: Boolean(token && user),
         isLoading,
         error,
+        sessionRestoreError,
+        retrySessionRestore: restoreSession,
         login,
         changeTemporaryPassword,
         register,

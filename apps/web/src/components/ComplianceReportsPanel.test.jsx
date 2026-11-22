@@ -87,6 +87,19 @@ describe("compliance reporting and review interface", () => {
     it("lets a fund manager create and save an owned draft", async () => {
         renderWithToasts(<ComplianceReportsPanel title="Operational Reports" subtitle="My fund reports" />);
         fireEvent.click(await screen.findByRole("button", { name: "+ Create report" }));
+        const dialog = screen.getByRole("dialog", { name: "Create compliance report draft" });
+        const modalBody = dialog.querySelector(".modal-body");
+        const modalFooter = dialog.querySelector(".modal-footer");
+        const footer = within(modalFooter);
+        expect(dialog).toHaveClass("compliance-report-editor-modal");
+        expect(modalBody).toContainElement(screen.getByLabelText("Executive summary"));
+        expect(modalBody).not.toContainElement(screen.getByRole("button", { name: "Save draft" }));
+        expect(footer.getByRole("button", { name: "Close" })).toBeInTheDocument();
+        expect(footer.getByRole("button", { name: "Save draft" })).toHaveAttribute(
+            "form",
+            "compliance-report-editor-form"
+        );
+        expect(footer.getByRole("button", { name: "Submit to regulator" })).toBeInTheDocument();
         fireEvent.change(screen.getByLabelText("Managed fund"), { target: { value: "fund-1" } });
         fireEvent.click(screen.getByRole("button", { name: "Save draft" }));
 

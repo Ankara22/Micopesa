@@ -47,7 +47,7 @@ function createState() {
 
 function createApi(state) {
     pool.query = async (query, values = []) => {
-        if (query.includes("SELECT user_id, role, account_status, auth_version")) {
+        if (/SELECT user_id, role, account_status(?:, approval_status)?, auth_version/.test(query)) {
             const user = state.users.get(values[0]);
             return { rows: user ? [user] : [] };
         }

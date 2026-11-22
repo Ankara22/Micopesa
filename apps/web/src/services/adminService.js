@@ -6,6 +6,14 @@ export async function listPendingKycApplications() {
     return res.data.data;
 }
 
+export async function revealKycNationalId(kycId, reason) {
+    const res = await api.post(
+        `/api/admin/kyc/${encodeURIComponent(kycId)}/national-id/reveal`,
+        { reason },
+    );
+    return res.data.data;
+}
+
 export async function reviewKycApplication(kycId, status) {
     const res = await api.patch(`/api/admin/kyc/${encodeURIComponent(kycId)}/review`, { status });
     return res.data.data.submission;
@@ -33,7 +41,7 @@ export async function updateUserStatus(userId, account_status) {
 }
 
 export async function deleteUser(userId) {
-    const res = await api.delete(`/api/admin/users/${userId}`);
+    const res = await api.delete(`/api/admin/users/${encodeURIComponent(userId)}`);
     return res.data;
 }
 
