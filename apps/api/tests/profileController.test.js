@@ -123,7 +123,7 @@ test("returns only the authenticated user's KYC fields with a masked National ID
     assert.match(queryText, /LEFT JOIN kyc_records kyc ON kyc\.user_id = users\.user_id/);
     assert.match(queryText, /kyc\.date_of_birth::text AS date_of_birth/i);
     assert.match(queryText, /phone_verified_at IS NOT NULL\) AS phone_verified/i);
-    assert.match(queryText, /right\(kyc\.national_id, 4\) AS national_id_last_four/i);
+    assert.match(queryText, /kyc\.national_id_last_four/i);
     assert.doesNotMatch(queryText, /(?:^|,)\s*kyc\.national_id\s*(?:,|FROM)/i);
     assert.equal(res.body.data.user.date_of_birth, "1990-04-15");
     assert.equal(res.body.data.user.phone_verified, true);
@@ -394,7 +394,7 @@ test("photo upload validates content, uses an opaque server reference, and serve
                 return { rows: [{ user_id: userId }] };
             }
             assert.match(query, /LEFT JOIN kyc_records kyc/);
-            assert.match(query, /right\(kyc\.national_id, 4\) AS national_id_last_four/i);
+            assert.match(query, /kyc\.national_id_last_four/i);
             assert.doesNotMatch(query, /(?:^|,)\s*kyc\.national_id\s*(?:,|FROM)/i);
             return { rows: [profileRecord({ profile_photo_available: true })] };
         },

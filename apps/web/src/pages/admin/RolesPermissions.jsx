@@ -13,6 +13,7 @@ const ROLE_OPTIONS = [
     { value: "FUND_MANAGER", label: "Fund Manager" },
     { value: "REGULATOR", label: "Regulator" },
     { value: "ADMIN", label: "Administrator" },
+    { value: "PAYOUT_OFFICER", label: "Payout Officer" },
 ];
 
 const PERMISSIONS = [
@@ -23,6 +24,14 @@ const PERMISSIONS = [
     { capability: "File compliance reports", WORKER: false, FUND_MANAGER: true, REGULATOR: true, ADMIN: false },
     { capability: "Read system audit logs", WORKER: false, FUND_MANAGER: false, REGULATOR: false, ADMIN: true },
     { capability: "Manage users and settings", WORKER: false, FUND_MANAGER: false, REGULATOR: false, ADMIN: true },
+    {
+        capability: "Initiate withdrawal payout authorization",
+        WORKER: false,
+        FUND_MANAGER: false,
+        REGULATOR: false,
+        ADMIN: false,
+        PAYOUT_OFFICER: true,
+    },
 ];
 
 function RolesPermissions() {

@@ -3,17 +3,27 @@ const assert = require("node:assert/strict");
 const pool = require("../src/db/database");
 const { requireRole, requireVerifiedKyc } = require("../src/middleware/authMiddleware");
 const {
+    encryptNationalId,
+} = require("../src/services/nationalIdCrypto");
+const {
     listDuplicateSubmissions,
     listPendingSubmissions,
+    revealNationalId,
     reviewSubmission,
 } = require("../src/controllers/kycReviewController");
 
 const originalQuery = pool.query;
 const originalConnect = pool.connect;
+const originalEncryptionKey = process.env.NATIONAL_ID_ENCRYPTION_KEY;
+const originalFingerprintKey = process.env.NATIONAL_ID_FINGERPRINT_KEY;
 
 after(() => {
     pool.query = originalQuery;
     pool.connect = originalConnect;
+    if (originalEncryptionKey === undefined) delete process.env.NATIONAL_ID_ENCRYPTION_KEY;
+    else process.env.NATIONAL_ID_ENCRYPTION_KEY = originalEncryptionKey;
+    if (originalFingerprintKey === undefined) delete process.env.NATIONAL_ID_FINGERPRINT_KEY;
+    else process.env.NATIONAL_ID_FINGERPRINT_KEY = originalFingerprintKey;
 });
 
 function response() {
@@ -130,7 +140,8 @@ test("admin pending KYC list includes review context, masks National IDs, and ma
     await listPendingSubmissions({}, res);
     assert.equal(res.statusCode, 200);
     assert.match(query, /WHERE k\.kyc_status = 'PENDING'/);
-    assert.match(query, /right\(k\.national_id, 4\)/);
+    assert.match(query, /k\.national_id_last_four/);
+    assert.doesNotMatch(query, /k\.national_id(?:\s|,)/i);
     assert.doesNotMatch(query, /(?:^|,)\s*k\.national_id\s*(?:,|FROM)/i);
     assert.equal(res.body.data[0].masked_national_id, "****1234");
     assert.equal(res.body.data[0].duplicate_submission, true);
@@ -156,7 +167,8 @@ test("admin duplicate review list returns only masked National IDs", async () =>
     await listDuplicateSubmissions({}, res);
     assert.equal(res.statusCode, 200);
     assert.match(query, /duplicate_submission IS TRUE/);
-    assert.match(query, /right\(k\.national_id, 4\)/);
+    assert.match(query, /k\.national_id_last_four/);
+    assert.doesNotMatch(query, /k\.national_id(?:\s|,)/i);
     assert.doesNotMatch(query, /(?:^|,)\s*k\.national_id\s*(?:,|FROM)/i);
     assert.equal(res.body.data[0].masked_national_id, "****1234");
     assert.equal(Object.hasOwn(res.body.data[0], "national_id"), false);
@@ -334,4 +346,58 @@ test("admin approval reports verified National ID conflicts without database det
     assert.doesNotMatch(JSON.stringify(res.body), /12345678|worker-1|uq_kyc_records/);
     assert.ok(statements.includes("ROLLBACK"));
     assert.equal(statements.includes("COMMIT"), false);
+});
+
+test("National ID disclosure requires a reason and writes a PII-free audit record before response", async () => {
+    process.env.NATIONAL_ID_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
+    process.env.NATIONAL_ID_FINGERPRINT_KEY = Buffer.alloc(32, 8).toString("base64");
+    const encrypted = encryptNationalId("00123456");
+    const statements = [];
+    pool.connect = async () => ({
+        async query(query, values = []) {
+            statements.push({ query, values });
+            if (query.startsWith("SELECT kyc_id, user_id, national_id_ciphertext")) {
+                return {
+                    rows: [{
+                        kyc_id: "kyc-sensitive",
+                        user_id: "worker-sensitive",
+                        national_id_ciphertext: encrypted.ciphertext,
+                        national_id_iv: encrypted.iv,
+                        national_id_tag: encrypted.tag,
+                        national_id_fingerprint: encrypted.fingerprint,
+                        national_id_last_four: encrypted.lastFour,
+                    }],
+                };
+            }
+            return { rows: [], rowCount: 1 };
+        },
+        release() {},
+    });
+
+    const denied = response();
+    await revealNationalId({
+        params: { kycId: "kyc-sensitive" },
+        body: { reason: "short" },
+        user: { userId: "admin-1" },
+    }, denied);
+    assert.equal(denied.statusCode, 400);
+    assert.equal(statements.length, 0);
+
+    const headers = {};
+    const revealed = response();
+    revealed.set = (name, value) => { headers[name] = value; };
+    await revealNationalId({
+        params: { kycId: "kyc-sensitive" },
+        body: { reason: "Verify identity during worker review." },
+        user: { userId: "admin-1" },
+    }, revealed);
+
+    assert.equal(revealed.statusCode, 200);
+    assert.equal(revealed.body.data.national_id, "00123456");
+    assert.equal(headers["Cache-Control"], "private, no-store");
+    const audit = statements.find(({ query }) => query.includes("INSERT INTO audit_logs"));
+    assert.ok(audit);
+    assert.equal(audit.values[2], "KYC_NATIONAL_ID");
+    assert.doesNotMatch(audit.values[4], /00123456/);
+    assert.ok(statements.some(({ query }) => query === "COMMIT"));
 });

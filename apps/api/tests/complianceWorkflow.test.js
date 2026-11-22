@@ -85,7 +85,7 @@ async function fakeQuery(query, values = []) {
     if (fixture.failOn && sql.includes(fixture.failOn)) {
         throw new Error(`Injected failure for ${fixture.failOn}`);
     }
-    if (sql.startsWith("SELECT user_id, role, account_status")) {
+    if (/^SELECT user_id, role, account_status(?:, approval_status)?/.test(sql)) {
         const [userId] = values;
         const role = fixture.identities.get(userId)?.role || (fixture.managers.has(userId) ? "FUND_MANAGER"
             : fixture.regulators.has(userId) ? "REGULATOR"

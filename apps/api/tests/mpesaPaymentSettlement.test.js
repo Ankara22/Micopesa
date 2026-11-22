@@ -433,17 +433,12 @@ function createSettlementPool({
                 simulator_confirmation_id: simulatorId,
                 provider_mode: providerMode,
             });
-            return { rows: [{ movement_id: "movement_001" }] };
-        }
-        if (statement.startsWith("UPDATE pension_accounts")) {
-            const [accountId, amount] = params;
-            if (accountId !== state.account.account_id) return { rows: [] };
             const [whole, fraction] = amount.split(".");
             const current = state.account.current_balance.split(".");
             const cents = BigInt(current[0]) * 100n + BigInt((current[1] || "").padEnd(2, "0")) +
                 BigInt(whole) * 100n + BigInt(fraction.padEnd(2, "0"));
             state.account.current_balance = `${cents / 100n}.${String(cents % 100n).padStart(2, "0")}`;
-            return { rows: [{ current_balance: state.account.current_balance }] };
+            return { rows: [{ movement_id: "movement_001" }] };
         }
         if (statement.startsWith("UPDATE mpesa_payment_verifications") &&
             statement.includes("SET verification_status = 'UNVERIFIED'")) {
@@ -556,7 +551,14 @@ test("atomically settles callback-verified payment with its durable M-Pesa recei
         { contribution_id: "contribution_001", fund_id: "fund_002", allocated_amount: "750.00" },
     ]);
     assert.ok(state.queries.some((sql) => sql.includes("FOR UPDATE OF t, c, u")));
-    assert.equal(state.queries.filter((sql) => sql.startsWith("UPDATE pension_accounts")).length, 1);
+    assert.equal(state.queries.some((sql) => sql.startsWith("UPDATE pension_accounts")), false);
+    assert.equal(
+        state.queries.filter((sql) => sql.startsWith("INSERT INTO pension_account_movements")).length,
+        1
+    );
+    assert.ok(state.queries.some((sql) =>
+        sql.startsWith("SELECT current_balance") && sql.includes("FROM pension_accounts")
+    ));
     assert.equal(
         state.queries.some((sql) => sql.startsWith("INSERT INTO notifications")),
         false
@@ -564,9 +566,9 @@ test("atomically settles callback-verified payment with its durable M-Pesa recei
     assert.ok(state.queries.includes("SELECT status FROM pension_ledger WHERE singleton_key IS TRUE"));
 });
 
-test("ledger enforcement rolls back a verified settlement before financial writes", async () => {
+test("settlement requires an active ledger even when the optional enforcement flag is false", async () => {
     const { repository, state } = setup({
-        ledgerEnforcementEnabled: true,
+        ledgerEnforcementEnabled: false,
         ledgerStatus: "PREPARING",
     });
 
@@ -637,7 +639,7 @@ test("simulated query success credits once with explicit simulated evidence and 
     assert.equal(state.movements[0].simulator_confirmation_id, "confirmation-001");
     assert.equal(state.movements[0].provider_mode, "SIMULATOR");
     assert.equal(state.attempt.attempt_status, "SETTLED");
-    assert.equal(state.queries.filter((sql) => sql.startsWith("UPDATE pension_accounts")).length, 1);
+    assert.equal(state.queries.some((sql) => sql.startsWith("UPDATE pension_accounts")), false);
     assert.equal(state.notifications.length, 0);
 });
 
@@ -669,7 +671,7 @@ test("simulated settlement is idempotent and cannot credit a second time", async
     assert.equal(duplicate.alreadySettled, true);
     assert.equal(state.account.current_balance, "3500.00");
     assert.equal(state.movements.length, 1);
-    assert.equal(state.queries.filter((sql) => sql.startsWith("UPDATE pension_accounts")).length, 1);
+    assert.equal(state.queries.some((sql) => sql.startsWith("UPDATE pension_accounts")), false);
 });
 
 test("simulated success is not represented as a real M-Pesa transaction", async () => {
@@ -706,7 +708,7 @@ test("simulated success is not represented as a real M-Pesa transaction", async 
     assert.equal(state.account.current_balance, "3500.00");
     assert.equal(state.notifications.length, 0);
     assert.equal(state.queries.some((sql) => sql.startsWith("INSERT INTO notifications")), false);
-    assert.equal(state.queries.filter((sql) => sql.startsWith("UPDATE pension_accounts")).length, 1);
+    assert.equal(state.queries.some((sql) => sql.startsWith("UPDATE pension_accounts")), false);
     assert.equal(state.movements[0].simulator_confirmation_id, "confirmation-001");
     assert.equal(state.movements[0].payment_callback_id, null);
 });

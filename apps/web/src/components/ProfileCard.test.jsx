@@ -149,6 +149,7 @@ describe("shared ProfileCard", () => {
         expect(screen.getByText("****1234")).toBeInTheDocument();
         expect(screen.getByText("KYC verification status")).toBeInTheDocument();
         expect(screen.getByText("Pending verification")).toBeInTheDocument();
+        expect(screen.queryByText(/administrator approval/i)).not.toBeInTheDocument();
         expect(screen.getByRole("note")).toHaveTextContent(
             "Your KYC review is pending. Balances, contributions, funds and withdrawals are unavailable until verification is complete.",
         );

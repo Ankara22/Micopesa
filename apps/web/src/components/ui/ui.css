@@ -198,33 +198,54 @@
     align-items: center;
     justify-content: center;
     padding: 20px;
+    overflow-y: auto;
     z-index: 100;
 }
 
 .modal {
+    display: flex;
+    flex-direction: column;
+    flex: 0 1 auto;
     width: 100%;
-    max-width: 420px;
+    max-width: 720px;
+    max-height: 90vh;
+    max-height: min(90vh, calc(100vh - 24px));
+    min-height: 0;
+    box-sizing: border-box;
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: 12px;
     box-shadow: var(--shadow);
-    padding: 20px;
     text-align: left;
+    overflow: hidden;
+}
+
+.modal--wide {
+    max-width: 840px;
+}
+
+.modal--review {
+    max-width: 980px;
 }
 
 .modal-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 12px;
+    flex: 0 0 auto;
+    gap: 16px;
+    padding: 20px 24px 12px;
 }
 
 .modal-header h2 {
     margin: 0;
     font-size: 18px;
+    min-width: 0;
+    overflow-wrap: anywhere;
 }
 
 .modal-close {
+    flex: 0 0 auto;
     background: none;
     border: none;
     cursor: pointer;
@@ -234,13 +255,58 @@
 }
 
 .modal-body {
-    margin-bottom: 16px;
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 0;
+    padding: 0 24px 20px;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    overflow-wrap: anywhere;
 }
 
 .modal-footer {
     display: flex;
+    flex: 0 0 auto;
     justify-content: flex-end;
+    flex-wrap: wrap;
     gap: 8px;
+    padding: 14px 24px;
+    border-top: 1px solid var(--border);
+    background: var(--bg);
+}
+
+.modal-footer > * {
+    min-width: 0;
+}
+
+@supports (height: 90dvh) {
+    .modal {
+        max-height: min(90dvh, calc(100dvh - 24px));
+    }
+}
+
+@media (max-width: 600px) {
+    .modal-overlay {
+        padding: 12px;
+    }
+
+    .modal-header {
+        padding: 16px 16px 10px;
+    }
+
+    .modal-body {
+        padding: 0 16px 16px;
+    }
+
+    .modal-footer {
+        padding: 12px 16px;
+    }
+
+    .modal-footer > .form-actions,
+    .modal-footer > .compliance-actions {
+        width: 100%;
+    }
 }
 
 /* --- Loading / error / empty states --- */
@@ -314,6 +380,17 @@
     display: flex;
     gap: 8px;
     justify-content: flex-end;
+}
+
+.payout-otp-verify-form {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 180px;
+}
+
+.payout-otp-verify-form .form-field {
+    margin: 0;
 }
 
 .form-error {

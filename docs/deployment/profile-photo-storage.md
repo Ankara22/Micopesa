@@ -16,7 +16,7 @@ Back up this directory together with the database. Database backups alone do
 not include the photo contents. Never expose the storage directory through
 static-file middleware.
 
-Email addresses are currently unverified: the project has no email verification
-or email-delivery workflow. They must not be treated as verified recovery
-addresses or used as proof of account ownership until that infrastructure is
-implemented.
+Email verification and recovery workflows are implemented. An address must
+complete the verification flow before it can be used for sign-in or recovery;
+provider configuration and delivery must be verified separately in the target
+deployment. See [Authentication email and account recovery](./auth-email-recovery.md).

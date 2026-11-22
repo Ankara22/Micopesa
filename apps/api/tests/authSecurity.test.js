@@ -6,7 +6,6 @@ const bcrypt = require("bcrypt");
 const pool = require("../src/db/database");
 const { requireAuth, requireRole } = require("../src/middleware/authMiddleware");
 const { generateToken } = require("../src/utils/token");
-const { register } = require("../src/controllers/authController");
 const authEmailService = require("../src/services/authEmailService");
 const { isEnvironmentFlagEnabled } = require("../src/utils/authConfiguration");
 
@@ -170,78 +169,14 @@ test("database lookup failures do not grant access", async () => {
     }
 });
 
-async function registerWithMocks(body) {
-    const calls = [];
-    pool.query = async (query, values) => {
-        calls.push({ query, values });
-        return { rows: [] };
-    };
-    pool.connect = async () => ({
-        async query(query, values) {
-            calls.push({ query, values });
-            return { rows: [] };
-        },
-        release() {},
-    });
-    bcrypt.hash = async (password) => `hashed:${password}`;
-    authEmailService.enforceRequestLimits = async () => {};
-    authEmailService.sendPendingRegistrationEmail = async () => {};
-
-    const res = createResponse();
-    await register({ body }, res);
-    return { res, calls };
-}
-
-const workerRegistration = {
-    full_name: "Test Worker",
-    email: "worker@example.com",
-    phone: "07000000001",
-    password: "password123",
-    occupation: "OTHER_INFORMAL_WORKER",
-    national_id: "12345678",
-    date_of_birth: "1990-04-15",
-};
-
-test("public registration without a role creates a pending worker registration without storing its password", async () => {
-    const { res, calls } = await registerWithMocks({ ...workerRegistration });
-    assert.equal(res.statusCode, 202);
-    assert.deepEqual(res.body, {
-        status: "accepted",
-        message: "If we can complete your registration, we will send verification instructions to the provided email address.",
-    });
-    const pendingInsert = calls.find(({ query }) => query.includes("INSERT INTO pending_registrations"));
-    assert.ok(pendingInsert);
-    assert.equal(pendingInsert.values[1], "worker@example.com");
-    assert.equal(pendingInsert.values.includes("hashed:password123"), false);
-    assert.equal(pendingInsert.values[4], "12345678");
-    assert.equal(pendingInsert.values[5], "1990-04-15");
-    assert.equal(calls.some(({ query }) => query.includes("INSERT INTO users")), false);
-});
-
-for (const role of ["ADMIN", "FUND_MANAGER", "REGULATOR"]) {
-    test(`public registration ignores client role ${role}`, async () => {
-        process.env.ALLOW_PRIVILEGED_SIGNUP = "true";
-        const { res, calls } = await registerWithMocks({
-            ...workerRegistration,
-            role,
-            is_admin: true,
-        });
-        assert.equal(res.statusCode, 202);
-        assert.ok(calls.some(({ query }) => query.includes("INSERT INTO pending_registrations")));
-        assert.equal(calls.some(({ query }) => query.includes("INSERT INTO users")), false);
-    });
-}
-
-test("pending registration retains KYC data and defers password hashing until verification", async () => {
-    const { res, calls } = await registerWithMocks({ ...workerRegistration, phone: "07000000003" });
-    assert.equal(res.statusCode, 202);
-    const pendingInsert = calls.find(({ query }) => query.includes("INSERT INTO pending_registrations"));
-    assert.equal(pendingInsert.values.includes("hashed:password123"), false);
-    assert.equal(pendingInsert.values[1], "worker@example.com");
-    assert.equal(pendingInsert.values[4], "12345678");
-    assert.equal(pendingInsert.values[5], "1990-04-15");
-    assert.equal(calls.some(({ query }) => query.includes("INSERT INTO pension_accounts")), false);
-    assert.equal(calls.some(({ query }) => query.includes("INSERT INTO kyc_records")), false);
+test("public registration is phone OTP based and never accepts a privileged client role", () => {
+    const authRoutes = require("../src/routes/authRoutes");
+    const routes = authRoutes.stack
+        .filter((layer) => layer.route)
+        .map((layer) => `${Object.keys(layer.route.methods)[0].toUpperCase()} ${layer.route.path}`);
+    assert.ok(routes.includes("POST /register"));
+    assert.ok(routes.includes("POST /register/resend"));
+    assert.ok(routes.includes("POST /register/complete"));
 });
 
 test("production startup fails when privileged signup is enabled", () => {

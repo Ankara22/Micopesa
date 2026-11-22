@@ -87,18 +87,30 @@ function validateAdminNotification(input) {
     }
 }
 
-function isRecipientAllowlisted(channel, value, environment) {
-    if (!isDevelopmentDeliveryRuntime(environment)) return true;
+function isRecipientAllowlisted(channel, value, environment, verifiedRecipient = false) {
     const recipient = normalizeRecipient(channel, value);
-    return recipient !== null && parseAllowlist(channel, environment).includes(recipient);
+    if (!recipient) return false;
+    if (verifiedRecipient) return true;
+    if (!isDevelopmentDeliveryRuntime(environment)) return true;
+    return parseAllowlist(channel, environment).includes(recipient);
 }
 
 function withRecipientAllowlistDiagnostics(recipient, environment) {
     const { delivery_phone, delivery_email, ...publicRecipient } = recipient;
     return {
         ...publicRecipient,
-        sms_recipient_allowed: isRecipientAllowlisted("SMS", delivery_phone, environment),
-        email_recipient_allowed: isRecipientAllowlisted("EMAIL", delivery_email, environment),
+        sms_recipient_allowed: isRecipientAllowlisted(
+            "SMS",
+            delivery_phone,
+            environment,
+            recipient.phone_verified === true && recipient.phone_available === true
+        ),
+        email_recipient_allowed: isRecipientAllowlisted(
+            "EMAIL",
+            delivery_email,
+            environment,
+            recipient.email_verified === true && recipient.email_available === true
+        ),
     };
 }
 

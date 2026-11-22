@@ -12,6 +12,10 @@ const authMocks = vi.hoisted(() => ({
     requestEmailVerificationForAddress: vi.fn(),
     verifyEmail: vi.fn(),
 }));
+const workerIdentityMocks = vi.hoisted(() => ({
+    completeWorkerRegistration: vi.fn(),
+    resendWorkerRegistrationCode: vi.fn(),
+}));
 
 vi.mock("../../context/AuthContext", () => ({
     useAuth: () => ({
@@ -23,6 +27,7 @@ vi.mock("../../services/authEmailApi", () => ({
     requestEmailVerificationForAddress: authMocks.requestEmailVerificationForAddress,
     verifyEmail: authMocks.verifyEmail,
 }));
+vi.mock("../../services/workerIdentityApi", () => workerIdentityMocks);
 
 function renderAuth(initialEntry = "/login") {
     return render(
@@ -40,7 +45,7 @@ function renderAuth(initialEntry = "/login") {
     );
 }
 
-function fillLoginForm(identifier = "07120000000", password = "correct-password") {
+function fillLoginForm(identifier = "0712000000", password = "correct-password") {
     fireEvent.change(screen.getByLabelText(/Email address|Verified phone number/), { target: { value: identifier } });
     fireEvent.change(screen.getByLabelText("Password"), { target: { value: password } });
 }
@@ -51,16 +56,34 @@ describe("authentication pages", () => {
         i18n.changeLanguage("en");
     });
 
+    it("validates phone and email formats before login submission", () => {
+        renderAuth();
+        fillLoginForm("07123");
+        fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+        expect(screen.getByRole("alert")).toHaveTextContent("Enter a valid Kenyan mobile number.");
+        expect(authMocks.login).not.toHaveBeenCalled();
+
+        fireEvent.click(screen.getByRole("button", { name: "Sign in with email instead" }));
+        fillLoginForm("not-an-email");
+        fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+        expect(screen.getByRole("alert")).toHaveTextContent("Enter a valid email address.");
+        expect(authMocks.login).not.toHaveBeenCalled();
+    });
+
     beforeEach(() => {
         vi.clearAllMocks();
         authMocks.login.mockResolvedValue({
             success: true,
-            user: { role: "WORKER" },
+            user: { user_id: "worker-1", role: "WORKER" },
         });
         authMocks.register.mockResolvedValue({
             success: true,
-            user: { role: "WORKER" },
+            challengeId: "registration-challenge",
         });
+        workerIdentityMocks.completeWorkerRegistration.mockResolvedValue({
+            data: { account_status: "ACTIVE", kyc_status: "PENDING" },
+        });
+        workerIdentityMocks.resendWorkerRegistrationCode.mockResolvedValue({ status: "success" });
         authMocks.requestEmailVerificationForAddress.mockResolvedValue({
             message: "If an unverified email-login account matches this address, verification instructions can be sent.",
         });
@@ -74,6 +97,8 @@ describe("authentication pages", () => {
         expect(container.querySelector(".auth-art img"))
             .toHaveAttribute("src", "/images/micopesa-login-reference-hd.png");
         expect(screen.getByLabelText("Verified phone number")).toHaveAttribute("autocomplete", "tel");
+        expect(screen.getByLabelText("Verified phone number")).toHaveAttribute("type", "tel");
+        expect(screen.getByLabelText("Verified phone number")).toHaveAttribute("inputmode", "numeric");
         expect(screen.getByLabelText("Password")).toHaveAttribute("autocomplete", "current-password");
         expect(screen.getByRole("link", { name: "Create an account" })).toHaveAttribute("href", "/register");
 
@@ -87,8 +112,51 @@ describe("authentication pages", () => {
         expect(screen.getByRole("combobox", { name: "Occupation" })).toBeInTheDocument();
         expect(container.querySelector(".auth-art img"))
             .toHaveAttribute("src", "/images/micopesa-signup-reference-hd.png");
-        expect(screen.getByLabelText("Email address (used to sign in)")).toBeRequired();
+        expect(screen.getByLabelText("Optional email address")).not.toBeRequired();
         expect(screen.getByLabelText("Date of birth")).toBeRequired();
+    });
+
+    it("sanitizes phone characters on input, paste, and autocomplete changes", () => {
+        renderAuth();
+        const phoneInput = screen.getByLabelText("Verified phone number");
+
+        fireEvent.change(phoneInput, { target: { value: "0712abc3456" } });
+        expect(phoneInput).toHaveValue("07123456");
+
+        fireEvent.change(phoneInput, { target: { value: "Letters+254 (700) 123-456" } });
+        expect(phoneInput).toHaveValue("+254700123456");
+
+        fireEvent.change(phoneInput, { target: { value: "++254700123456+abc" } });
+        expect(phoneInput).toHaveValue("+254700123456");
+    });
+
+    it("preserves local leading zeroes and submits a sanitized international phone", async () => {
+        renderAuth();
+        const phoneInput = screen.getByLabelText("Verified phone number");
+        fireEvent.change(phoneInput, { target: { value: "0712345678" } });
+        fireEvent.change(screen.getByLabelText("Password"), { target: { value: "my-password" } });
+        expect(phoneInput).toHaveValue("0712345678");
+
+        fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+        expect(await screen.findByRole("heading", { name: "Worker dashboard" })).toBeInTheDocument();
+        expect(authMocks.login).toHaveBeenCalledWith("0712345678", "my-password");
+    });
+
+    it("leaves legitimate email and password characters unchanged", async () => {
+        renderAuth();
+        fireEvent.click(screen.getByRole("button", { name: "Sign in with email instead" }));
+        const emailInput = screen.getByLabelText("Email address");
+        const passwordInput = screen.getByLabelText("Password");
+
+        fireEvent.change(emailInput, { target: { value: "Letters+tag@example.com" } });
+        fireEvent.change(passwordInput, { target: { value: "P@ssw0rd!+?" } });
+
+        expect(emailInput).toHaveValue("Letters+tag@example.com");
+        expect(passwordInput).toHaveValue("P@ssw0rd!+?");
+
+        fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+        expect(await screen.findByRole("heading", { name: "Worker dashboard" })).toBeInTheDocument();
+        expect(authMocks.login).toHaveBeenCalledWith("Letters+tag@example.com", "P@ssw0rd!+?");
     });
 
     it("validates required login fields and displays authentication errors", async () => {
@@ -118,7 +186,7 @@ describe("authentication pages", () => {
             message: "Login failed due to a server error",
         });
         renderAuth();
-        fillLoginForm("07000000001", "correct-password");
+        fillLoginForm("0712345678", "correct-password");
         fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
 
         expect(await screen.findByRole("alert")).toHaveTextContent(
@@ -197,21 +265,22 @@ describe("authentication pages", () => {
         await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
     });
 
-    it("submits public registration fields and requires email verification before sign-in", async () => {
+    it("starts phone-verified registration with an optional email", async () => {
         renderAuth("/register");
         fireEvent.change(screen.getByLabelText("Full name"), { target: { value: "  Amina Worker  " } });
-        fireEvent.change(screen.getByLabelText("Email address (used to sign in)"), { target: { value: "  AMINA@example.com " } });
+        fireEvent.change(screen.getByLabelText("Optional email address"), { target: { value: "  AMINA@example.com " } });
         fireEvent.change(screen.getByLabelText("Phone number"), { target: { value: "  0712345678  " } });
         fireEvent.change(screen.getByLabelText("National ID"), { target: { value: "12345678" } });
         fireEvent.change(screen.getByLabelText("Date of birth"), { target: { value: "1990-04-15" } });
         fireEvent.change(screen.getByRole("combobox", { name: "Occupation" }), {
             target: { value: "MARKET_VENDOR" },
         });
-        fireEvent.click(screen.getByRole("button", { name: "Create account" }));
+        fireEvent.click(screen.getByRole("button", { name: "Send verification code" }));
 
-        expect(await screen.findByRole("heading", { name: "Verify your email" })).toBeInTheDocument();
+        expect(await screen.findByRole("heading", { name: "Create account" })).toBeInTheDocument();
+        expect(screen.getByLabelText("Six-digit verification code")).toBeInTheDocument();
         expect(screen.getByRole("status")).toHaveTextContent(
-            "If we can complete your registration, verification instructions may be sent.",
+            "If the supplied details can be used, a verification code will be sent to the phone number.",
         );
         expect(authMocks.register).toHaveBeenCalledWith(
             "Amina Worker",
@@ -221,21 +290,62 @@ describe("authentication pages", () => {
             "12345678",
             "1990-04-15",
         );
-        expect(screen.queryByText("amina@example.com")).not.toBeInTheDocument();
-        expect(screen.getByRole("button", { name: "Resend verification email" })).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Send another code" })).toBeInTheDocument();
         expect(screen.queryByLabelText("Role")).not.toBeInTheDocument();
     });
 
-    it("validates the required email field and format before registration", () => {
+    it("does not require an email address for phone registration", async () => {
         renderAuth("/register");
-        fireEvent.click(screen.getByRole("button", { name: "Create account" }));
-        expect(screen.getByText("Email address is required.")).toBeInTheDocument();
+        fireEvent.change(screen.getByLabelText("Full name"), { target: { value: "Amina Worker" } });
+        fireEvent.change(screen.getByLabelText("Phone number"), { target: { value: "0712345678" } });
+        fireEvent.change(screen.getByLabelText("National ID"), { target: { value: "12345678" } });
+        fireEvent.change(screen.getByLabelText("Date of birth"), { target: { value: "1990-04-15" } });
+        fireEvent.change(screen.getByRole("combobox", { name: "Occupation" }), {
+            target: { value: "MARKET_VENDOR" },
+        });
+        fireEvent.click(screen.getByRole("button", { name: "Send verification code" }));
+
+        expect(await screen.findByLabelText("Six-digit verification code")).toBeInTheDocument();
+        expect(authMocks.register).toHaveBeenCalledWith(
+            "Amina Worker",
+            null,
+            "0712345678",
+            "MARKET_VENDOR",
+            "12345678",
+            "1990-04-15",
+        );
+    });
+
+    it("validates an optional email only when one is provided", () => {
+        renderAuth("/register");
+        fireEvent.change(screen.getByLabelText("Optional email address"), { target: { value: "invalid" } });
+        fireEvent.blur(screen.getByLabelText("Optional email address"));
+        expect(screen.getByText("Enter a valid email address.")).toBeInTheDocument();
+        fireEvent.click(screen.getByRole("button", { name: "Send verification code" }));
+        expect(authMocks.register).not.toHaveBeenCalled();
+    });
+
+    it("validates required fields before registration starts", () => {
+        renderAuth("/register");
+        fireEvent.click(screen.getByRole("button", { name: "Send verification code" }));
         expect(screen.getByText("Date of birth is required.")).toBeInTheDocument();
         expect(authMocks.register).not.toHaveBeenCalled();
+    });
 
-        fireEvent.change(screen.getByLabelText("Email address (used to sign in)"), { target: { value: "invalid" } });
-        fireEvent.blur(screen.getByLabelText("Email address (used to sign in)"));
-        expect(screen.getByText("Enter a valid email address.")).toBeInTheDocument();
+    it("rejects an invalid Kenyan phone number before registration", () => {
+        renderAuth("/register");
+        fireEvent.change(screen.getByLabelText("Full name"), { target: { value: "Amina Worker" } });
+        fireEvent.change(screen.getByLabelText("Optional email address"), { target: { value: "amina@example.com" } });
+        fireEvent.change(screen.getByLabelText("Phone number"), { target: { value: "07000000001" } });
+        fireEvent.change(screen.getByLabelText("National ID"), { target: { value: "12345678" } });
+        fireEvent.change(screen.getByLabelText("Date of birth"), { target: { value: "1990-04-15" } });
+        fireEvent.change(screen.getByRole("combobox", { name: "Occupation" }), {
+            target: { value: "MARKET_VENDOR" },
+        });
+
+        fireEvent.click(screen.getByRole("button", { name: "Send verification code" }));
+
+        expect(screen.getByText("Enter a valid Kenyan mobile number.")).toBeInTheDocument();
         expect(authMocks.register).not.toHaveBeenCalled();
     });
 
@@ -243,7 +353,7 @@ describe("authentication pages", () => {
         await i18n.changeLanguage("sw");
         renderAuth("/register");
         fireEvent.change(screen.getByLabelText("Jina kamili"), { target: { value: "Amina Worker" } });
-        fireEvent.change(screen.getByLabelText("Anwani ya barua pepe (utaitumia kuingia)"), {
+        fireEvent.change(screen.getByLabelText("Anwani ya barua pepe (si lazima)"), {
             target: { value: "amina@example.com" },
         });
         fireEvent.change(screen.getByLabelText("Nambari ya simu"), { target: { value: "0712345678" } });
@@ -254,7 +364,7 @@ describe("authentication pages", () => {
         fireEvent.change(screen.getByRole("combobox", { name: "Kazi" }), {
             target: { value: "MARKET_VENDOR" },
         });
-        fireEvent.click(screen.getByRole("button", { name: "Fungua akaunti" }));
+        fireEvent.click(screen.getByRole("button", { name: "Tuma msimbo wa uthibitishaji" }));
 
         expect(screen.getByText("Weka nambari ya kitambulisho cha taifa yenye tarakimu 7 au 8."))
             .toBeInTheDocument();
@@ -268,7 +378,7 @@ describe("authentication pages", () => {
     ])("validates registration %s before submitting", (label, value, message) => {
         renderAuth("/register");
         fireEvent.change(screen.getByLabelText("Full name"), { target: { value: "Amina Worker" } });
-        fireEvent.change(screen.getByLabelText("Email address (used to sign in)"), { target: { value: "amina@example.com" } });
+        fireEvent.change(screen.getByLabelText("Optional email address"), { target: { value: "amina@example.com" } });
         fireEvent.change(screen.getByLabelText("Phone number"), { target: { value: "0712345678" } });
         fireEvent.change(screen.getByLabelText("National ID"), { target: { value: "12345678" } });
         fireEvent.change(screen.getByLabelText("Date of birth"), { target: { value: "1990-04-15" } });
@@ -276,62 +386,83 @@ describe("authentication pages", () => {
         fireEvent.change(screen.getByRole("combobox", { name: "Occupation" }), {
             target: { value: "MARKET_VENDOR" },
         });
-        fireEvent.click(screen.getByRole("button", { name: "Create account" }));
+        fireEvent.click(screen.getByRole("button", { name: "Send verification code" }));
 
         expect(screen.getByText(message)).toBeInTheDocument();
         expect(authMocks.register).not.toHaveBeenCalled();
     });
 
-    it("shows the same registration acknowledgement without revealing email delivery state", async () => {
-        authMocks.register.mockResolvedValueOnce({
-            success: true,
-            user: { role: "WORKER" },
-        });
+    it("verifies the phone, creates the password, signs in immediately and keeps KYC pending", async () => {
         renderAuth("/register");
         fireEvent.change(screen.getByLabelText("Full name"), { target: { value: "Amina Worker" } });
-        fireEvent.change(screen.getByLabelText("Email address (used to sign in)"), { target: { value: "amina@example.com" } });
         fireEvent.change(screen.getByLabelText("Phone number"), { target: { value: "0712345678" } });
         fireEvent.change(screen.getByLabelText("National ID"), { target: { value: "12345678" } });
         fireEvent.change(screen.getByLabelText("Date of birth"), { target: { value: "1990-04-15" } });
         fireEvent.change(screen.getByRole("combobox", { name: "Occupation" }), {
             target: { value: "MARKET_VENDOR" },
         });
-        fireEvent.click(screen.getByRole("button", { name: "Create account" }));
+        fireEvent.click(screen.getByRole("button", { name: "Send verification code" }));
+        await screen.findByLabelText("Six-digit verification code");
+        fireEvent.change(screen.getByLabelText("Six-digit verification code"), { target: { value: "123abc4567" } });
+        expect(screen.getByLabelText("Six-digit verification code")).toHaveValue("123456");
+        fireEvent.change(screen.getByLabelText("Password"), { target: { value: "secure-password" } });
+        fireEvent.change(screen.getByLabelText("Confirm password"), { target: { value: "secure-password" } });
+        fireEvent.click(screen.getByRole("button", { name: "Verify code and create account" }));
 
-        expect(await screen.findByRole("status")).toHaveTextContent(
-            "If we can complete your registration, verification instructions may be sent.",
-        );
-        expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-        expect(screen.getByRole("button", { name: "Resend verification email" })).toBeInTheDocument();
-        expect(authMocks.register).toHaveBeenCalledTimes(1);
+        expect(await screen.findByRole("heading", { name: "Worker dashboard" })).toBeInTheDocument();
+        expect(authMocks.login).toHaveBeenCalledWith("+254712345678", "secure-password");
+        expect(workerIdentityMocks.completeWorkerRegistration).toHaveBeenCalledWith({
+            challengeId: "registration-challenge",
+            code: "123456",
+            password: "secure-password",
+        });
     });
 
-    it("offers a safe resend without revealing registration email delivery outcomes", async () => {
-        authMocks.register.mockResolvedValueOnce({
-            success: true,
-            user: { role: "WORKER" },
+    it("offers sign-in if account creation succeeds but immediate login fails", async () => {
+        authMocks.login.mockResolvedValueOnce({
+            success: false,
+            message: "Temporary login failure",
         });
         renderAuth("/register");
         fireEvent.change(screen.getByLabelText("Full name"), { target: { value: "Amina Worker" } });
-        fireEvent.change(screen.getByLabelText("Email address (used to sign in)"), { target: { value: "amina@example.com" } });
         fireEvent.change(screen.getByLabelText("Phone number"), { target: { value: "0712345678" } });
         fireEvent.change(screen.getByLabelText("National ID"), { target: { value: "12345678" } });
         fireEvent.change(screen.getByLabelText("Date of birth"), { target: { value: "1990-04-15" } });
         fireEvent.change(screen.getByRole("combobox", { name: "Occupation" }), {
             target: { value: "MARKET_VENDOR" },
         });
-        fireEvent.click(screen.getByRole("button", { name: "Create account" }));
+        fireEvent.click(screen.getByRole("button", { name: "Send verification code" }));
+        await screen.findByLabelText("Six-digit verification code");
+        fireEvent.change(screen.getByLabelText("Six-digit verification code"), { target: { value: "123456" } });
+        fireEvent.change(screen.getByLabelText("Password"), { target: { value: "secure-password" } });
+        fireEvent.change(screen.getByLabelText("Confirm password"), { target: { value: "secure-password" } });
+        fireEvent.click(screen.getByRole("button", { name: "Verify code and create account" }));
 
-        expect(await screen.findByRole("status")).toHaveTextContent(
-            "If we can complete your registration, verification instructions may be sent.",
+        expect(await screen.findByRole("heading", { name: "Account created" })).toBeInTheDocument();
+        expect(screen.getByRole("alert")).toHaveTextContent(
+            "Your account was created, but automatic sign-in failed. Please sign in to continue.",
         );
-        expect(screen.getByRole("button", { name: "Resend verification email" })).toBeInTheDocument();
-        fireEvent.click(screen.getByRole("button", { name: "Resend verification email" }));
-        expect(await screen.findByText(
-            "If an eligible account or registration matches this address, verification instructions can be sent.",
-        )).toBeInTheDocument();
-        expect(authMocks.requestEmailVerificationForAddress).toHaveBeenCalledWith("amina@example.com");
-        expect(screen.queryByText(/verification email was accepted/i)).not.toBeInTheDocument();
+        expect(screen.getByRole("link", { name: "Continue to sign in" })).toHaveAttribute("href", "/login");
+        expect(screen.getByText(/pending KYC review/)).toBeInTheDocument();
+    });
+
+    it("resends the phone code without exposing registration eligibility", async () => {
+        renderAuth("/register");
+        fireEvent.change(screen.getByLabelText("Full name"), { target: { value: "Amina Worker" } });
+        fireEvent.change(screen.getByLabelText("Phone number"), { target: { value: "0712345678" } });
+        fireEvent.change(screen.getByLabelText("National ID"), { target: { value: "12345678" } });
+        fireEvent.change(screen.getByLabelText("Date of birth"), { target: { value: "1990-04-15" } });
+        fireEvent.change(screen.getByRole("combobox", { name: "Occupation" }), {
+            target: { value: "MARKET_VENDOR" },
+        });
+        fireEvent.click(screen.getByRole("button", { name: "Send verification code" }));
+        await screen.findByLabelText("Six-digit verification code");
+        fireEvent.click(screen.getByRole("button", { name: "Send another code" }));
+        expect(await screen.findByRole("status")).toHaveTextContent(
+            "If the registration challenge is still eligible, a new verification code may be sent.",
+        );
+        expect(workerIdentityMocks.resendWorkerRegistrationCode)
+            .toHaveBeenCalledWith("registration-challenge");
     });
 
     it("disables duplicate registration submissions while account creation is pending", async () => {
@@ -341,23 +472,22 @@ describe("authentication pages", () => {
         }));
         renderAuth("/register");
         fireEvent.change(screen.getByLabelText("Full name"), { target: { value: "Amina Worker" } });
-        fireEvent.change(screen.getByLabelText("Email address (used to sign in)"), { target: { value: "amina@example.com" } });
         fireEvent.change(screen.getByLabelText("Phone number"), { target: { value: "0712345678" } });
         fireEvent.change(screen.getByLabelText("National ID"), { target: { value: "12345678" } });
         fireEvent.change(screen.getByLabelText("Date of birth"), { target: { value: "1990-04-15" } });
         fireEvent.change(screen.getByRole("combobox", { name: "Occupation" }), {
             target: { value: "MARKET_VENDOR" },
         });
-        const form = screen.getByRole("button", { name: "Create account" }).closest("form");
+        const form = screen.getByRole("button", { name: "Send verification code" }).closest("form");
 
         fireEvent.submit(form);
         fireEvent.submit(form);
 
         expect(authMocks.register).toHaveBeenCalledTimes(1);
-        expect(screen.getByRole("button", { name: "Creating account…" })).toBeDisabled();
+        expect(screen.getByRole("button", { name: "Sending code…" })).toBeDisabled();
 
-        resolveRegistration({ success: true, user: { role: "WORKER" } });
-        expect(await screen.findByRole("heading", { name: "Verify your email" })).toBeInTheDocument();
+        resolveRegistration({ success: true, challengeId: "registration-challenge" });
+        expect(await screen.findByLabelText("Six-digit verification code")).toBeInTheDocument();
     });
 
     it("shows a field-neutral message when registration finalization cannot be completed", async () => {
@@ -404,6 +534,23 @@ describe("authentication pages", () => {
         fireEvent.click(screen.getByRole("button", { name: "Verify email and create account" }));
         expect(await screen.findByRole("status")).toHaveTextContent("Email address verified successfully.");
         expect(authMocks.verifyEmail).toHaveBeenCalledWith("opaque-test-token", "secure-pass-1");
+    });
+
+    it("rejects passwords that exceed bcrypt's UTF-8 byte limit", () => {
+        renderAuth("/verify-email?token=opaque-test-token&flow=registration");
+        const longPassword = "a".repeat(73);
+        fireEvent.change(screen.getByLabelText("Choose a password"), {
+            target: { value: longPassword },
+        });
+        fireEvent.change(screen.getByLabelText("Confirm password"), {
+            target: { value: longPassword },
+        });
+        fireEvent.click(screen.getByRole("button", { name: "Verify email and create account" }));
+
+        expect(screen.getByRole("alert")).toHaveTextContent(
+            "Your password must not exceed 72 UTF-8 bytes.",
+        );
+        expect(authMocks.verifyEmail).not.toHaveBeenCalled();
     });
 
     it("shows staff sign-in and separate phone-verification next steps after email verification", async () => {

@@ -72,6 +72,7 @@ function FundOversight() {
 
             <Modal
                 open={Boolean(viewingFund)}
+                size="wide"
                 title={t("regulator.fundsPage.dialogTitle", { fund: viewingFund?.fund_name || "" })}
                 onClose={() => setViewingFund(null)}
             >

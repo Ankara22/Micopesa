@@ -6,6 +6,7 @@ import Button from "../ui/Button";
 import FormField from "../ui/FormField";
 import Modal from "../ui/Modal";
 import { useToast } from "../ui/ToastContext";
+import { isValidMoneyInput } from "../../utils/moneyValidation";
 import "./contribution.css";
 
 function ContributionModal({
@@ -50,6 +51,10 @@ function ContributionModal({
         if (submitting) return;
         if (selectedFundIds.length === 0) {
             setFormError(t("worker.contributions.selectFundError"));
+            return;
+        }
+        if (!isValidMoneyInput(amount)) {
+            setFormError(t("worker.contributions.invalidAmount"));
             return;
         }
         setSubmitting(true);

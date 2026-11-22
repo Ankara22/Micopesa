@@ -457,7 +457,7 @@ describe("admin unified notifications", () => {
         expect(screen.getByText(/Registered email address is not verified/)).toBeInTheDocument();
     });
 
-    it("blocks only the development email channel for recipients outside its allowlist", async () => {
+    it("allows verified SMS and email without development recipient allowlists", async () => {
         mocks.listNotificationRecipients.mockResolvedValue([{
             user_id: "worker-outside-email-allowlist",
             full_name: "Worker Outside Email Allowlist",
@@ -467,7 +467,7 @@ describe("admin unified notifications", () => {
             phone_available: true,
             sms_enabled: true,
             sms_delivery_enabled: true,
-            sms_recipient_allowed: true,
+            sms_recipient_allowed: false,
             email_registered: true,
             email_verified: true,
             email_available: true,
@@ -482,14 +482,12 @@ describe("admin unified notifications", () => {
         await selectRecipient("Worker Outside Email Allowlist (Worker)");
 
         expect(screen.getByLabelText("SMS")).toBeEnabled();
-        expect(screen.getByLabelText("Email")).toBeDisabled();
+        expect(screen.getByLabelText("Email")).toBeEnabled();
         expect(screen.getByLabelText("Selected recipient channel availability"))
-            .toHaveTextContent(
-                "Email — This recipient is not authorized by the development delivery allowlist"
-            );
+            .toHaveTextContent("Email — verified email on file");
     });
 
-    it("allows Admin to send optional notifications to verified contacts despite opt-out", async () => {
+    it("prevents Admin from sending optional notifications to contacts that opted out", async () => {
         mocks.listNotificationRecipients.mockResolvedValue([{
             user_id: "opted-out-worker",
             full_name: "Opted Out Worker",
@@ -510,9 +508,9 @@ describe("admin unified notifications", () => {
 
         await selectRecipient("Opted Out Worker (Worker)");
 
-        expect(screen.getByLabelText("SMS")).toBeEnabled();
-        expect(screen.getByLabelText("Email")).toBeEnabled();
-        expect(screen.queryByText(/notification preferences/)).not.toBeInTheDocument();
+        expect(screen.getByLabelText("SMS")).toBeDisabled();
+        expect(screen.getByLabelText("Email")).toBeDisabled();
+        expect(screen.getAllByText(/notification preferences/)).toHaveLength(2);
     });
 
     it("allows verified contacts for essential operational notifications despite optional opt-out", async () => {

@@ -36,6 +36,56 @@
 --     docs/design/database/database-design.md and the diagrams.
 -- =============================================================================
 
+DO $$
+DECLARE
+    evidence_owner_invalid BOOLEAN;
+    verifier_invalid BOOLEAN;
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_catalog.pg_roles
+        WHERE rolname = 'micopesa_national_id_evidence_owner'
+    ) OR NOT EXISTS (
+        SELECT 1 FROM pg_catalog.pg_roles
+        WHERE rolname = 'micopesa_national_id_verifier'
+    ) THEN
+        RAISE EXCEPTION 'Pre-provision micopesa_national_id_evidence_owner and micopesa_national_id_verifier before schema installation';
+    END IF;
+
+    SELECT rolsuper OR rolinherit OR rolcreaterole OR rolcreatedb OR rolcanlogin
+           OR rolreplication OR rolbypassrls
+      INTO evidence_owner_invalid
+    FROM pg_catalog.pg_roles
+    WHERE rolname = 'micopesa_national_id_evidence_owner';
+    SELECT rolsuper OR rolinherit OR rolcreaterole OR rolcreatedb OR NOT rolcanlogin
+           OR rolreplication OR rolbypassrls
+      INTO verifier_invalid
+    FROM pg_catalog.pg_roles
+    WHERE rolname = 'micopesa_national_id_verifier';
+
+    IF evidence_owner_invalid OR verifier_invalid THEN
+        RAISE EXCEPTION 'National ID evidence owner must be NOLOGIN and verifier must be a non-privileged NOINHERIT login';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_auth_members
+        WHERE roleid IN (
+            'micopesa_national_id_evidence_owner'::regrole,
+            'micopesa_national_id_verifier'::regrole
+        )
+           OR member IN (
+            'micopesa_national_id_evidence_owner'::regrole,
+            'micopesa_national_id_verifier'::regrole
+        )
+    ) THEN
+        RAISE EXCEPTION 'National ID evidence owner and verifier must not have role memberships';
+    END IF;
+END;
+$$;
+
+GRANT USAGE, CREATE ON SCHEMA public TO micopesa_national_id_evidence_owner;
+GRANT USAGE ON SCHEMA public TO micopesa_national_id_verifier;
+
 -- -----------------------------------------------------------------------------
 -- Extensions
 -- -----------------------------------------------------------------------------
@@ -56,6 +106,8 @@ DROP TABLE IF EXISTS ussd_sessions CASCADE;
 DROP TABLE IF EXISTS notifications CASCADE;
 DROP TABLE IF EXISTS contribution_fund_allocations CASCADE;
 DROP TABLE IF EXISTS fund_allocations CASCADE;
+DROP TABLE IF EXISTS withdrawal_payout_otp_delivery_events CASCADE;
+DROP TABLE IF EXISTS withdrawal_payout_otp_authorizations CASCADE;
 DROP TABLE IF EXISTS withdrawal_claims CASCADE;
 DROP TABLE IF EXISTS contributions CASCADE;
 DROP TABLE IF EXISTS transactions CASCADE;
@@ -119,10 +171,13 @@ CREATE TABLE users (
         CONSTRAINT chk_users_login_method CHECK (login_method IN ('EMAIL', 'PHONE')),
     profile_photo_ref VARCHAR(64),
     role            VARCHAR(20)  NOT NULL
-        CHECK (role IN ('WORKER', 'FUND_MANAGER', 'REGULATOR', 'ADMIN')),
+        CHECK (role IN ('WORKER', 'FUND_MANAGER', 'REGULATOR', 'ADMIN', 'PAYOUT_OFFICER')),
     occupation      VARCHAR(50),
     account_status  VARCHAR(15)  NOT NULL DEFAULT 'ACTIVE'
         CHECK (account_status IN ('ACTIVE', 'INACTIVE', 'SUSPENDED')),
+    approval_status VARCHAR(15) NOT NULL DEFAULT 'APPROVED'
+        CONSTRAINT ck_users_approval_status
+        CHECK (approval_status IN ('PENDING', 'APPROVED', 'REJECTED')),
     created_at      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
     updated_at      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
     CONSTRAINT uq_users_phone UNIQUE (phone)
@@ -161,6 +216,9 @@ CREATE UNIQUE INDEX uq_users_phone_normalized
 
 CREATE INDEX idx_users_role ON users (role);
 CREATE INDEX idx_users_account_status ON users (account_status);
+CREATE INDEX idx_users_worker_approval_status
+    ON users (approval_status, created_at)
+    WHERE role = 'WORKER';
 
 CREATE TRIGGER trg_users_set_updated_at
     BEFORE UPDATE ON users
@@ -209,7 +267,13 @@ CREATE INDEX idx_phone_change_verifications_expiry
 CREATE TABLE kyc_records (
     kyc_id          VARCHAR(25) PRIMARY KEY DEFAULT generate_short_id(),
     user_id         VARCHAR(25) NOT NULL,
-    national_id     VARCHAR(25) NOT NULL,
+    national_id     VARCHAR(25) NOT NULL DEFAULT 'ENCRYPTED',
+    national_id_ciphertext BYTEA NOT NULL,
+    national_id_iv BYTEA NOT NULL,
+    national_id_tag BYTEA NOT NULL,
+    national_id_key_version VARCHAR(10) NOT NULL DEFAULT 'v1',
+    national_id_fingerprint VARCHAR(64) NOT NULL,
+    national_id_last_four CHAR(4) NOT NULL,
     date_of_birth   DATE        NOT NULL,
     kyc_status      VARCHAR(15) NOT NULL DEFAULT 'PENDING'
         CHECK (kyc_status IN ('PENDING', 'VERIFIED', 'REJECTED')),
@@ -219,12 +283,22 @@ CREATE TABLE kyc_records (
     updated_at      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
     CONSTRAINT uq_kyc_records_user_id UNIQUE (user_id),
     CONSTRAINT fk_kyc_records_user FOREIGN KEY (user_id)
-        REFERENCES users (user_id) ON DELETE CASCADE
+        REFERENCES users (user_id) ON DELETE CASCADE,
+    CONSTRAINT ck_kyc_records_national_id_redacted
+        CHECK (national_id = 'ENCRYPTED'),
+    CONSTRAINT ck_kyc_records_national_id_ciphertext
+        CHECK (octet_length(national_id_iv) = 12 AND octet_length(national_id_tag) = 16),
+    CONSTRAINT ck_kyc_records_national_id_key_version
+        CHECK (national_id_key_version = 'v1'),
+    CONSTRAINT ck_kyc_records_national_id_fingerprint
+        CHECK (national_id_fingerprint ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_kyc_records_national_id_last_four
+        CHECK (national_id_last_four ~ '^[0-9]{4}$')
 );
 
 CREATE INDEX idx_kyc_records_kyc_status ON kyc_records (kyc_status);
-CREATE UNIQUE INDEX uq_kyc_records_verified_national_id
-    ON kyc_records (national_id)
+CREATE UNIQUE INDEX uq_kyc_records_verified_national_id_fingerprint
+    ON kyc_records (national_id_fingerprint)
     WHERE kyc_status = 'VERIFIED';
 CREATE INDEX idx_kyc_records_duplicate_pending
     ON kyc_records (created_at, kyc_id)
@@ -233,17 +307,20 @@ CREATE INDEX idx_kyc_records_duplicate_pending
 CREATE OR REPLACE FUNCTION flag_duplicate_kyc_national_id()
 RETURNS TRIGGER AS $$
 BEGIN
-    PERFORM pg_advisory_xact_lock(hashtextextended(NEW.national_id, 0));
+    IF NEW.national_id_fingerprint IS NULL THEN
+        RAISE EXCEPTION 'National ID fingerprint is required for KYC records';
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(NEW.national_id_fingerprint, 0));
     NEW.duplicate_submission := EXISTS (
         SELECT 1
         FROM kyc_records
-        WHERE national_id = NEW.national_id
+        WHERE national_id_fingerprint = NEW.national_id_fingerprint
           AND kyc_id IS DISTINCT FROM NEW.kyc_id
     );
     IF NEW.duplicate_submission THEN
         UPDATE kyc_records
         SET duplicate_submission = TRUE
-        WHERE national_id = NEW.national_id
+        WHERE national_id_fingerprint = NEW.national_id_fingerprint
           AND kyc_id IS DISTINCT FROM NEW.kyc_id
           AND duplicate_submission IS FALSE;
     END IF;
@@ -252,7 +329,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER trg_kyc_records_flag_duplicate_national_id
-    BEFORE INSERT OR UPDATE OF national_id, kyc_status ON kyc_records
+    BEFORE INSERT OR UPDATE OF national_id_fingerprint, kyc_status ON kyc_records
     FOR EACH ROW
     EXECUTE FUNCTION flag_duplicate_kyc_national_id();
 
@@ -786,6 +863,94 @@ CREATE UNIQUE INDEX uq_withdrawal_claims_one_pending_per_account
     ON withdrawal_claims (account_id)
     WHERE claim_status = 'PENDING';
 
+CREATE UNIQUE INDEX uq_withdrawal_claims_claim_account_otp
+    ON withdrawal_claims (claim_id, account_id);
+
+CREATE UNIQUE INDEX uq_pension_accounts_account_user_otp
+    ON pension_accounts (account_id, user_id);
+
+CREATE TABLE withdrawal_payout_otp_authorizations (
+    authorization_attempt_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    idempotency_key VARCHAR(128) NOT NULL UNIQUE,
+    claim_id VARCHAR(25) NOT NULL,
+    account_id VARCHAR(25) NOT NULL,
+    worker_user_id VARCHAR(25) NOT NULL,
+    initiated_by_user_id VARCHAR(25) NOT NULL,
+    destination_phone_snapshot VARCHAR(15) NOT NULL,
+    destination_verified_at TIMESTAMPTZ NOT NULL,
+    otp_hash BYTEA,
+    otp_salt BYTEA,
+    status VARCHAR(20) NOT NULL DEFAULT 'DELIVERY_PENDING'
+        CHECK (status IN (
+            'DELIVERY_PENDING', 'ISSUED', 'VERIFIED', 'EXPIRED',
+            'LOCKED', 'INVALIDATED', 'DELIVERY_FAILED', 'DELIVERY_UNKNOWN'
+        )),
+    attempt_count SMALLINT NOT NULL DEFAULT 0
+        CHECK (attempt_count BETWEEN 0 AND 5),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    issued_at TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ,
+    verified_at TIMESTAMPTZ,
+    invalidated_at TIMESTAMPTZ,
+    invalidation_reason VARCHAR(60),
+    last_delivery_error_code VARCHAR(60),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    FOREIGN KEY (claim_id, account_id)
+        REFERENCES withdrawal_claims (claim_id, account_id)
+        ON DELETE RESTRICT,
+    FOREIGN KEY (account_id, worker_user_id)
+        REFERENCES pension_accounts (account_id, user_id)
+        ON DELETE RESTRICT,
+    FOREIGN KEY (initiated_by_user_id)
+        REFERENCES users (user_id)
+        ON DELETE RESTRICT,
+    CHECK ((otp_hash IS NULL) = (otp_salt IS NULL)),
+    CHECK (
+        (status = 'DELIVERY_PENDING'
+            AND otp_hash IS NOT NULL
+            AND issued_at IS NULL AND expires_at IS NULL AND verified_at IS NULL)
+        OR
+        (status = 'ISSUED'
+            AND otp_hash IS NOT NULL
+            AND issued_at IS NOT NULL AND expires_at > issued_at AND verified_at IS NULL)
+        OR
+        (status = 'VERIFIED'
+            AND otp_hash IS NULL
+            AND issued_at IS NOT NULL AND expires_at > issued_at AND verified_at IS NOT NULL)
+        OR
+        (status NOT IN ('DELIVERY_PENDING', 'ISSUED', 'VERIFIED')
+            AND otp_hash IS NULL AND verified_at IS NULL)
+    ),
+    UNIQUE (authorization_attempt_id, claim_id, worker_user_id)
+);
+
+CREATE UNIQUE INDEX uq_withdrawal_payout_otp_one_active_per_claim
+    ON withdrawal_payout_otp_authorizations (claim_id)
+    WHERE status IN ('DELIVERY_PENDING', 'ISSUED', 'VERIFIED');
+
+CREATE INDEX idx_withdrawal_payout_otp_claim_history
+    ON withdrawal_payout_otp_authorizations (claim_id, created_at DESC);
+
+CREATE TABLE withdrawal_payout_otp_delivery_events (
+    delivery_event_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    authorization_attempt_id UUID NOT NULL,
+    claim_id VARCHAR(25) NOT NULL,
+    worker_user_id VARCHAR(25) NOT NULL,
+    idempotency_key VARCHAR(128) NOT NULL UNIQUE,
+    requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    outcome VARCHAR(20) NOT NULL DEFAULT 'PENDING'
+        CHECK (outcome IN ('PENDING', 'PROVIDER_ACCEPTED', 'FAILED', 'UNKNOWN')),
+    provider_error_code VARCHAR(60),
+    FOREIGN KEY (authorization_attempt_id, claim_id, worker_user_id)
+        REFERENCES withdrawal_payout_otp_authorizations
+            (authorization_attempt_id, claim_id, worker_user_id)
+        ON DELETE RESTRICT
+);
+
+CREATE INDEX idx_withdrawal_payout_otp_delivery_rate_limit
+    ON withdrawal_payout_otp_delivery_events
+        (worker_user_id, claim_id, requested_at DESC);
+
 CREATE TRIGGER trg_withdrawal_claims_set_updated_at
     BEFORE UPDATE ON withdrawal_claims
     FOR EACH ROW
@@ -886,18 +1051,245 @@ CREATE TABLE pending_registrations (
     phone VARCHAR(15) NOT NULL,
     password_hash VARCHAR(255),
     occupation VARCHAR(50) NOT NULL,
-    national_id VARCHAR(25) NOT NULL,
+    national_id VARCHAR(25) NOT NULL DEFAULT 'ENCRYPTED',
+    national_id_ciphertext BYTEA NOT NULL,
+    national_id_iv BYTEA NOT NULL,
+    national_id_tag BYTEA NOT NULL,
+    national_id_key_version VARCHAR(10) NOT NULL DEFAULT 'v1',
+    national_id_fingerprint VARCHAR(64) NOT NULL,
+    national_id_last_four CHAR(4) NOT NULL,
     date_of_birth DATE NOT NULL,
     token_hash CHAR(64) NOT NULL UNIQUE,
     expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    CONSTRAINT ck_pending_registrations_national_id_redacted
+        CHECK (national_id = 'ENCRYPTED'),
+    CONSTRAINT ck_pending_registrations_national_id_ciphertext
+        CHECK (octet_length(national_id_iv) = 12 AND octet_length(national_id_tag) = 16),
+    CONSTRAINT ck_pending_registrations_national_id_key_version
+        CHECK (national_id_key_version = 'v1'),
+    CONSTRAINT ck_pending_registrations_national_id_fingerprint
+        CHECK (national_id_fingerprint ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_pending_registrations_national_id_last_four
+        CHECK (national_id_last_four ~ '^[0-9]{4}$')
 );
 
 CREATE INDEX idx_pending_registrations_expiry
     ON pending_registrations (expires_at);
 
+CREATE TABLE worker_registration_challenges (
+    challenge_id UUID PRIMARY KEY,
+    full_name VARCHAR(100) NOT NULL,
+    phone VARCHAR(15) NOT NULL CHECK (phone ~ '^[+]254[17][0-9]{8}$'),
+    email VARCHAR(254),
+    occupation VARCHAR(50) NOT NULL,
+    date_of_birth DATE NOT NULL,
+    national_id_ciphertext BYTEA NOT NULL,
+    national_id_iv BYTEA NOT NULL CHECK (octet_length(national_id_iv) = 12),
+    national_id_tag BYTEA NOT NULL CHECK (octet_length(national_id_tag) = 16),
+    national_id_key_version VARCHAR(10) NOT NULL DEFAULT 'v1'
+        CHECK (national_id_key_version = 'v1'),
+    national_id_fingerprint VARCHAR(64) NOT NULL
+        CHECK (national_id_fingerprint ~ '^[0-9a-f]{64}$'),
+    national_id_last_four CHAR(4) NOT NULL
+        CHECK (national_id_last_four ~ '^[0-9]{4}$'),
+    code_hash BYTEA,
+    code_salt BYTEA,
+    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    send_count INTEGER NOT NULL DEFAULT 0 CHECK (send_count BETWEEN 0 AND 3),
+    window_started_at TIMESTAMP WITH TIME ZONE,
+    last_sent_at TIMESTAMP WITH TIME ZONE,
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count BETWEEN 0 AND 5),
+    attempt_window_started_at TIMESTAMP WITH TIME ZONE,
+    locked_until TIMESTAMP WITH TIME ZONE,
+    challenge_status VARCHAR(15) NOT NULL DEFAULT 'PENDING'
+        CHECK (challenge_status IN ('PENDING', 'CONSUMED', 'CANCELLED')),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    CONSTRAINT ck_worker_registration_challenge_code CHECK (
+        (code_hash IS NULL AND code_salt IS NULL)
+        OR
+        (code_hash IS NOT NULL AND code_salt IS NOT NULL
+            AND octet_length(code_hash) = 32 AND octet_length(code_salt) = 16)
+    )
+);
+
+CREATE INDEX idx_worker_registration_challenges_expiry
+    ON worker_registration_challenges (expires_at)
+    WHERE challenge_status = 'PENDING';
+
+CREATE TABLE worker_password_reset_challenges (
+    challenge_id UUID PRIMARY KEY,
+    user_id VARCHAR(25) NOT NULL
+        REFERENCES users (user_id) ON DELETE CASCADE,
+    code_hash BYTEA NOT NULL CHECK (octet_length(code_hash) = 32),
+    code_salt BYTEA NOT NULL CHECK (octet_length(code_salt) = 16),
+    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    send_count INTEGER NOT NULL DEFAULT 1 CHECK (send_count BETWEEN 1 AND 3),
+    window_started_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    last_sent_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count BETWEEN 0 AND 5),
+    attempt_window_started_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    locked_until TIMESTAMP WITH TIME ZONE,
+    challenge_status VARCHAR(15) NOT NULL DEFAULT 'PENDING'
+        CHECK (challenge_status IN ('PENDING', 'CONSUMED', 'CANCELLED')),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX uq_worker_password_reset_pending_user
+    ON worker_password_reset_challenges (user_id)
+    WHERE challenge_status = 'PENDING';
+CREATE INDEX idx_worker_password_reset_expiry
+    ON worker_password_reset_challenges (expires_at)
+    WHERE challenge_status = 'PENDING';
+
+CREATE TABLE worker_national_id_claims (
+    national_id_fingerprint VARCHAR(64) PRIMARY KEY
+        CHECK (national_id_fingerprint ~ '^[0-9a-f]{64}$'),
+    claim_status VARCHAR(20) NOT NULL
+        CHECK (claim_status IN ('RESERVED', 'CLAIMED', 'LEGACY_CONFLICT')),
+    user_id VARCHAR(25) REFERENCES users (user_id) ON DELETE CASCADE,
+    registration_challenge_id UUID
+        REFERENCES worker_registration_challenges (challenge_id) ON DELETE CASCADE,
+    pending_registration_id VARCHAR(25)
+        REFERENCES pending_registrations (pending_registration_id) ON DELETE CASCADE,
+    expires_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    CONSTRAINT ck_worker_national_id_claim_state CHECK (
+        (claim_status = 'CLAIMED'
+            AND user_id IS NOT NULL
+            AND registration_challenge_id IS NULL
+            AND pending_registration_id IS NULL
+            AND expires_at IS NULL)
+        OR
+        (claim_status = 'RESERVED'
+            AND user_id IS NULL
+            AND num_nonnulls(registration_challenge_id, pending_registration_id) = 1
+            AND expires_at IS NOT NULL)
+        OR
+        (claim_status = 'LEGACY_CONFLICT'
+            AND user_id IS NULL
+            AND registration_challenge_id IS NULL
+            AND pending_registration_id IS NULL
+            AND expires_at IS NULL)
+    )
+);
+
+CREATE INDEX idx_worker_national_id_claims_expiry
+    ON worker_national_id_claims (expires_at)
+    WHERE claim_status = 'RESERVED';
+
+CREATE TABLE worker_national_id_verification_evidence (
+    source_table VARCHAR(30) NOT NULL
+        CHECK (source_table IN ('kyc_records', 'pending_registrations')),
+    source_record_id VARCHAR(25) NOT NULL,
+    national_id_fingerprint VARCHAR(64) NOT NULL
+        CHECK (national_id_fingerprint ~ '^[0-9a-f]{64}$'),
+    national_id_ciphertext BYTEA NOT NULL,
+    national_id_iv BYTEA NOT NULL CHECK (octet_length(national_id_iv) = 12),
+    national_id_tag BYTEA NOT NULL CHECK (octet_length(national_id_tag) = 16),
+    national_id_key_version VARCHAR(10) NOT NULL
+        CHECK (national_id_key_version = 'v1'),
+    national_id_last_four CHAR(4) NOT NULL
+        CHECK (national_id_last_four ~ '^[0-9]{4}$'),
+    verified_plaintext_fingerprint VARCHAR(64) NOT NULL
+        CHECK (verified_plaintext_fingerprint ~ '^[0-9a-f]{64}$'),
+    plaintext_matched BOOLEAN NOT NULL CHECK (plaintext_matched IS TRUE),
+    verified_by TEXT NOT NULL,
+    verified_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    PRIMARY KEY (source_table, source_record_id)
+);
+
+CREATE OR REPLACE FUNCTION guard_worker_national_id_verification_evidence()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP <> 'INSERT' THEN
+        RAISE EXCEPTION 'National ID verification evidence is immutable';
+    END IF;
+    IF session_user <> 'micopesa_national_id_verifier' THEN
+        RAISE EXCEPTION 'National ID verification evidence requires the verifier role';
+    END IF;
+    NEW.verified_by := session_user;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_worker_national_id_verification_evidence_guard
+    BEFORE INSERT OR UPDATE OR DELETE
+    ON worker_national_id_verification_evidence
+    FOR EACH ROW
+    EXECUTE FUNCTION guard_worker_national_id_verification_evidence();
+
+ALTER TABLE worker_national_id_verification_evidence
+    OWNER TO micopesa_national_id_evidence_owner;
+ALTER FUNCTION guard_worker_national_id_verification_evidence()
+    OWNER TO micopesa_national_id_evidence_owner;
+REVOKE CREATE ON SCHEMA public FROM micopesa_national_id_evidence_owner;
+
+REVOKE ALL ON TABLE worker_national_id_verification_evidence FROM PUBLIC;
+REVOKE ALL ON TABLE worker_national_id_verification_evidence
+    FROM micopesa_national_id_verifier;
+REVOKE ALL ON FUNCTION guard_worker_national_id_verification_evidence() FROM PUBLIC;
+GRANT SELECT (
+    source_table, source_record_id, national_id_fingerprint,
+    national_id_ciphertext, national_id_iv, national_id_tag,
+    national_id_key_version, national_id_last_four,
+    verified_plaintext_fingerprint, plaintext_matched, verified_by
+) ON TABLE worker_national_id_verification_evidence
+    TO micopesa_national_id_verifier;
+GRANT INSERT (
+    source_table, source_record_id, national_id_fingerprint,
+    national_id_ciphertext, national_id_iv, national_id_tag,
+    national_id_key_version, national_id_last_four,
+    verified_plaintext_fingerprint, plaintext_matched
+) ON TABLE worker_national_id_verification_evidence
+    TO micopesa_national_id_verifier;
+
+GRANT SELECT (
+    kyc_id, user_id, national_id, national_id_ciphertext, national_id_iv,
+    national_id_tag, national_id_key_version, national_id_fingerprint,
+    national_id_last_four
+) ON TABLE kyc_records TO micopesa_national_id_verifier;
+GRANT UPDATE (
+    national_id_ciphertext, national_id_iv, national_id_tag,
+    national_id_key_version, national_id_fingerprint, national_id_last_four
+) ON TABLE kyc_records TO micopesa_national_id_verifier;
+GRANT SELECT (
+    pending_registration_id, national_id, national_id_ciphertext,
+    national_id_iv, national_id_tag, national_id_key_version,
+    national_id_fingerprint, national_id_last_four, expires_at
+) ON TABLE pending_registrations TO micopesa_national_id_verifier;
+GRANT UPDATE (
+    national_id_ciphertext, national_id_iv, national_id_tag,
+    national_id_key_version, national_id_fingerprint, national_id_last_four
+) ON TABLE pending_registrations TO micopesa_national_id_verifier;
+GRANT SELECT (
+    national_id_fingerprint, claim_status, user_id,
+    pending_registration_id, expires_at
+) ON TABLE worker_national_id_claims TO micopesa_national_id_verifier;
+GRANT INSERT (
+    national_id_fingerprint, claim_status, user_id,
+    pending_registration_id, expires_at
+) ON TABLE worker_national_id_claims TO micopesa_national_id_verifier;
+
+CREATE TABLE worker_approval_reviews (
+    review_id BIGSERIAL PRIMARY KEY,
+    worker_user_id VARCHAR(25) NOT NULL
+        REFERENCES users (user_id) ON DELETE RESTRICT,
+    reviewed_by_user_id VARCHAR(25)
+        REFERENCES users (user_id) ON DELETE SET NULL,
+    previous_status VARCHAR(15) NOT NULL
+        CHECK (previous_status IN ('PENDING', 'APPROVED', 'REJECTED')),
+    decision VARCHAR(15) NOT NULL
+        CHECK (decision IN ('APPROVED', 'REJECTED')),
+    reason VARCHAR(500) NOT NULL CHECK (length(btrim(reason)) BETWEEN 1 AND 500),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_worker_approval_reviews_worker_created
+    ON worker_approval_reviews (worker_user_id, created_at DESC, review_id DESC);
+
 CREATE TABLE auth_rate_limits (
-    scope           VARCHAR(20) NOT NULL CHECK (scope IN ('IP', 'EMAIL', 'ACCOUNT')),
+    scope           VARCHAR(20) NOT NULL CHECK (scope IN ('IP', 'EMAIL', 'ACCOUNT', 'PHONE')),
     action          VARCHAR(30) NOT NULL,
     key_hash        CHAR(64) NOT NULL,
     window_started_at TIMESTAMP WITH TIME ZONE NOT NULL,
@@ -1280,7 +1672,7 @@ CREATE TRIGGER trg_ussd_sessions_set_updated_at
     EXECUTE FUNCTION set_updated_at();
 
 -- -----------------------------------------------------------------------------
--- AUDIT_LOGS  (append-only: no updated_at / update trigger by design)
+-- AUDIT_LOGS  (append-only; actor references are cleared on user deletion)
 -- -----------------------------------------------------------------------------
 CREATE TABLE audit_logs (
     log_id        VARCHAR(25)  PRIMARY KEY DEFAULT generate_short_id(),
@@ -1288,7 +1680,7 @@ CREATE TABLE audit_logs (
     action_type   VARCHAR(20)  NOT NULL
         CHECK (action_type IN (
             'CREATE', 'UPDATE', 'DELETE', 'LOGIN', 'LOGOUT', 'APPROVE', 'REJECT',
-            'SUBMIT', 'RESUBMIT', 'REQUEST_REVISION'
+            'SUBMIT', 'RESUBMIT', 'REQUEST_REVISION', 'VIEW'
         )),
     entity_name   VARCHAR(50)  NOT NULL,
     entity_id     VARCHAR(25)  NOT NULL,
@@ -1303,6 +1695,110 @@ CREATE TABLE audit_logs (
 CREATE INDEX idx_audit_logs_user_id ON audit_logs (user_id);
 CREATE INDEX idx_audit_logs_action_type ON audit_logs (action_type);
 CREATE INDEX idx_audit_logs_entity ON audit_logs (entity_name, entity_id);
+
+CREATE OR REPLACE FUNCTION prevent_audit_log_mutation()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP = 'UPDATE'
+       AND pg_trigger_depth() > 1
+       AND OLD.user_id IS NOT NULL
+       AND NEW.user_id IS NULL
+       AND (to_jsonb(NEW) - 'user_id') IS NOT DISTINCT FROM
+           (to_jsonb(OLD) - 'user_id') THEN
+        RETURN NEW;
+    END IF;
+
+    RAISE EXCEPTION 'audit_logs is append-only'
+        USING ERRCODE = '55000';
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_audit_logs_append_only
+    BEFORE UPDATE OR DELETE ON audit_logs
+    FOR EACH ROW
+    EXECUTE FUNCTION prevent_audit_log_mutation();
+ALTER TABLE audit_logs
+    ENABLE ALWAYS TRIGGER trg_audit_logs_append_only;
+REVOKE UPDATE, DELETE ON TABLE audit_logs FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION invalidate_withdrawal_payout_otp()
+RETURNS TRIGGER AS $$
+DECLARE
+    affected_claim_id VARCHAR(25);
+    affected_worker_user_id VARCHAR(25);
+    invalidation_reason_value VARCHAR(60);
+BEGIN
+    IF TG_TABLE_NAME = 'withdrawal_claims' THEN
+        affected_claim_id := NEW.claim_id;
+        invalidation_reason_value := 'WITHDRAWAL_CHANGED';
+    ELSIF TG_TABLE_NAME = 'users' THEN
+        affected_worker_user_id := NEW.user_id;
+        invalidation_reason_value := 'WORKER_CONTACT_OR_STATUS_CHANGED';
+    ELSE
+        affected_worker_user_id := NEW.user_id;
+        invalidation_reason_value := 'PENSION_ACCOUNT_STATUS_CHANGED';
+    END IF;
+
+    WITH invalidated AS (
+        UPDATE withdrawal_payout_otp_authorizations
+        SET status = 'INVALIDATED',
+            otp_hash = NULL,
+            otp_salt = NULL,
+            verified_at = NULL,
+            invalidated_at = now(),
+            invalidation_reason = invalidation_reason_value,
+            updated_at = now()
+        WHERE status IN ('DELIVERY_PENDING', 'ISSUED', 'VERIFIED')
+          AND (affected_claim_id IS NULL OR claim_id = affected_claim_id)
+          AND (affected_worker_user_id IS NULL OR worker_user_id = affected_worker_user_id)
+        RETURNING authorization_attempt_id, claim_id
+    )
+    INSERT INTO audit_logs (user_id, action_type, entity_name, entity_id, details)
+    SELECT NULL, 'UPDATE', 'WITHDRAWAL_PAYOUT_OTP', claim_id,
+           jsonb_build_object(
+               'event', 'OTP_INVALIDATED',
+               'authorizationAttemptId', authorization_attempt_id,
+               'reason', invalidation_reason_value
+           )
+    FROM invalidated;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_withdrawal_claims_invalidate_payout_otp
+    AFTER UPDATE OF claim_status, amount_requested, destination_phone, account_id,
+                    transaction_id, processed_at
+    ON withdrawal_claims
+    FOR EACH ROW
+    WHEN (
+        OLD.claim_status IS DISTINCT FROM NEW.claim_status
+        OR OLD.amount_requested IS DISTINCT FROM NEW.amount_requested
+        OR OLD.destination_phone IS DISTINCT FROM NEW.destination_phone
+        OR OLD.account_id IS DISTINCT FROM NEW.account_id
+        OR OLD.transaction_id IS DISTINCT FROM NEW.transaction_id
+        OR OLD.processed_at IS DISTINCT FROM NEW.processed_at
+    )
+    EXECUTE FUNCTION invalidate_withdrawal_payout_otp();
+
+CREATE TRIGGER trg_users_invalidate_payout_otp
+    AFTER UPDATE OF phone, phone_verified_at, account_status, role
+    ON users
+    FOR EACH ROW
+    WHEN (
+        OLD.phone IS DISTINCT FROM NEW.phone
+        OR OLD.phone_verified_at IS DISTINCT FROM NEW.phone_verified_at
+        OR OLD.account_status IS DISTINCT FROM NEW.account_status
+        OR OLD.role IS DISTINCT FROM NEW.role
+    )
+    EXECUTE FUNCTION invalidate_withdrawal_payout_otp();
+
+CREATE TRIGGER trg_pension_accounts_invalidate_payout_otp
+    AFTER UPDATE OF account_status
+    ON pension_accounts
+    FOR EACH ROW
+    WHEN (OLD.account_status IS DISTINCT FROM NEW.account_status)
+    EXECUTE FUNCTION invalidate_withdrawal_payout_otp();
 
 CREATE TABLE notification_audit_events (
     audit_event_id BIGSERIAL PRIMARY KEY,

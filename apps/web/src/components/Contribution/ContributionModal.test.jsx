@@ -88,6 +88,18 @@ describe("ContributionModal", () => {
         expect(mocks.initiateMyContribution).not.toHaveBeenCalled();
     });
 
+    it("rejects exponent-form amounts before creating a contribution", async () => {
+        renderModal();
+        fireEvent.click(screen.getByLabelText(/Balanced/));
+        fireEvent.change(screen.getByLabelText("Amount (KES)"), { target: { value: "1e3" } });
+        fireEvent.click(screen.getByRole("button", { name: "Create pending contribution" }));
+
+        expect(await screen.findByRole("alert")).toHaveTextContent(
+            "Enter a positive amount with no more than two decimal places.",
+        );
+        expect(mocks.initiateMyContribution).not.toHaveBeenCalled();
+    });
+
     it("shows loading and retryable API errors", () => {
         const onRetry = vi.fn();
         const { rerender } = renderModal({ loading: true });

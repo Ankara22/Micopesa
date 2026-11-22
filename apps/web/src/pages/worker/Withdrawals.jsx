@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import useApi from "../../hooks/useApi";
-import { getEligibility, submitClaim, getMyClaims } from "../../services/withdrawalService";
+import {
+    getEligibility,
+    submitClaim,
+    getMyClaims,
+    verifyPayoutOtp,
+} from "../../services/withdrawalService";
 import Card from "../../components/ui/Card";
 import DataTable from "../../components/ui/DataTable";
 import StatusBadge from "../../components/ui/StatusBadge";
@@ -25,13 +30,63 @@ function Withdrawals() {
     const [phone, setPhone] = useState("");
     const [reason, setReason] = useState("");
     const [submitting, setSubmitting] = useState(false);
+    const [otpCodes, setOtpCodes] = useState({});
+    const [verifyingClaimId, setVerifyingClaimId] = useState(null);
     const submissionInProgressRef = useRef(false);
+    const verificationInProgressRef = useRef(false);
     const columns = [
         { key: "requested_at", header: t("worker.withdrawals.requested"), render: (row) => formatDateTime(row.requested_at, i18n.language) },
         { key: "amount_requested", header: t("worker.withdrawals.tableAmount"), render: (row) => formatKes(row.amount_requested, i18n.language) || t("worker.common.notAvailable") },
         { key: "destination_phone", header: t("worker.withdrawals.tableDestination") },
         { key: "withdrawal_reason", header: t("worker.withdrawals.tableReason"), render: (row) => row.withdrawal_reason || "-" },
         { key: "claim_status", header: t("worker.withdrawals.tableStatus"), render: (row) => <StatusBadge status={row.claim_status} label={t(`worker.common.statuses.${row.claim_status}`, { defaultValue: row.claim_status })} /> },
+        {
+            key: "payoutAuthorization",
+            header: t("worker.withdrawals.payoutAuthorization"),
+            render: (row) => {
+                if (row.claim_status !== "APPROVED") return "—";
+                if (row.payout_otp_status === "VERIFIED") {
+                    return <span>{t("worker.withdrawals.otpVerifiedUnpaid")}</span>;
+                }
+                if (row.payout_otp_status !== "ISSUED") {
+                    return (
+                        <span>
+                            {t(`worker.withdrawals.otpStatus.${row.payout_otp_status || "NOT_STARTED"}`)}
+                        </span>
+                    );
+                }
+                return (
+                    <form
+                        className="payout-otp-verify-form"
+                        onSubmit={(event) => handleVerifyOtp(event, row)}
+                    >
+                        <FormField
+                            id={`withdrawal-otp-${row.claim_id}`}
+                            label={t("worker.withdrawals.otpCode")}
+                            type="text"
+                            inputMode="numeric"
+                            autoComplete="one-time-code"
+                            maxLength={6}
+                            value={otpCodes[row.claim_id] || ""}
+                            onChange={(event) => setOtpCodes((codes) => ({
+                                ...codes,
+                                [row.claim_id]: event.target.value.replace(/\D/g, "").slice(0, 6),
+                            }))}
+                            disabled={verifyingClaimId === row.claim_id}
+                            required
+                        />
+                        <Button
+                            type="submit"
+                            size="sm"
+                            variant="primary"
+                            loading={verifyingClaimId === row.claim_id}
+                        >
+                            {t("worker.withdrawals.verifyOtp")}
+                        </Button>
+                    </form>
+                );
+            },
+        },
     ];
 
     useEffect(() => {
@@ -46,11 +101,21 @@ function Withdrawals() {
             return;
         }
 
+        const amountText = amount.trim();
+        const parsedAmount = Number(amountText);
+        if (!/^\d+$/.test(amountText) ||
+            !Number.isSafeInteger(parsedAmount) ||
+            parsedAmount <= 0 ||
+            parsedAmount > 9999999999) {
+            toast.error(t("worker.withdrawals.invalidAmount"));
+            return;
+        }
+
         submissionInProgressRef.current = true;
         setSubmitting(true);
         try {
             const result = await submitClaim({
-                amount_requested: Number(amount),
+                amount_requested: amountText,
                 destination_phone: phone,
                 withdrawal_reason: reason.trim(),
             });
@@ -72,6 +137,33 @@ function Withdrawals() {
         } finally {
             submissionInProgressRef.current = false;
             setSubmitting(false);
+        }
+    }
+
+    async function handleVerifyOtp(event, claim) {
+        event.preventDefault();
+        if (verificationInProgressRef.current) return;
+        const code = otpCodes[claim.claim_id] || "";
+        verificationInProgressRef.current = true;
+        setVerifyingClaimId(claim.claim_id);
+        try {
+            const result = await verifyPayoutOtp(claim.claim_id, code);
+            claimsApi.setData((claims) => (claims || []).map((item) =>
+                item.claim_id === claim.claim_id
+                    ? {
+                        ...item,
+                        payout_otp_status: result.status,
+                        payout_otp_verified_at: new Date().toISOString(),
+                    }
+                    : item
+            ));
+            setOtpCodes((codes) => ({ ...codes, [claim.claim_id]: "" }));
+            toast.success(t("worker.withdrawals.otpVerified"));
+        } catch (error) {
+            toast.error(error.response?.data?.message || t("worker.withdrawals.otpVerifyError"));
+        } finally {
+            verificationInProgressRef.current = false;
+            setVerifyingClaimId(null);
         }
     }
 
@@ -150,6 +242,8 @@ function Withdrawals() {
                         label={t("worker.withdrawals.amount")}
                         type="number"
                         min="1"
+                        max="9999999999"
+                        step="1"
                         value={amount}
                         onChange={(e) => setAmount(e.target.value)}
                         required

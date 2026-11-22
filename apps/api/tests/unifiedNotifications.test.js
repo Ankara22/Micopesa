@@ -1062,6 +1062,47 @@ test("email service reports only SMTP acceptance and rejects malformed addresses
         assert.equal(sent.length, 2);
     });
 
+    test("verified account notification email needs channel switches but not a manual allowlist", async () => {
+        const sent = [];
+        const environment = {
+            NODE_ENV: "development",
+            COMMUNICATIONS_DEV_DELIVERY_ENABLED: "true",
+            COMMUNICATIONS_DEV_EMAIL_ENABLED: "true",
+            EMAIL_PROVIDER: "GMAIL",
+        };
+        const emailService = {
+            async sendEmail(message) {
+                sent.push(message);
+                return { messageId: "verified-account-email-1" };
+            },
+        };
+        const result = await sendAdminEmail({
+            to: "verified.worker@example.test",
+            subject: "Account update",
+            text: "Your account has an update.",
+        }, { environment, emailService, verifiedRecipient: true });
+
+        assert.equal(result.status, "PROVIDER_ACCEPTED");
+        assert.equal(sent[0].to, "verified.worker@example.test");
+        await assert.rejects(() => sendAdminEmail({
+            to: "verified.worker@example.test",
+            subject: "Account update",
+            text: "Your account has an update.",
+        }, { environment, emailService }), {
+            code: "EMAIL_DEVELOPMENT_ALLOWLIST_EMPTY",
+        });
+        await assert.rejects(() => sendAdminEmail({
+            to: "verified.worker@example.test",
+            subject: "Account update",
+            text: "Your account has an update.",
+        }, {
+            environment: { ...environment, COMMUNICATIONS_DEV_EMAIL_ENABLED: "false" },
+            emailService,
+            verifiedRecipient: true,
+        }), { code: "EMAIL_DEVELOPMENT_DELIVERY_DISABLED" });
+        assert.equal(sent.length, 1);
+    });
+
     test("admin notification email reaches the configured SMTP transport", async () => {
         const environment = {
             NODE_ENV: "development",
@@ -1240,14 +1281,12 @@ test("email service reports only SMTP acceptance and rejects malformed addresses
         }
     });
 
-    test("development admin SMS and email dispatch through mocked Mobile Sasa and SMTP", async () => {
+    test("verified development account SMS and email dispatch without allowlists", async () => {
         const environment = {
             NODE_ENV: "development",
             COMMUNICATIONS_DEV_DELIVERY_ENABLED: "true",
             COMMUNICATIONS_DEV_SMS_ENABLED: "true",
             COMMUNICATIONS_DEV_EMAIL_ENABLED: "true",
-            COMMUNICATIONS_DEV_ALLOWED_PHONES: "+254712345678",
-            COMMUNICATIONS_DEV_ALLOWED_EMAILS: "worker@example.test",
             TRANSACTIONAL_SMS_PROVIDER: "MOBILE_SASA",
             MOBILESASA_NOTIFICATION_SMS_ENABLED: "true",
             MOBILESASA_SMS_ENABLED: "false",
@@ -1312,6 +1351,7 @@ test("email service reports only SMTP acceptance and rejects malformed addresses
             }),
             sendEmail: (message) => sendAdminEmail(message, {
                 environment,
+                verifiedRecipient: true,
                 emailService: {
                     async sendEmail(input) {
                         sentEmail.push(input);

@@ -11,16 +11,22 @@ const auditLogRoutes = require("../src/routes/auditLogRoutes");
 const { writeAuditLog } = require("../src/utils/auditLog");
 const { requireAuth } = require("../src/middleware/authMiddleware");
 const { generateToken } = require("../src/utils/token");
+const authEmailService = require("../src/services/authEmailService");
 
 process.env.JWT_SECRET ||= "micopesa-auth-audit-test-secret";
 
 const originalQuery = pool.query;
+const originalConnect = pool.connect;
 const originalCompare = bcrypt.compare;
 const originalJwtSecret = process.env.JWT_SECRET;
+const originalEnforceRequestLimits = authEmailService.enforceRequestLimits;
+authEmailService.enforceRequestLimits = async () => {};
 
 after(() => {
     pool.query = originalQuery;
+    pool.connect = originalConnect;
     bcrypt.compare = originalCompare;
+    authEmailService.enforceRequestLimits = originalEnforceRequestLimits;
     process.env.JWT_SECRET = originalJwtSecret;
 });
 
@@ -141,9 +147,20 @@ test("authenticated logout records one LOGOUT event using middleware identity", 
                 is_temp_password: false,
             }] };
         }
-        if (sql.includes("INSERT INTO audit_logs")) return { rows: [], rowCount: 1 };
         assert.fail(`Unexpected query: ${sql}`);
     };
+    pool.connect = async () => ({
+        async query(sql, params = []) {
+            calls.push({ sql, params });
+            if (sql === "BEGIN" || sql === "COMMIT") return { rows: [] };
+            if (sql.includes("UPDATE users") && sql.includes("auth_version = auth_version + 1")) {
+                return { rows: [{ user_id: params[0] }] };
+            }
+            if (sql.includes("INSERT INTO audit_logs")) return { rows: [], rowCount: 1 };
+            assert.fail(`Unexpected client query: ${sql}`);
+        },
+        release() {},
+    });
 
     const req = {
         path: "/logout",
@@ -165,8 +182,51 @@ test("authenticated logout records one LOGOUT event using middleware identity", 
     assert.deepEqual(logoutEvents[0].params.slice(0, 4), [
         "database-user", "LOGOUT", "AUTHENTICATION", "database-user",
     ]);
-    assert.deepEqual(JSON.parse(logoutEvents[0].params[4]), { role: "FUND_MANAGER" });
+    assert.deepEqual(JSON.parse(logoutEvents[0].params[4]), {
+        role: "FUND_MANAGER",
+        revokedSessions: "ALL",
+    });
+    assert.ok(calls.some(({ sql }) => sql.includes("auth_version = auth_version + 1")));
     assert.doesNotMatch(logoutEvents[0].params.join(" "), /Bearer |attacker-selected-user/i);
+});
+
+test("logout rolls back token revocation when its audit event cannot be committed", async () => {
+    let authVersion = 3;
+    let rollbackObserved = false;
+    const originalConsoleError = console.error;
+    console.error = () => {};
+    pool.connect = async () => ({
+        async query(sql) {
+            if (sql === "BEGIN") return { rows: [] };
+            if (sql.includes("auth_version = auth_version + 1")) {
+                authVersion += 1;
+                return { rows: [{ user_id: "database-user" }] };
+            }
+            if (sql.includes("INSERT INTO audit_logs")) {
+                throw Object.assign(new Error("audit persistence failed"), { code: "23503" });
+            }
+            if (sql === "ROLLBACK") {
+                authVersion = 3;
+                rollbackObserved = true;
+                return { rows: [] };
+            }
+            assert.fail(`Unexpected client query: ${sql}`);
+        },
+        release() {},
+    });
+
+    try {
+        const res = response();
+        await authController.logout({
+            user: { userId: "database-user", role: "WORKER" },
+        }, res);
+
+        assert.equal(res.statusCode, 500);
+        assert.equal(authVersion, 3);
+        assert.equal(rollbackObserved, true);
+    } finally {
+        console.error = originalConsoleError;
+    }
 });
 
 test("unauthenticated or expired logout requests cannot create audit records", async () => {
@@ -233,6 +293,7 @@ test("audit insert diagnostics report only the action, entity and sanitized erro
 
 test("login and explicit logout audit events are returned by the authenticated system audit API", async (t) => {
     const auditRows = [];
+    let authVersion = 3;
     bcrypt.compare = async (password, hash) => password === "correct-password" && hash === "stored-hash";
     pool.query = async (sql, params = []) => {
         if (sql.includes("FROM users") && sql.includes("login_method = 'PHONE'")) {
@@ -254,7 +315,7 @@ test("login and explicit logout audit events are returned by the authenticated s
                     user_id: user.user_id,
                     role: user.role,
                     account_status: user.account_status,
-                    auth_version: user.auth_version,
+                    auth_version: authVersion,
                     force_password_change: false,
                     is_temp_password: false,
                 }] : [],
@@ -279,6 +340,31 @@ test("login and explicit logout audit events are returned by the authenticated s
         }
         assert.fail(`Unexpected query: ${sql}`);
     };
+    pool.connect = async () => ({
+        async query(sql, params = []) {
+            if (sql === "BEGIN" || sql === "COMMIT") return { rows: [] };
+            if (sql.includes("UPDATE users") && sql.includes("auth_version = auth_version + 1")) {
+                authVersion += 1;
+                return { rows: [{ user_id: params[0] }] };
+            }
+            if (sql.includes("INSERT INTO audit_logs")) {
+                auditRows.push({
+                    log_id: `audit-${auditRows.length + 1}`,
+                    user_id: params[0],
+                    action_type: params[1],
+                    entity_name: params[2],
+                    entity_id: params[3],
+                    details: params[4] ? JSON.parse(params[4]) : null,
+                    timestamp: new Date(Date.now() + auditRows.length).toISOString(),
+                    full_name: "Audit Test User",
+                    user_role: "ADMIN",
+                });
+                return { rows: [], rowCount: 1 };
+            }
+            assert.fail(`Unexpected client query: ${sql}`);
+        },
+        release() {},
+    });
 
     const app = express();
     app.use(express.json());
@@ -306,8 +392,18 @@ test("login and explicit logout audit events are returned by the authenticated s
     assert.equal(logoutResponse.status, 200);
     assert.match((await logoutResponse.json()).message, /recorded/i);
 
-    const logsResponse = await fetch(`${baseUrl}/api/audit-logs/system`, {
+    const revokedTokenResponse = await fetch(`${baseUrl}/api/audit-logs/system`, {
         headers: { Authorization: `Bearer ${session.token}` },
+    });
+    assert.equal(revokedTokenResponse.status, 401);
+
+    const replacementToken = generateToken({
+        userId: "auth-audit-user",
+        role: "ADMIN",
+        authVersion,
+    });
+    const logsResponse = await fetch(`${baseUrl}/api/audit-logs/system`, {
+        headers: { Authorization: `Bearer ${replacementToken}` },
     });
     assert.equal(logsResponse.status, 200);
     const { data: logs } = await logsResponse.json();

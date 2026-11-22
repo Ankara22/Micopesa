@@ -43,6 +43,7 @@ function enabledEnvironment(outcome = "UNKNOWN") {
         MPESA_PAYMENT_PROVIDER: "SIMULATOR",
         MPESA_SIMULATOR_ENABLED: "true",
         MPESA_SIMULATOR_OUTCOME: outcome,
+        MPESA_LEDGER_ENFORCEMENT_ENABLED: "false",
     };
 }
 
@@ -358,7 +359,7 @@ async function startRouteApi() {
 
 pool.query = async (sql, params = []) => {
     routeQueries.push(sql.replace(/\s+/g, " ").trim());
-    if (sql.includes("SELECT user_id, role, account_status, auth_version")) {
+    if (/SELECT user_id, role, account_status(?:, approval_status)?, auth_version/.test(sql)) {
         return {
             rows: [{
                 user_id: authenticatedUser.user_id,

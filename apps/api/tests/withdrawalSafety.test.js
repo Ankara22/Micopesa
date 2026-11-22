@@ -164,9 +164,16 @@ class MockWithdrawalDatabase {
                     const user = db.users.get(values[0]);
                     return { rows: user?.role === "WORKER" ? [{ ...user }] : [] };
                 }
-                if (statement.startsWith("SELECT account_id FROM withdrawal_claims WHERE claim_id = $1")) {
+                if (statement.startsWith("SELECT wc.account_id, pa.user_id FROM withdrawal_claims")) {
                     const claim = findClaim(values[0]);
-                    return { rows: claim ? [{ account_id: claim.account_id }] : [] };
+                    const account = claim && db.accounts.find((item) =>
+                        item.account_id === claim.account_id
+                    );
+                    return {
+                        rows: claim && account
+                            ? [{ account_id: claim.account_id, user_id: account.user_id }]
+                            : [],
+                    };
                 }
                 if (statement.startsWith("SELECT claim_id, account_id, claim_status, amount_requested")) {
                     const claim = findClaim(values[0]);
@@ -343,7 +350,7 @@ test("worker claim history sanitizes database diagnostics and exposes no query p
             return { rows: [{ account_id: "account-1" }] };
         }
         assert.match(statement, /withdrawal_reason/);
-        assert.match(statement, /WHERE account_id = \$1/);
+        assert.match(statement, /WHERE (?:wc\.)?account_id = \$1/);
         throw Object.assign(new Error('column "withdrawal_reason" does not exist'), {
             code: "42703",
             position: "147",
@@ -396,6 +403,29 @@ test("pending claim restriction rejects another submission", async () => {
     const result = await submit(10);
     assert.equal(result.statusCode, 409);
     assert.equal(database.claims.length, 1);
+});
+
+test("withdrawal amount rejects exponent notation, excess precision, and values above numeric range", async () => {
+    const database = new MockWithdrawalDatabase();
+    useDatabase(database);
+
+    for (const amount of ["1e2", "1.001", "0", "-1", "10000000000.00"]) {
+        const result = await submit(amount);
+        assert.equal(result.statusCode, 400, String(amount));
+    }
+
+    assert.equal(database.connectCount, 0);
+    assert.equal(database.claims.length, 0);
+});
+
+test("withdrawal amount retains valid two-decimal precision in the database request", async () => {
+    const database = new MockWithdrawalDatabase();
+    useDatabase(database);
+
+    const result = await submit("25.50");
+
+    assert.equal(result.statusCode, 201);
+    assert.equal(database.claims[0].amount_requested, "25.50");
 });
 
 test("pending claims block a request but are not subtracted as approved reservations", async () => {

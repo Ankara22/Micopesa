@@ -16,7 +16,7 @@ const enabledEnvironment = {
     COMMUNICATIONS_DEV_ALLOWED_EMAILS: "  Tester@Example.Test ",
 };
 
-test("development delivery supports registered recipients without reading manual allowlists", () => {
+test("development delivery normalizes and enforces configured manual recipient allowlists", () => {
     assert.equal(normalizeRecipient("SMS", " +254 (712) 345-678 "), "+254712345678");
     assert.equal(normalizeRecipient("EMAIL", " Tester@Example.Test "), "tester@example.test");
     assert.equal(isDevelopmentChannelConfigured("SMS", enabledEnvironment), true);
@@ -41,6 +41,39 @@ test("development delivery supports registered recipients without reading manual
         ...enabledEnvironment,
         COMMUNICATIONS_DEV_ALLOWED_EMAILS: "invalid",
     }), { code: "EMAIL_DEVELOPMENT_ALLOWLIST_EMPTY" });
+});
+
+test("verified account contacts do not require channel allowlists but still require enabled delivery", () => {
+    const environment = {
+        ...enabledEnvironment,
+        COMMUNICATIONS_DEV_ALLOWED_PHONES: "",
+        COMMUNICATIONS_DEV_ALLOWED_EMAILS: "",
+    };
+
+    assert.doesNotThrow(() => assertDevelopmentRecipientAllowed(
+        "SMS",
+        "+254712345678",
+        environment,
+        { verifiedRecipient: true }
+    ));
+    assert.doesNotThrow(() => assertDevelopmentRecipientAllowed(
+        "EMAIL",
+        "worker@example.test",
+        environment,
+        { verifiedRecipient: true }
+    ));
+    assert.throws(() => assertDevelopmentRecipientAllowed(
+        "SMS",
+        "+254712345678",
+        { ...environment, COMMUNICATIONS_DEV_SMS_ENABLED: "false" },
+        { verifiedRecipient: true }
+    ), { code: "SMS_DEVELOPMENT_DELIVERY_DISABLED" });
+    assert.throws(() => assertDevelopmentRecipientAllowed(
+        "SMS",
+        "not-a-phone",
+        environment,
+        { verifiedRecipient: true }
+    ), { code: "SMS_INVALID_RECIPIENT" });
 });
 
 test("development delivery still fails closed when global or channel switches are disabled", () => {

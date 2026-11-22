@@ -67,7 +67,6 @@ function Notifications() {
     const recipientDropdownRef = useRef(null);
     const requestIdRef = useRef(null);
     const isEssentialOperationalCategory = ESSENTIAL_OPERATIONAL_CATEGORIES.has(form.category);
-    const adminCanOverrideOptionalPreferences = true;
 
     useEffect(() => {
         function closeRecipientDropdown(event) {
@@ -173,17 +172,13 @@ function Notifications() {
         if (channel === "SMS") return selectedRecipients.some((recipient) =>
             recipient.phone_available &&
             recipient.sms_delivery_enabled === true &&
-            recipient.sms_recipient_allowed !== false &&
             (isEssentialOperationalCategory ||
-                adminCanOverrideOptionalPreferences ||
                 recipient.sms_enabled === true)
         );
         if (channel === "EMAIL") return selectedRecipients.some((recipient) =>
             recipient.email_available &&
             recipient.email_delivery_enabled === true &&
-            recipient.email_recipient_allowed !== false &&
             (isEssentialOperationalCategory ||
-                adminCanOverrideOptionalPreferences ||
                 recipient.email_enabled === true)
         );
         return selectedRecipients.some((recipient) =>
@@ -235,14 +230,10 @@ function Notifications() {
             if (!recipient.phone_registered) reasons.push(t("adminNotifications.phoneUnavailable"));
             else if (!recipient.phone_verified) reasons.push(t("adminNotifications.phoneUnverified"));
             if (!isEssentialOperationalCategory &&
-                !adminCanOverrideOptionalPreferences &&
                 recipient.sms_enabled !== true) {
                 reasons.push(t("adminNotifications.smsPreferenceDisabled"));
             }
             if (recipient.sms_delivery_enabled !== true) reasons.push(systemDeliveryStatus(recipient, channel));
-            else if (recipient.sms_recipient_allowed === false) {
-                reasons.push(t("adminNotifications.developmentRecipientNotAllowed"));
-            }
             return reasons.length
                 ? reasons.join("; ")
                 : t("adminNotifications.verifiedPhoneAvailable");
@@ -252,14 +243,10 @@ function Notifications() {
             if (!recipient.email_registered) reasons.push(t("adminNotifications.emailUnavailable"));
             else if (recipient.email_verified !== true) reasons.push(t("adminNotifications.emailUnverified"));
             if (!isEssentialOperationalCategory &&
-                !adminCanOverrideOptionalPreferences &&
                 recipient.email_enabled !== true) {
                 reasons.push(t("adminNotifications.emailPreferenceDisabled"));
             }
             if (recipient.email_delivery_enabled !== true) reasons.push(systemDeliveryStatus(recipient, channel));
-            else if (recipient.email_recipient_allowed === false) {
-                reasons.push(t("adminNotifications.developmentRecipientNotAllowed"));
-            }
             return reasons.length
                 ? reasons.join("; ")
                 : t("adminNotifications.verifiedEmailAvailable");
@@ -877,6 +864,7 @@ function Notifications() {
 
             <Modal
                 open={previewOpen}
+                size="wide"
                 title={t("adminNotifications.previewTitle")}
                 onClose={() => {
                     if (!submitting) setPreviewOpen(false);

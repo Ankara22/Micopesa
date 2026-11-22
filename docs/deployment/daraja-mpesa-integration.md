@@ -289,16 +289,17 @@ it. Do not run any migration or activation merely as a diagnostic step.
 
 ## M-Pesa pension-ledger readiness gate
 
-`MPESA_LEDGER_ENFORCEMENT_ENABLED` controls an opt-in, request-time readiness
-check. It defaults to disabled when unset. When set to the exact string `true`,
-new contribution attempts and retries require the single `pension_ledger` row
-to have status `ACTIVE` before an attempt is created or an STK request is
-dispatched. The repository repeats the check inside the attempt-creation
-transaction and checks again inside a successful settlement transaction before
-financial writes. Missing ledger tables or rows, any non-`ACTIVE` status,
-invalid flag values, and database errors fail closed with a service-unavailable
-error. The check is not run at application startup, so it does not prevent
-unrelated legacy routes from starting.
+`MPESA_LEDGER_ENFORCEMENT_ENABLED` controls the request-time readiness check
+for payment-attempt creation and dispatch. It defaults to enabled when unset;
+an exact `false` is accepted only outside production and production payment
+requests fail closed if enforcement is disabled. New contribution attempts and
+retries require the single `pension_ledger` row to have status `ACTIVE` before
+an attempt is created or an STK request is dispatched. Settlement independently
+requires an `ACTIVE` ledger before financial writes, even when the optional
+non-production dispatch check is disabled. Missing ledger tables or rows, any
+non-`ACTIVE` status, invalid flag values, and database errors fail closed with a
+service-unavailable error. The check is not run at application startup, so it
+does not prevent unrelated routes from starting.
 
 The forward-only
 `database/migration_pension_ledger_mpesa_dispatch_guard.sql` must be applied
@@ -311,19 +312,14 @@ longer block closure. A transaction-scoped advisory lock serializes readiness,
 attempt insertion, settlement, and closure; the application holds it only
 through its database transaction, never while waiting for the provider.
 
-An unset or exact `false` value preserves the previous no-preflight behavior;
-it is not a safe cutover setting while payment dispatch is enabled. For a
-ledger migration rollout, deploy with provider dispatch disabled, explicitly
-set `MPESA_LEDGER_ENFORCEMENT_ENABLED=true` before the migration window, and
-keep it enabled while the ledger is absent or `PREPARING`. Payment initiation
-and retries then remain blocked without preventing unrelated application
-features from operating. Apply the dispatch-guard migration after the ledger
-migration and before enabling provider dispatch. After the approved
-reconciliation and separate ledger activation are complete, verify the ledger
-is `ACTIVE` before enabling provider dispatch. On an unmigrated legacy
-database, the opt-in application gate remains off by default for compatibility;
-after the dispatch-guard migration, the database attempt trigger still rejects
-new attempts unless the ledger is `ACTIVE`. Do not disable the gate to bypass a
+For a ledger migration rollout, keep provider dispatch disabled and enforcement
+enabled while the ledger is absent or `PREPARING`. Payment initiation and
+retries then remain blocked without preventing unrelated application features
+from operating. Apply the dispatch-guard migration after the ledger migration
+and before enabling provider dispatch. After approved reconciliation and
+separate ledger activation are complete, verify the ledger is `ACTIVE` before
+enabling provider dispatch. The database attempt trigger also rejects new
+attempts unless the ledger is `ACTIVE`. Do not disable the gate to bypass a
 readiness failure.
 
 ## Verification

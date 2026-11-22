@@ -804,8 +804,18 @@ test("regulator recipient lookup returns only recipients in active assigned fund
     const queries = [];
     let activeAssignments = ["fund-1"];
     const candidates = [
-        { user_id: "worker-1", scope_fund_id: "fund-1" },
-        { user_id: "worker-2", scope_fund_id: "fund-2" },
+        {
+            user_id: "worker-1",
+            scope_fund_id: "fund-1",
+            delivery_phone: "0700000001",
+            delivery_email: "worker@example.com",
+        },
+        {
+            user_id: "worker-2",
+            scope_fund_id: "fund-2",
+            delivery_phone: "0700000002",
+            delivery_email: "worker2@example.com",
+        },
     ];
     const repository = createNotificationRepository({
         async query(sql, params = []) {
@@ -856,7 +866,14 @@ test("changing a supplied fund identifier cannot bypass regulator recipient scop
             queries.push({ sql, params });
             assert.match(sql, /regulator_fund_assignments/);
             assert.match(sql, /rfa\.active = TRUE|active = TRUE/);
-            return { rows: [{ user_id: "assigned-worker", scope_fund_id: "fund-1" }] };
+            return {
+                rows: [{
+                    user_id: "assigned-worker",
+                    scope_fund_id: "fund-1",
+                    delivery_phone: "0700000001",
+                    delivery_email: "worker@example.com",
+                }],
+            };
         },
         async connect() {
             throw new Error("Not expected");

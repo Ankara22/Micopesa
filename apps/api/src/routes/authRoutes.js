@@ -1,6 +1,5 @@
 ﻿const express = require("express");
 const {
-    register,
     login,
     logout,
     getMe,
@@ -11,13 +10,26 @@ const {
     verifyEmail,
     resendEmailVerification,
 } = require("../controllers/authController");
+const {
+    startRegistration,
+    resendRegistrationCode,
+    completeRegistration,
+} = require("../controllers/workerRegistrationController");
+const {
+    requestCode: requestPhonePasswordResetCode,
+    completeRecovery: completePhonePasswordReset,
+} = require("../controllers/phonePasswordRecoveryController");
 const { requireAuth, requireRole } = require("../middleware/authMiddleware");
 
 const router = express.Router();
 
-router.post("/register", register);
+router.post("/register", startRegistration);
+router.post("/register/resend", resendRegistrationCode);
+router.post("/register/complete", completeRegistration);
 router.post("/login", login);
 router.post("/password-reset/request", requestPasswordReset);
+router.post("/password-reset/phone/request", requestPhonePasswordResetCode);
+router.post("/password-reset/phone/complete", completePhonePasswordReset);
 router.post("/email/verification-request/public", requestPublicEmailVerification);
 router.post("/password-reset", resetPassword);
 router.post("/change-password", requireAuth, changeTemporaryPassword);

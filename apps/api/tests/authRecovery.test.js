@@ -98,6 +98,39 @@ test("legacy phone/password login remains available when the stored email is unv
     assert.equal(verifyTokenString(res.body.data.token).role, "WORKER");
 });
 
+test("login applies the shared IP limit before querying accounts", async () => {
+    const previousEnforceRequestLimits = authEmailService.enforceRequestLimits;
+    let accountLookupAttempted = false;
+    let limitedRequest;
+    authEmailService.enforceRequestLimits = async (input) => {
+        limitedRequest = input;
+        throw Object.assign(new Error("Too many requests. Please try again later."), {
+            status: 429,
+        });
+    };
+    pool.query = async () => {
+        accountLookupAttempted = true;
+        return { rows: [] };
+    };
+
+    try {
+        const res = response();
+        await authController.login({
+            ip: "192.0.2.10",
+            body: { phone: "0712345678", password: "password" },
+        }, res);
+
+        assert.equal(res.statusCode, 429);
+        assert.equal(accountLookupAttempted, false);
+        assert.equal(limitedRequest.req.ip, "192.0.2.10");
+        assert.equal(limitedRequest.action, "LOGIN");
+        assert.equal(limitedRequest.phone, undefined);
+        assert.equal(limitedRequest.email, undefined);
+    } finally {
+        authEmailService.enforceRequestLimits = previousEnforceRequestLimits;
+    }
+});
+
 test("only verified email identifiers are used and the database role is signed at login", async () => {
     let requestedIdentifier;
     pool.query = async (query, values) => {
@@ -295,6 +328,18 @@ test("expired and reused reset tokens are rejected without changing the password
     assert.equal(updateCount, 0);
 });
 
+test("password reset rejects bcrypt-overlong passwords before database access", async () => {
+    pool.connect = async () => assert.fail("Invalid password must not open a database connection.");
+    const res = response();
+
+    await authController.resetPassword({
+        body: { token: "a".repeat(43), password: "a".repeat(73) },
+    }, res);
+
+    assert.equal(res.statusCode, 400);
+    assert.match(res.body.message, /72 UTF-8 bytes/);
+});
+
 test("a valid reset is single-use, changes the password, and invalidates prior access tokens", async () => {
     const token = "unit-test-reset-token-with-enough-entropy";
     const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
@@ -310,6 +355,7 @@ test("a valid reset is single-use, changes the password, and invalidates prior a
     pool.connect = async () => ({
         async query(query, values = []) {
             if (query === "BEGIN" || query === "COMMIT" || query === "ROLLBACK") return { rows: [] };
+            if (query.includes("pg_advisory_xact_lock")) return { rows: [] };
             if (query.includes("FROM pending_registrations")) return { rows: [] };
             if (query.includes("FROM auth_tokens")) {
                 assert.match(query, /consumed_at IS NULL/);
@@ -397,6 +443,7 @@ test("email verification transfers a pending address only once", async () => {
     pool.connect = async () => ({
         async query(query, values = []) {
             if (query === "BEGIN" || query === "COMMIT" || query === "ROLLBACK") return { rows: [] };
+            if (query.includes("pg_advisory_xact_lock")) return { rows: [] };
             if (query.includes("FROM pending_registrations")) return { rows: [] };
             if (query.includes("FROM auth_tokens")) {
                 return values[0] === tokenHash && !state.consumed
@@ -441,6 +488,7 @@ test("expired administrator email-verification tokens are rejected", async () =>
     pool.connect = async () => ({
         async query(query) {
             if (query === "BEGIN" || query === "ROLLBACK") return { rows: [] };
+            if (query.includes("pg_advisory_xact_lock")) return { rows: [] };
             if (query.includes("FROM pending_registrations") || query.includes("FROM auth_tokens")) {
                 return { rows: [] };
             }
@@ -530,6 +578,7 @@ test("email-verification conflicts do not disclose that another account owns the
     pool.connect = async () => ({
         async query(query) {
             if (query === "BEGIN" || query === "ROLLBACK") return { rows: [] };
+            if (query.includes("pg_advisory_xact_lock")) return { rows: [] };
             if (query.includes("FROM pending_registrations")) return { rows: [] };
             if (query.includes("FROM auth_tokens")) {
                 return { rows: [{ auth_token_id: 8, user_id: "user-1", email_address: "claimed@example.com" }] };
@@ -552,7 +601,7 @@ test("email-verification conflicts do not disclose that another account owns the
         assert.equal(res.statusCode, 400);
         assert.equal(
             res.body.message,
-            "This verification link is invalid or expired, or its registration details are incomplete."
+            "This verification link is invalid or expired."
         );
         assert.doesNotMatch(res.body.message, /already in use|claimed@example\.com/i);
     } finally {

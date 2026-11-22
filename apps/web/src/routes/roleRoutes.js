@@ -7,6 +7,7 @@ export const DASHBOARD_BY_ROLE = {
     FUND_MANAGER: "/manager/dashboard",
     REGULATOR: "/regulator/dashboard",
     ADMIN: "/admin/dashboard",
+    PAYOUT_OFFICER: "/payout/authorizations",
 };
 
 // The URL prefix each role's pages live under. Used to validate that a
@@ -18,6 +19,7 @@ export const ROLE_PATH_PREFIX = {
     FUND_MANAGER: "/manager",
     REGULATOR: "/regulator",
     ADMIN: "/admin",
+    PAYOUT_OFFICER: "/payout",
 };
 
 export const PROFILE_BY_ROLE = {
@@ -25,6 +27,7 @@ export const PROFILE_BY_ROLE = {
     FUND_MANAGER: "/manager/profile",
     REGULATOR: "/regulator/profile",
     ADMIN: "/admin/profile",
+    PAYOUT_OFFICER: "/payout/profile",
 };
 
 export const ROLE_LABEL = {
@@ -32,6 +35,7 @@ export const ROLE_LABEL = {
     FUND_MANAGER: "Fund Manager",
     REGULATOR: "Regulator",
     ADMIN: "Administrator",
+    PAYOUT_OFFICER: "Payout Officer",
 };
 
 export const ROLE_NAV = {
@@ -90,5 +94,9 @@ export const ROLE_NAV = {
         { label: "System Activity", translationKey: "navigation.systemActivity", path: "/admin/activity" },
         { label: "System Audit Logs", translationKey: "navigation.systemAuditLogs", path: "/admin/audit-logs" },
         { label: "Profile", translationKey: "navigation.profile", path: "/admin/profile" },
+    ],
+    PAYOUT_OFFICER: [
+        { label: "Withdrawal authorizations", translationKey: "navigation.payoutAuthorizations", path: "/payout/authorizations" },
+        { label: "Profile", translationKey: "navigation.profile", path: "/payout/profile" },
     ],
 };

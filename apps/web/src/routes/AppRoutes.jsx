@@ -1,3 +1,4 @@
+import { lazy, Suspense } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import ProtectedRoute from "../components/ProtectedRoute";
@@ -6,62 +7,58 @@ import AdminLayout from "../layouts/AdminLayout";
 import { DASHBOARD_BY_ROLE } from "./roleRoutes";
 import SkeletonLoader from "../components/ui/SkeletonLoader";
 
-// Public pages
-import Login from "../pages/auth/Login";
-import Register from "../pages/auth/Register";
-import ForgotPassword from "../pages/auth/ForgotPassword";
-import ResetPassword from "../pages/auth/ResetPassword";
-import VerifyEmail from "../pages/auth/VerifyEmail";
-import ChangeTemporaryPassword from "../pages/auth/ChangeTemporaryPassword";
-import Unauthorized from "../pages/Unauthorized";
+const Login = lazy(() => import("../pages/auth/Login"));
+const Register = lazy(() => import("../pages/auth/Register"));
+const ForgotPassword = lazy(() => import("../pages/auth/ForgotPassword"));
+const ResetPassword = lazy(() => import("../pages/auth/ResetPassword"));
+const VerifyEmail = lazy(() => import("../pages/auth/VerifyEmail"));
+const ChangeTemporaryPassword = lazy(() => import("../pages/auth/ChangeTemporaryPassword"));
+const Unauthorized = lazy(() => import("../pages/Unauthorized"));
 
-// Worker pages
-import WorkerDashboard from "../pages/worker/Dashboard";
-import WorkerAnalytics from "../pages/worker/Analytics";
-import WorkerContributions from "../pages/worker/Contributions";
-import WorkerBalanceHistory from "../pages/worker/BalanceHistory";
-import WorkerFunds from "../pages/worker/Funds";
-import WorkerRetirementPlan from "../pages/worker/RetirementPlan";
-import WorkerRetirementProjection from "../pages/worker/RetirementProjection";
-import WorkerWithdrawals from "../pages/worker/Withdrawals";
-import WorkerFinancialLiteracy from "../pages/worker/FinancialLiteracy";
-import WorkerNotifications from "../pages/worker/Notifications";
-import WorkerProfile from "../pages/worker/Profile";
+const WorkerDashboard = lazy(() => import("../pages/worker/Dashboard"));
+const WorkerAnalytics = lazy(() => import("../pages/worker/Analytics"));
+const WorkerContributions = lazy(() => import("../pages/worker/Contributions"));
+const WorkerBalanceHistory = lazy(() => import("../pages/worker/BalanceHistory"));
+const WorkerFunds = lazy(() => import("../pages/worker/Funds"));
+const WorkerRetirementPlan = lazy(() => import("../pages/worker/RetirementPlan"));
+const WorkerRetirementProjection = lazy(() => import("../pages/worker/RetirementProjection"));
+const WorkerWithdrawals = lazy(() => import("../pages/worker/Withdrawals"));
+const WorkerFinancialLiteracy = lazy(() => import("../pages/worker/FinancialLiteracy"));
+const WorkerNotifications = lazy(() => import("../pages/worker/Notifications"));
+const WorkerProfile = lazy(() => import("../pages/worker/Profile"));
 
-// Fund manager pages
-import ManagerDashboard from "../pages/manager/Dashboard";
-import ManagerAnalytics from "../pages/manager/Analytics";
-import ManagerFunds from "../pages/manager/Funds";
-import ManagerWithdrawalRequests from "../pages/manager/WithdrawalRequests";
-import ManagerOperationalReports from "../pages/manager/OperationalReports";
-import ManagerAuditLogs from "../pages/manager/AuditLogs";
-import ManagerProfile from "../pages/manager/Profile";
+const ManagerDashboard = lazy(() => import("../pages/manager/Dashboard"));
+const ManagerAnalytics = lazy(() => import("../pages/manager/Analytics"));
+const ManagerFunds = lazy(() => import("../pages/manager/Funds"));
+const ManagerWithdrawalRequests = lazy(() => import("../pages/manager/WithdrawalRequests"));
+const PayoutAuthorizations = lazy(() => import("../pages/payout/PayoutAuthorizations"));
+const ManagerOperationalReports = lazy(() => import("../pages/manager/OperationalReports"));
+const ManagerAuditLogs = lazy(() => import("../pages/manager/AuditLogs"));
+const ManagerProfile = lazy(() => import("../pages/manager/Profile"));
 
-// Regulator pages
-import RegulatorDashboard from "../pages/regulator/Dashboard";
-import RegulatorAnalytics from "../pages/regulator/Analytics";
-import RegulatorFundOversight from "../pages/regulator/FundOversight";
-import RegulatorComplianceReports from "../pages/regulator/ComplianceReports";
-import RegulatorParameters from "../pages/regulator/RegulatoryParameters";
-import RegulatorKycOversight from "../pages/regulator/KycOversight";
-import RegulatorAuditLogs from "../pages/regulator/AuditLogs";
-import RegulatorProfile from "../pages/regulator/Profile";
-import RoleNotifications from "../pages/notifications/RoleNotifications";
-import NotificationAuditPage from "../pages/notifications/NotificationAuditPage";
-import ReportsPage from "../pages/reports/ReportsPage";
+const RegulatorDashboard = lazy(() => import("../pages/regulator/Dashboard"));
+const RegulatorAnalytics = lazy(() => import("../pages/regulator/Analytics"));
+const RegulatorFundOversight = lazy(() => import("../pages/regulator/FundOversight"));
+const RegulatorComplianceReports = lazy(() => import("../pages/regulator/ComplianceReports"));
+const RegulatorParameters = lazy(() => import("../pages/regulator/RegulatoryParameters"));
+const RegulatorKycOversight = lazy(() => import("../pages/regulator/KycOversight"));
+const RegulatorAuditLogs = lazy(() => import("../pages/regulator/AuditLogs"));
+const RegulatorProfile = lazy(() => import("../pages/regulator/Profile"));
+const RoleNotifications = lazy(() => import("../pages/notifications/RoleNotifications"));
+const NotificationAuditPage = lazy(() => import("../pages/notifications/NotificationAuditPage"));
+const ReportsPage = lazy(() => import("../pages/reports/ReportsPage"));
 
-// Admin pages
-import AdminDashboard from "../pages/admin/Dashboard";
-import AdminKycReview from "../pages/admin/KycReview";
-import AdminAnalytics from "../pages/admin/Analytics";
-import AdminUserManagement from "../pages/admin/UserManagement";
-import AdminRolesPermissions from "../pages/admin/RolesPermissions";
-import AdminRegulatorScopes from "../pages/admin/RegulatorScopes";
-import AdminSystemSettings from "../pages/admin/SystemSettings";
-import AdminNotifications from "../pages/admin/Notifications";
-import AdminSystemActivity from "../pages/admin/SystemActivity";
-import AdminAuditLogs from "../pages/admin/AuditLogs";
-import AdminProfile from "../pages/admin/Profile";
+const AdminDashboard = lazy(() => import("../pages/admin/Dashboard"));
+const AdminKycReview = lazy(() => import("../pages/admin/KycReview"));
+const AdminAnalytics = lazy(() => import("../pages/admin/Analytics"));
+const AdminUserManagement = lazy(() => import("../pages/admin/UserManagement"));
+const AdminRolesPermissions = lazy(() => import("../pages/admin/RolesPermissions"));
+const AdminRegulatorScopes = lazy(() => import("../pages/admin/RegulatorScopes"));
+const AdminSystemSettings = lazy(() => import("../pages/admin/SystemSettings"));
+const AdminNotifications = lazy(() => import("../pages/admin/Notifications"));
+const AdminSystemActivity = lazy(() => import("../pages/admin/SystemActivity"));
+const AdminAuditLogs = lazy(() => import("../pages/admin/AuditLogs"));
+const AdminProfile = lazy(() => import("../pages/admin/Profile"));
 
 /** Sends "/" to the signed-in user's own dashboard, or to /login otherwise. */
 function HomeRedirect() {
@@ -80,6 +77,9 @@ function HomeRedirect() {
 
 function AppRoutes() {
     return (
+        <Suspense fallback={
+            <SkeletonLoader variant="dashboard" count={3} label="Loading page" />
+        }>
         <Routes>
             <Route path="/" element={<HomeRedirect />} />
             <Route path="/login" element={<Login />} />
@@ -185,8 +185,21 @@ function AppRoutes() {
                 <Route path="/admin/profile" element={<AdminProfile />} />
             </Route>
 
+            {/* PAYOUT_OFFICER */}
+            <Route
+                element={
+                    <ProtectedRoute allowedRoles={["PAYOUT_OFFICER"]}>
+                        <AppLayout />
+                    </ProtectedRoute>
+                }
+            >
+                <Route path="/payout/authorizations" element={<PayoutAuthorizations />} />
+                <Route path="/payout/profile" element={<ManagerProfile />} />
+            </Route>
+
             <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
+        </Suspense>
     );
 }
 

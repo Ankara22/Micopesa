@@ -408,7 +408,7 @@ async function enforceRateLimit({ scope, action, key, limit, windowMinutes = 60 
     }
 }
 
-async function enforceRequestLimits({ req, action, email, userId }) {
+async function enforceRequestLimits({ req, action, email, phone, userId }) {
     await enforceRateLimit({
         scope: "IP",
         action,
@@ -417,6 +417,9 @@ async function enforceRequestLimits({ req, action, email, userId }) {
     });
     if (email) {
         await enforceRateLimit({ scope: "EMAIL", action, key: email, limit: 5 });
+    }
+    if (phone) {
+        await enforceRateLimit({ scope: "PHONE", action, key: phone, limit: 5 });
     }
     if (userId) {
         await enforceRateLimit({ scope: "ACCOUNT", action, key: userId, limit: 5 });

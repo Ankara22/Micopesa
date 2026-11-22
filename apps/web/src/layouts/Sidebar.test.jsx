@@ -24,6 +24,7 @@ const KNOWN_PATHS = new Set([
     "/admin/kyc-review",
     "/admin/notifications", "/admin/activity", "/admin/audit-logs", "/admin/profile",
     "/admin/regulator-scopes", "/admin/notification-audit-log", "/admin/reports", "/admin/report-history",
+    "/payout/authorizations", "/payout/profile",
 ]);
 
 describe("role-aware sidebar", () => {

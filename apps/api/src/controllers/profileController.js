@@ -27,7 +27,7 @@ const PROFILE_USER_FIELDS = [
 const PROFILE_FIELDS = [
     ...PROFILE_USER_FIELDS,
     "kyc.date_of_birth::text AS date_of_birth",
-    "right(kyc.national_id, 4) AS national_id_last_four",
+    "kyc.national_id_last_four",
     "kyc.kyc_status",
 ];
 
@@ -61,8 +61,9 @@ function sendProfile(res, user) {
 }
 
 function maskNationalId(lastFourDigits) {
-    return typeof lastFourDigits === "string" && /^\d{4}$/.test(lastFourDigits)
-        ? `****${lastFourDigits}`
+    const normalized = typeof lastFourDigits === "string" ? lastFourDigits.trim() : "";
+    return /^\d{4}$/.test(normalized)
+        ? `****${normalized}`
         : null;
 }
 

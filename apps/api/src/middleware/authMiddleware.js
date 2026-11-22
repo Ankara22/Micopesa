@@ -5,7 +5,7 @@
  * attaches { userId, role } to req.user for downstream handlers.
  */
 const pool = require("../db/database");
-const VALID_ROLES = ["WORKER", "FUND_MANAGER", "REGULATOR", "ADMIN"];
+const VALID_ROLES = ["WORKER", "FUND_MANAGER", "REGULATOR", "ADMIN", "PAYOUT_OFFICER"];
 
 async function requireAuth(req, res, next) {
     const authHeader = req.headers.authorization;
@@ -52,8 +52,9 @@ async function requireAuth(req, res, next) {
     let result;
     try {
         result = await pool.query(
-            `SELECT user_id, role, account_status, auth_version, force_password_change,
-                    is_temp_password FROM users WHERE user_id = $1`,
+            `SELECT user_id, role, account_status, auth_version,
+                    force_password_change, is_temp_password
+             FROM users WHERE user_id = $1`,
             [decoded.userId]
         );
     } catch (error) {
@@ -83,7 +84,6 @@ async function requireAuth(req, res, next) {
             message: "This account is not active",
         });
     }
-
     const authVersion = Number.isInteger(user.auth_version) ? user.auth_version : 0;
     if (
         (decoded.authVersion === undefined ? authVersion !== 0 : decoded.authVersion !== authVersion) ||

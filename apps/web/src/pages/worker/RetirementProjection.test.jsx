@@ -197,9 +197,9 @@ describe("RetirementProjection", () => {
         fireEvent.submit(screen.getByRole("button", { name: "Calculate Projection" }).closest("form"));
 
         await waitFor(() => expect(serviceMocks.saveMyPlan).toHaveBeenCalledWith({
-            target_amount: 1000000,
+            target_amount: "1000000.00",
             target_retirement_age: 35,
-            monthly_contribution_target: 300,
+            monthly_contribution_target: "300.00",
         }));
         expect(await screen.findByText("Your retirement plan and projection have been updated.")).toBeInTheDocument();
     });

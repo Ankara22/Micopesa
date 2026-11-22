@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const bcrypt = require("bcrypt");
 const pool = require("../src/db/database");
 const authController = require("../src/controllers/authController");
+const authEmailService = require("../src/services/authEmailService");
 const { requireAuth } = require("../src/middleware/authMiddleware");
 const { generateToken, verifyTokenString } = require("../src/utils/token");
 
@@ -12,6 +13,7 @@ const originalQuery = pool.query;
 const originalConnect = pool.connect;
 const originalCompare = bcrypt.compare;
 const originalHash = bcrypt.hash;
+const originalEnforceRequestLimits = authEmailService.enforceRequestLimits;
 const originalJwtSecret = process.env.JWT_SECRET;
 const settingsRows = [
     { setting_key: "assumed_yearly_growth", setting_value: "8" },
@@ -25,6 +27,7 @@ after(() => {
     pool.connect = originalConnect;
     bcrypt.compare = originalCompare;
     bcrypt.hash = originalHash;
+    authEmailService.enforceRequestLimits = originalEnforceRequestLimits;
     process.env.JWT_SECRET = originalJwtSecret;
 });
 
@@ -44,6 +47,7 @@ function response() {
 }
 
 test("a failed password increments the account counter using configured lockout limits", async () => {
+    authEmailService.enforceRequestLimits = async () => {};
     let update;
     pool.query = async (query, values = []) => {
         if (query.includes("SELECT setting_key, setting_value")) return { rows: settingsRows };
@@ -123,4 +127,17 @@ test("changing a temporary password clears the forced state and rotates the auth
     assert.equal(res.statusCode, 200);
     assert.equal(statements.at(-1).query, "COMMIT");
     assert.equal(verifyTokenString(res.body.data.token).authVersion, 4);
+});
+
+test("temporary password change rejects bcrypt-overlong passwords before database access", async () => {
+    pool.connect = async () => assert.fail("Invalid password must not open a database connection.");
+    const res = response();
+
+    await authController.changeTemporaryPassword({
+        user: { userId: "staff-user" },
+        body: { new_password: "a".repeat(73) },
+    }, res);
+
+    assert.equal(res.statusCode, 400);
+    assert.match(res.body.message, /72 UTF-8 bytes/);
 });

@@ -27,6 +27,7 @@ test("development notification SMS uses a distinct explicit switch from phone ve
         MOBILESASA_NOTIFICATION_SMS_ENABLED: "true",
         MOBILESASA_TEST_SMS_ENABLED: "false",
         MOBILESASA_SMS_ENABLED: "false",
+        COMMUNICATIONS_DEV_ALLOWED_PHONES: "",
     });
     const availability = getNotificationChannelAvailability("SMS", environment);
     assert.equal(availability.enabled, true);

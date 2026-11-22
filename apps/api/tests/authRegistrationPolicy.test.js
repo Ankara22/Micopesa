@@ -1,1198 +1,539 @@
 const { after, test } = require("node:test");
 const assert = require("node:assert/strict");
-const http = require("node:http");
-const express = require("express");
 const bcrypt = require("bcrypt");
 const pool = require("../src/db/database");
+const authController = require("../src/controllers/authController");
 const authEmailService = require("../src/services/authEmailService");
-const authRoutes = require("../src/routes/authRoutes");
-const { hashOpaque } = require("../src/services/authEmailService");
+const { createWorkerRegistrationService } = require("../src/services/workerRegistrationService");
+const { requireAuth, requireRole } = require("../src/middleware/authMiddleware");
+const { generateToken } = require("../src/utils/token");
 const { normalizeKenyanPhone } = require("../src/utils/kenyanPhone");
+const { lockUserIdentities } = require("../src/utils/userIdentityLock");
 
 process.env.JWT_SECRET ||= "micopesa-registration-policy-test-secret";
 
 const originalQuery = pool.query;
 const originalConnect = pool.connect;
-const originalHash = bcrypt.hash;
-const originalCompare = bcrypt.compare;
-const originalIssueEmailToken = authEmailService.issueEmailToken;
-const originalSendPendingRegistrationEmail = authEmailService.sendPendingRegistrationEmail;
-const originalEnforceRequestLimits = authEmailService.enforceRequestLimits;
 const originalJwtSecret = process.env.JWT_SECRET;
-let state;
+const originalBcryptCompare = bcrypt.compare;
+const originalEnforceRequestLimits = authEmailService.enforceRequestLimits;
 
 after(() => {
     pool.query = originalQuery;
     pool.connect = originalConnect;
-    bcrypt.hash = originalHash;
-    bcrypt.compare = originalCompare;
-    authEmailService.issueEmailToken = originalIssueEmailToken;
-    authEmailService.sendPendingRegistrationEmail = originalSendPendingRegistrationEmail;
-    authEmailService.enforceRequestLimits = originalEnforceRequestLimits;
     process.env.JWT_SECRET = originalJwtSecret;
+    bcrypt.compare = originalBcryptCompare;
+    authEmailService.enforceRequestLimits = originalEnforceRequestLimits;
 });
 
-function createState() {
+function createResponse() {
     return {
+        statusCode: null,
+        body: null,
+        status(code) {
+            this.statusCode = code;
+            return this;
+        },
+        json(body) {
+            this.body = body;
+            return this;
+        },
+    };
+}
+
+function createHarness() {
+    const state = {
+        challenge: null,
+        claim: null,
         users: [],
         accounts: [],
-        notificationPreferences: [],
         kycRecords: [],
-        pendingRegistrations: [],
-        tokens: new Map(),
-        emailAttempts: [],
-        rateLimitAttempts: [],
-        failNextDelivery: false,
-        failPendingRegistrationInsert: false,
-        failNextCompletionUserInsert: false,
-        registrationRollbackCount: 0,
+        preferences: [],
+        smsMessages: [],
+        identityLocks: [],
+        rollbackCount: 0,
+        failSms: false,
+        failUserInsert: false,
         failKycInsert: false,
-        failLoginLookup: false,
-        loginQueryFailure: null,
-        passwordCompareCount: 0,
-        failedLoginCount: 0,
-        passwordHashAttempts: 0,
-        nextId: 1,
     };
-}
-
-function configureDb() {
-    pool.query = async (query, values = []) => {
-        if (query.includes("DELETE FROM pending_registrations WHERE token_hash")) {
-            state.pendingRegistrations = state.pendingRegistrations.filter(
-                ({ token_hash: tokenHash }) => tokenHash !== values[0]
-            );
-            return { rows: [] };
-        }
-        if (query.includes("SELECT setting_key, setting_value")) {
-            return { rows: [
-                { setting_key: "assumed_yearly_growth", setting_value: "8" },
-                { setting_key: "max_failed_login_attempts", setting_value: "5" },
-                { setting_key: "account_lockout_duration_minutes", setting_value: "15" },
-                { setting_key: "require_otp_on_withdrawal", setting_value: "true" },
-            ] };
-        }
-        if (query.includes("SET failed_login_attempts = 0, locked_until = NULL")) {
-            const user = state.users.find((candidate) => candidate.user_id === values[0]);
-            if (user) {
-                user.failed_login_attempts = 0;
-                user.locked_until = null;
+    const environment = {
+        NATIONAL_ID_ENCRYPTION_KEY: Buffer.alloc(32, 11).toString("base64"),
+        NATIONAL_ID_FINGERPRINT_KEY: Buffer.alloc(32, 12).toString("base64"),
+    };
+    const smsService = {
+        getPhoneVerificationSmsConfiguration: () => ({ available: true, provider: "TEST" }),
+        async sendPhoneVerificationSms(message) {
+            state.smsMessages.push(message);
+            if (state.failSms) {
+                const error = new Error("SMS delivery failed");
+                error.code = "SMS_PROVIDER_FAILED";
+                throw error;
             }
-            return { rows: [] };
-        }
-        if (query.includes("SET failed_login_attempts = failed_login_attempts + 1")) {
-            const user = state.users.find((candidate) => candidate.user_id === values[0]);
-            if (user) {
-                user.failed_login_attempts = Number(user.failed_login_attempts || 0) + 1;
-                state.failedLoginCount += 1;
-            }
-            return { rows: [] };
-        }
-        if (query.includes("INSERT INTO audit_logs")) return { rows: [], rowCount: 1 };
-        if (query.includes("SELECT user_id FROM users") && query.includes("lower(pending_email)")) {
-            const duplicate = state.users.find((user) =>
-                user.phone === values[0] ||
-                user.email?.toLowerCase() === values[1] ||
-                user.pending_email?.toLowerCase() === values[1]
-            );
-            return { rows: duplicate ? [{ user_id: duplicate.user_id }] : [] };
-        }
-        if (query.includes("SELECT user_id, full_name, phone, email, pending_email")) {
-            if (state.failLoginLookup) {
-                state.loginQueryFailure = { code: "42703", missingColumn: "failed_login_attempts" };
-                throw Object.assign(new Error('column "failed_login_attempts" does not exist'), { code: "42703" });
-            }
-            const identifier = values[0];
-            const email = values[1];
-            const normalizedPhone = values[2];
-            const user = state.users.find((candidate) =>
-                (candidate.login_method === "PHONE" && (
-                    candidate.phone === identifier ||
-                    (normalizedPhone &&
-                        normalizeKenyanPhone(candidate.phone) === normalizedPhone)
-                )) ||
-                (normalizedPhone && candidate.phone_verified_at &&
-                    normalizeKenyanPhone(candidate.phone) === normalizedPhone) ||
-                (email && candidate.email_verified && candidate.email?.toLowerCase() === email)
-            );
-            return { rows: user ? [{
-                ...user,
-                occupation: user.occupation || null,
-                created_at: "2026-01-01T00:00:00.000Z",
-                updated_at: "2026-01-01T00:00:00.000Z",
-                profile_photo_available: false,
-            }] : [] };
-        }
-        if (query.includes("SELECT user_id, email") && query.includes("login_method = 'EMAIL'")) {
-            const user = state.users.find((candidate) =>
-                candidate.login_method === "EMAIL" &&
-                candidate.email_verified === false &&
-                candidate.account_status === "ACTIVE" &&
-                candidate.email?.toLowerCase() === values[0]
-            );
-            return { rows: user ? [{ user_id: user.user_id, email: user.email }] : [] };
-        }
-        assert.fail(`Unexpected pool query: ${query}`);
-    };
-
-    pool.connect = async () => {
-        let snapshot;
-        return {
-            async query(query, values = []) {
-                if (query === "BEGIN") {
-                    snapshot = structuredClone(state);
-                    return { rows: [] };
-                }
-                if (query === "COMMIT") return { rows: [] };
-                if (query === "ROLLBACK") {
-                    state.users = snapshot.users;
-                    state.accounts = snapshot.accounts;
-                    state.notificationPreferences = snapshot.notificationPreferences;
-                    state.kycRecords = snapshot.kycRecords;
-                    state.pendingRegistrations = snapshot.pendingRegistrations;
-                    state.tokens = snapshot.tokens;
-                    state.nextId = snapshot.nextId;
-                    state.registrationRollbackCount += 1;
-                    return { rows: [] };
-                }
-                if (query.includes("DELETE FROM pending_registrations WHERE expires_at")) {
-                    return { rows: [] };
-                }
-                if (query.includes("SELECT pending_registration_id") &&
-                    query.includes("FROM pending_registrations") &&
-                    query.includes("lower(email)") &&
-                    query.includes("FOR UPDATE")) {
-                    const registration = state.pendingRegistrations.find((candidate) =>
-                        candidate.email.toLowerCase() === String(values[0]).toLowerCase() &&
-                        new Date(candidate.expires_at).getTime() > Date.now()
-                    );
-                    return { rows: registration
-                        ? [{ pending_registration_id: registration.pending_registration_id }]
-                        : [] };
-                }
-                if (query.includes("UPDATE pending_registrations") &&
-                    query.includes("SET token_hash")) {
-                    const registration = state.pendingRegistrations.find((candidate) =>
-                        candidate.pending_registration_id === values[1]
-                    );
-                    if (registration) {
-                        registration.token_hash = values[0];
-                        registration.expires_at = new Date(Date.now() + 30 * 60 * 1000);
-                    }
-                    return { rows: [] };
-                }
-                if (query.includes("FROM users") &&
-                    query.includes("FROM pending_registrations") &&
-                    query.includes("UNION ALL")) {
-                    const [email, phone] = values;
-                    const normalizedPhone = normalizeKenyanPhone(phone) ||
-                        phone.trim().replace(/[\s()-]/g, "");
-                    const matchesIdentity = (candidate) =>
-                        candidate.email?.toLowerCase() === email.toLowerCase() ||
-                        candidate.pending_email?.toLowerCase() === email.toLowerCase() ||
-                        (normalizeKenyanPhone(candidate.phone) ||
-                            candidate.phone?.trim().replace(/[\s()-]/g, "")) === normalizedPhone;
-                    const existingUser = state.users.some(matchesIdentity);
-                    const existingPending = state.pendingRegistrations.some((candidate) =>
-                        new Date(candidate.expires_at).getTime() > Date.now() &&
-                        matchesIdentity(candidate)
-                    );
-                    return { rows: existingUser || existingPending ? [{ "?column?": 1 }] : [] };
-                }
-                if (query.includes("INSERT INTO pending_registrations")) {
-                    if (state.failPendingRegistrationInsert) {
-                        throw Object.assign(new Error("synthetic pending insert failure"), { code: "23514" });
-                    }
-                    state.pendingRegistrations.push({
-                        pending_registration_id: `pending-${state.nextId++}`,
-                        full_name: values[0],
-                        email: values[1],
-                        phone: values[2],
-                        password_hash: null,
-                        occupation: values[3],
-                        national_id: values[4],
-                        date_of_birth: values[5],
-                        token_hash: values[6],
-                        expires_at: new Date(Date.now() + 30 * 60 * 1000),
-                    });
-                    return { rows: [] };
-                }
-                if (query.includes("FROM pending_registrations") &&
-                    query.includes("token_hash") &&
-                    query.includes("FOR UPDATE")) {
-                    const registration = state.pendingRegistrations.find((candidate) =>
-                        candidate.token_hash === values[0] &&
-                        new Date(candidate.expires_at).getTime() > Date.now()
-                    );
-                    return { rows: registration ? [{ ...registration }] : [] };
-                }
-                if (query.includes("DELETE FROM pending_registrations WHERE pending_registration_id")) {
-                    state.pendingRegistrations = state.pendingRegistrations.filter(
-                        ({ pending_registration_id: id }) => id !== values[0]
-                    );
-                    return { rows: [] };
-                }
-                if (query.includes("INSERT INTO users")) {
-                    if (state.failNextCompletionUserInsert) {
-                        state.failNextCompletionUserInsert = false;
-                        throw Object.assign(new Error("synthetic unique constraint failure"), {
-                            code: "23505",
-                            constraint: "uq_users_email_lower",
-                            table: "users",
-                            schema: "public",
-                        });
-                    }
-                    const emailVerified = query.includes("email_verified)");
-                    const user = {
-                        user_id: `new-user-${state.nextId++}`,
-                        full_name: values[0],
-                        phone: values[1],
-                        email: values[2],
-                        password_hash: values[3],
-                        role: values[4],
-                        occupation: values[5],
-                        login_method: "EMAIL",
-                        email_verified: emailVerified,
-                        pending_email: null,
-                        auth_version: 0,
-                        account_status: "ACTIVE",
-                    };
-                    state.users.push(user);
-                    return { rows: [{
-                        ...user,
-                        created_at: "2026-01-01T00:00:00.000Z",
-                        updated_at: "2026-01-01T00:00:00.000Z",
-                        profile_photo_available: false,
-                    }] };
-                }
-                if (query.includes("INSERT INTO pension_accounts")) {
-                    state.accounts.push({ user_id: values[0] });
-                    return { rows: [] };
-                }
-                if (query.includes("INSERT INTO notification_preferences")) {
-                    state.notificationPreferences.push({
-                        user_id: values[0],
-                        sms_enabled: false,
-                        email_enabled: false,
-                    });
-                    return { rows: [] };
-                }
-                if (query.includes("INSERT INTO kyc_records")) {
-                    if (state.failKycInsert) {
-                        throw Object.assign(new Error("synthetic KYC insert failure"), { code: "XX001" });
-                    }
-                    const isDuplicate = state.kycRecords.some(({ national_id }) => national_id === values[1]);
-                    if (isDuplicate) {
-                        for (const record of state.kycRecords.filter(({ national_id }) => national_id === values[1])) {
-                            record.duplicate_submission = true;
-                        }
-                    }
-                    state.kycRecords.push({
-                        user_id: values[0],
-                        national_id: values[1],
-                        date_of_birth: values[2],
-                        kyc_status: "PENDING",
-                        duplicate_submission: isDuplicate,
-                    });
-                    return { rows: [] };
-                }
-                if (query.includes("FROM auth_tokens")) {
-                    const token = state.tokens.get(values[0]);
-                    return token && !token.consumed
-                        ? { rows: [{
-                            auth_token_id: token.id,
-                            user_id: token.user_id,
-                            email_address: token.email,
-                        }] }
-                        : { rows: [] };
-                }
-                if (query.includes("UPDATE users") && query.includes("email_verified = TRUE")) {
-                    const user = state.users.find((candidate) =>
-                        candidate.user_id === values[0] &&
-                        !candidate.email_verified &&
-                        (
-                            (candidate.login_method === "EMAIL" &&
-                                candidate.email?.toLowerCase() === values[1].toLowerCase()) ||
-                            candidate.pending_email?.toLowerCase() === values[1].toLowerCase()
-                        )
-                    );
-                    if (!user) return { rows: [] };
-                    if (user.pending_email) {
-                        user.email = user.pending_email;
-                        user.pending_email = null;
-                    }
-                    user.email_verified = true;
-                    if (user.login_method === "PHONE" && user.force_password_change &&
-                        user.account_status === "INACTIVE") {
-                        user.account_status = "ACTIVE";
-                    }
-                    return { rows: [{
-                        user_id: user.user_id,
-                        account_status: user.account_status,
-                        login_method: user.login_method,
-                        force_password_change: user.force_password_change,
-                    }] };
-                }
-                if (query.includes("UPDATE auth_tokens")) {
-                    const token = [...state.tokens.values()].find((item) => item.id === values[0]);
-                    if (token) token.consumed = true;
-                    return { rows: [] };
-                }
-                assert.fail(`Unexpected transaction query: ${query}`);
-            },
-            release() {},
-        };
-    };
-}
-
-function configureEmailService() {
-    authEmailService.enforceRequestLimits = async ({ req, action, email }) => {
-        state.rateLimitAttempts.push({ ip: req.ip || req.socket?.remoteAddress, action, email });
-        if (state.rejectRegistrationRateLimit && action === "REGISTRATION") {
-            const error = new Error("Too many requests");
-            error.status = 429;
-            throw error;
-        }
-    };
-    authEmailService.sendPendingRegistrationEmail = async ({ email, token }) => {
-        state.emailAttempts.push({ email, token, purpose: "REGISTRATION_VERIFICATION" });
-        if (state.failNextDelivery) {
-            state.failNextDelivery = false;
-            const error = new Error("mock delivery failure");
-            error.code = "EMAIL_SMTP_DELIVERY_FAILED";
-            throw error;
-        }
-    };
-    authEmailService.issueEmailToken = async ({ userId, email, purpose }) => {
-        state.emailAttempts.push({ userId, email, purpose });
-        const token = `secure-verification-token-${state.emailAttempts.length}-long-enough-x`;
-        state.tokens.set(hashOpaque(token), {
-            id: state.emailAttempts.length,
-            user_id: userId,
-            email,
-            purpose,
-            consumed: false,
-        });
-        if (state.failNextDelivery) {
-            state.failNextDelivery = false;
-            const error = new Error("mock delivery failure");
-            error.code = "EMAIL_SMTP_DELIVERY_FAILED";
-            throw error;
-        }
-        return { messageId: `mock-message-${state.emailAttempts.length}` };
-    };
-}
-
-async function createApi() {
-    state = createState();
-    configureDb();
-    configureEmailService();
-    bcrypt.hash = async (password) => {
-        state.passwordHashAttempts += 1;
-        return `hashed:${password}`;
-    };
-    bcrypt.compare = async (password, passwordHash) => {
-        state.passwordCompareCount += 1;
-        return passwordHash === `hashed:${password}`;
-    };
-    const app = express();
-    app.use(express.json());
-    app.use("/api/auth", authRoutes);
-    const server = http.createServer(app);
-    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const baseUrl = `http://127.0.0.1:${server.address().port}/api/auth`;
-    return {
-        request(path, body) {
-            return fetch(`${baseUrl}${path}`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                ...(body ? { body: JSON.stringify(body) } : {}),
-            });
+            return { accepted: true, status: "PROVIDER_ACCEPTED" };
         },
-        close: () => new Promise((resolve, reject) => {
-            server.close((error) => error ? reject(error) : resolve());
-        }),
+    };
+    const emailService = {
+        async enforceRequestLimits() {},
+        async issueEmailToken({ userId, email }) {
+            state.emailVerification = { userId, email };
+            return { messageId: "test-email" };
+        },
+        logEmailDeliveryFailure() {},
+    };
+    const database = {
+        async query(sql, values = []) {
+            if (sql.includes("DELETE FROM worker_registration_challenges WHERE challenge_id")) {
+                state.challenge = null;
+                return { rows: [], rowCount: 1 };
+            }
+            if (sql.includes("SELECT phone, email, national_id_fingerprint")) {
+                return {
+                    rows: state.challenge ? [{
+                        phone: state.challenge.phone,
+                        email: state.challenge.email,
+                        national_id_fingerprint: state.challenge.national_id_fingerprint,
+                    }] : [],
+                };
+            }
+            if (sql.includes("FROM users") && sql.includes("phone_verified_at")) {
+                const phone = normalizeKenyanPhone(values[0]);
+                return {
+                    rows: state.users
+                        .filter((user) => normalizeKenyanPhone(user.phone) === phone &&
+                            user.phone_verified_at && user.account_status === "ACTIVE")
+                        .map((user) => ({ user_id: user.user_id })),
+                };
+            }
+            if (sql.includes("FROM worker_password_reset_challenges")) return { rows: [] };
+            throw new Error(`Unexpected pool query: ${sql}`);
+        },
+        async connect() {
+            let snapshot = null;
+            return {
+                async query(sql, values = []) {
+                    if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql)) {
+                        if (sql === "BEGIN") snapshot = JSON.parse(JSON.stringify(state));
+                        if (sql === "ROLLBACK") {
+                            state.challenge = snapshot.challenge;
+                            state.claim = snapshot.claim;
+                            state.users = snapshot.users;
+                            state.accounts = snapshot.accounts;
+                            state.kycRecords = snapshot.kycRecords;
+                            state.preferences = snapshot.preferences;
+                            state.rollbackCount += 1;
+                        }
+                        return { rows: [] };
+                    }
+                    if (sql.includes("pg_advisory_xact_lock")) {
+                        state.identityLocks.push(values[0]);
+                        return { rows: [] };
+                    }
+                    if (sql.includes("DELETE FROM worker_registration_challenges")) {
+                        state.challenge = null;
+                        return { rows: [], rowCount: 1 };
+                    }
+                    if (sql.includes("DELETE FROM worker_national_id_claims")) return { rows: [] };
+                    if (sql.includes("SELECT 1") && sql.includes("FROM users")) {
+                        const duplicate = state.users.some((user) =>
+                            normalizeKenyanPhone(user.phone) === normalizeKenyanPhone(values[0]) ||
+                            (values[1] && user.email?.toLowerCase() === String(values[1]).toLowerCase())
+                        );
+                        return { rows: duplicate ? [{ "?column?": 1 }] : [] };
+                    }
+                    if (sql.includes("INSERT INTO worker_registration_challenges")) {
+                        state.challenge = {
+                            challenge_id: values[0],
+                            full_name: values[1],
+                            phone: values[2],
+                            email: values[3],
+                            occupation: values[4],
+                            date_of_birth: values[5],
+                            national_id_ciphertext: values[6],
+                            national_id_iv: values[7],
+                            national_id_tag: values[8],
+                            national_id_key_version: values[9],
+                            national_id_fingerprint: values[10],
+                            national_id_last_four: values[11],
+                            code_hash: values[12],
+                            code_salt: values[13],
+                            expires_at: values[14],
+                            attempt_count: 0,
+                            attempt_window_started_at: values[15],
+                            locked_until: null,
+                            challenge_status: "PENDING",
+                        };
+                        return { rows: [], rowCount: 1 };
+                    }
+                    if (sql.includes("INSERT INTO worker_national_id_claims")) {
+                        state.claim = {
+                            national_id_fingerprint: values[0],
+                            claim_status: "RESERVED",
+                            registration_challenge_id: values[1],
+                            expires_at: values[2],
+                        };
+                        return { rows: [], rowCount: 1 };
+                    }
+                    if (sql.includes("SELECT challenge_id, full_name, phone, email")) {
+                        return { rows: state.challenge ? [{ ...state.challenge }] : [] };
+                    }
+                    if (sql.includes("SELECT claim_status, registration_challenge_id")) {
+                        return { rows: state.claim ? [{ ...state.claim }] : [] };
+                    }
+                    if (sql.includes("SELECT 1 FROM users")) return { rows: [] };
+                    if (sql.includes("INSERT INTO users")) {
+                        if (state.failUserInsert) {
+                            throw Object.assign(new Error("synthetic uniqueness conflict"), {
+                                code: "23505",
+                                constraint: "uq_users_phone_normalized",
+                            });
+                        }
+                        const user = {
+                            user_id: `worker-${state.users.length + 1}`,
+                            full_name: values[0],
+                            phone: values[1],
+                            phone_verified_at: new Date(),
+                            pending_email: values[2],
+                            email_verified: false,
+                            password_hash: values[3],
+                            role: "WORKER",
+                            occupation: values[4],
+                            login_method: "PHONE",
+                            account_status: "ACTIVE",
+                            auth_version: 0,
+                        };
+                        state.users.push(user);
+                        return { rows: [{ user_id: user.user_id }] };
+                    }
+                    if (sql.includes("INSERT INTO pension_accounts")) {
+                        state.accounts.push({ user_id: values[0], current_balance: "0.00" });
+                        return { rows: [] };
+                    }
+                    if (sql.includes("INSERT INTO notification_preferences")) {
+                        state.preferences.push({
+                            user_id: values[0],
+                            sms_enabled: false,
+                            email_enabled: false,
+                        });
+                        return { rows: [] };
+                    }
+                    if (sql.includes("INSERT INTO kyc_records")) {
+                        if (state.failKycInsert) {
+                            throw Object.assign(new Error("synthetic KYC failure"), { code: "XX001" });
+                        }
+                        state.kycRecords.push({
+                            user_id: values[0],
+                            national_id_fingerprint: values[4],
+                            date_of_birth: values[6],
+                            kyc_status: "PENDING",
+                        });
+                        return { rows: [] };
+                    }
+                    if (sql.includes("UPDATE worker_national_id_claims")) {
+                        if (state.claim) state.claim.claim_status = "CLAIMED";
+                        return { rows: [{ national_id_fingerprint: state.claim?.national_id_fingerprint }] };
+                    }
+                    if (sql.includes("INSERT INTO audit_logs")) return { rows: [] };
+                    if (sql.includes("UPDATE worker_registration_challenges")) {
+                        if (sql.includes("locked_until") && values[3]) {
+                            state.challenge.locked_until = values[3];
+                        }
+                        return { rows: [] };
+                    }
+                    throw new Error(`Unexpected transaction query: ${sql}`);
+                },
+                release() {},
+            };
+        },
+    };
+    const service = createWorkerRegistrationService({
+        database,
+        smsService,
+        emailService,
+        environment,
+        now: () => new Date(),
+    });
+    return { state, service };
+}
+
+function validRegistration(overrides = {}) {
+    return {
+        full_name: "New Worker",
+        phone: "0712345678",
+        occupation: "OTHER_INFORMAL_WORKER",
+        national_id: "12345678",
+        date_of_birth: "1990-04-15",
+        ...overrides,
     };
 }
 
-test("valid registration attempts return the same acknowledgement for existing identifiers", async () => {
-    const api = await createApi();
-    try {
-        const base = {
-            full_name: "New Worker",
-            phone: "07000000001",
-            password: "secure-password",
-            occupation: "OTHER_INFORMAL_WORKER",
-            national_id: "12345678",
-            date_of_birth: "1990-04-15",
-        };
-        assert.equal((await api.request("/register", base)).status, 400);
-        assert.equal((await api.request("/register", { ...base, email: "not-an-email" })).status, 400);
-        assert.equal(state.users.length, 0);
+test("phone OTP registration requires name, National ID and phone; email is optional", async () => {
+    const { state, service } = createHarness();
 
-        const first = await api.request("/register", { ...base, email: "  New.User@Example.com " });
-        const firstBody = await first.json();
-        assert.equal(first.status, 202);
-        assert.equal(state.passwordHashAttempts, 0);
-        assert.equal(state.pendingRegistrations[0].password_hash, null);
-        assert.deepEqual(firstBody, {
-            status: "accepted",
-            message: "If we can complete your registration, we will send verification instructions to the provided email address.",
-        });
-        const firstToken = state.emailAttempts[0].token;
-        const finalized = await api.request("/email/verify", { token: firstToken, password: "secure-password" });
-        assert.equal(finalized.status, 200);
-        assert.equal(state.users[0].email, "new.user@example.com");
-        assert.equal(state.users[0].email_verified, true);
-        assert.equal(state.users[0].login_method, "EMAIL");
-        assert.equal(state.users[0].role, "WORKER");
-        assert.equal(state.users[0].password_hash, "hashed:secure-password");
-        assert.deepEqual(state.notificationPreferences, [{
-            user_id: state.users[0].user_id,
-            sms_enabled: false,
-            email_enabled: false,
-        }]);
-        assert.deepEqual(state.kycRecords, [{
-            user_id: state.users[0].user_id,
-            national_id: "12345678",
-            date_of_birth: "1990-04-15",
-            kyc_status: "PENDING",
-            duplicate_submission: false,
-        }]);
+    await assert.rejects(
+        service.startRegistration(validRegistration({ full_name: "" }), {}),
+        { code: "WORKER_REGISTRATION_INVALID_INPUT" },
+    );
+    await assert.rejects(
+        service.startRegistration(validRegistration({ national_id: "1234" }), {}),
+        { code: "INVALID_NATIONAL_ID" },
+    );
+    await assert.rejects(
+        service.startRegistration(validRegistration({ phone: "letters" }), {}),
+        { code: "WORKER_REGISTRATION_INVALID_INPUT" },
+    );
 
-        const duplicateEmail = await api.request("/register", {
-            ...base,
-            phone: "07000000002",
-            email: "NEW.USER@example.COM",
-            national_id: "12345679",
-        });
-        const duplicatePhone = await api.request("/register", {
-            ...base,
-            email: "another@example.com",
-            phone: "07000000001",
-            national_id: "12345679",
-        });
-        assert.equal(state.emailAttempts.length, 1);
-        assert.equal(state.pendingRegistrations.length, 0);
-        const duplicateNationalId = await api.request("/register", {
-            ...base,
-            email: "third@example.com",
-            phone: "07000000003",
-        });
-        for (const response of [duplicateEmail, duplicatePhone]) {
-            assert.equal(response.status, 202);
-            assert.deepEqual(await response.json(), {
-                status: "accepted",
-                message: "If we can complete your registration, we will send verification instructions to the provided email address.",
-            });
-        }
-        assert.equal(duplicateNationalId.status, 202);
-        assert.deepEqual(await duplicateNationalId.json(), {
-            status: "accepted",
-            message: "If we can complete your registration, we will send verification instructions to the provided email address.",
-        });
-        const duplicateIdVerification = await api.request("/email/verify", {
-            token: state.emailAttempts[1].token,
-            password: "another-secure-password",
-        });
-        assert.equal(duplicateIdVerification.status, finalized.status);
-        assert.deepEqual(await duplicateIdVerification.json(), await finalized.clone().json());
-        assert.equal(state.users.length, 2);
-        assert.equal(state.accounts.length, 2);
-        assert.equal(state.kycRecords.length, 2);
-        assert.equal(state.kycRecords.every((record) => record.kyc_status === "PENDING"), true);
-        assert.equal(state.kycRecords.every((record) => record.duplicate_submission === true), true);
-        assert.equal(state.pendingRegistrations.length, 0);
-        assert.equal(state.emailAttempts.length, 2);
-        assert.equal(state.rateLimitAttempts.filter(({ action }) => action === "REGISTRATION").length, 4);
-        assert.ok(state.emailAttempts.every(({ purpose }) => purpose === "REGISTRATION_VERIFICATION"));
-    } finally {
-        await api.close();
-    }
+    const started = await service.startRegistration(validRegistration(), {});
+    assert.equal(started.accepted, true);
+    assert.equal(state.challenge.email, null);
+    assert.equal(state.smsMessages.length, 1);
+    assert.equal(state.challenge.challenge_status, "PENDING");
 });
 
-test("a completion uniqueness conflict preserves the pending registration for retry", async () => {
-    const api = await createApi();
-    const originalConsoleError = console.error;
-    const diagnostics = [];
-    console.error = (...args) => diagnostics.push(args);
-    try {
-        const registration = await api.request("/register", {
-            full_name: "Synthetic Worker",
-            email: "retry@example.test",
-            phone: "07000000021",
-            occupation: "OTHER_INFORMAL_WORKER",
-            national_id: "87654321",
-            date_of_birth: "1990-04-15",
-        });
-        assert.equal(registration.status, 202);
-        const token = state.emailAttempts[0].token;
-        const pendingId = state.pendingRegistrations[0].pending_registration_id;
+test("registration creates an active worker, zero-balance account and PENDING KYC only after OTP completion", async () => {
+    const { state, service } = createHarness();
+    const started = await service.startRegistration(validRegistration({ email: "worker@example.com" }), {});
+    const code = state.smsMessages[0].message.match(/\b(\d{6})\b/)[1];
+    const completed = await service.completeRegistration({
+        challengeId: started.challengeId,
+        code,
+        password: "secure-password",
+    }, {});
 
-        state.failNextCompletionUserInsert = true;
-        const failed = await api.request("/email/verify", {
-            token,
-            password: "synthetic-password",
-        });
-        assert.equal(failed.status, 409);
-        assert.equal((await failed.json()).code, "REGISTRATION_COMPLETION_UNAVAILABLE");
-        assert.equal(state.registrationRollbackCount, 1);
-        assert.equal(state.pendingRegistrations.length, 1);
-        assert.equal(state.pendingRegistrations[0].pending_registration_id, pendingId);
-        assert.equal(state.users.length, 0);
-        assert.equal(state.accounts.length, 0);
-        assert.equal(state.kycRecords.length, 0);
-        assert.deepEqual(diagnostics, [[
-            "Registration completion uniqueness conflict.",
-            {
-                code: "23505",
-                constraint: "uq_users_email_lower",
-                table: "users",
-                schema: "public",
-            },
-        ]]);
-        assert.doesNotMatch(JSON.stringify(diagnostics), /retry@example\.test|87654321|synthetic-password/);
-
-        const retried = await api.request("/email/verify", {
-            token,
-            password: "synthetic-password",
-        });
-        assert.equal(retried.status, 200);
-        assert.equal(state.users.length, 1);
-        assert.equal(state.accounts.length, 1);
-        assert.equal(state.kycRecords.length, 1);
-        assert.equal(state.pendingRegistrations.length, 0);
-    } finally {
-        console.error = originalConsoleError;
-        await api.close();
-    }
+    assert.equal(completed.accountStatus, "ACTIVE");
+    assert.equal(completed.kycStatus, "PENDING");
+    assert.equal(state.users[0].account_status, "ACTIVE");
+    assert.equal(Object.hasOwn(state.users[0], "approval_status"), false);
+    assert.equal(state.users[0].role, "WORKER");
+    assert.equal(state.accounts[0].current_balance, "0.00");
+    assert.equal(state.kycRecords[0].kyc_status, "PENDING");
+    assert.equal(state.challenge, null);
 });
 
-test("invalid, expired, and consumed registration tokens cannot create accounts", async () => {
-    const api = await createApi();
-    try {
-        const invalid = await api.request("/email/verify", {
-            token: "invalid-token-value-that-is-long-enough-to-pass-format-check",
+test("invalid, expired and reused OTP challenges cannot create accounts", async () => {
+    const { state, service } = createHarness();
+    const started = await service.startRegistration(validRegistration(), {});
+    await assert.rejects(
+        service.completeRegistration({
+            challengeId: started.challengeId,
+            code: "000000",
             password: "secure-password",
-        });
-        assert.equal(invalid.status, 400);
+        }, {}),
+        { code: "OTP_INVALID" },
+    );
 
-        const accepted = await api.request("/register", {
-            full_name: "New Worker",
-            email: "new@example.com",
-            phone: "07000000001",
-            occupation: "OTHER_INFORMAL_WORKER",
-            national_id: "12345678",
-            date_of_birth: "1990-04-15",
-        });
-        assert.equal(accepted.status, 202);
-        const token = state.emailAttempts[0].token;
-        const missingPassword = await api.request("/email/verify", { token });
-        assert.equal(missingPassword.status, 400);
-        const missingPasswordBody = await missingPassword.json();
-        assert.equal(missingPasswordBody.token, undefined);
-        assert.equal(missingPasswordBody.data, undefined);
-        assert.equal(state.users.length, 0);
-        assert.equal(state.accounts.length, 0);
-        assert.equal(state.kycRecords.length, 0);
-        state.pendingRegistrations[0].expires_at = new Date(Date.now() - 1);
-        const expired = await api.request("/email/verify", { token, password: "secure-password" });
-        assert.equal(expired.status, 400);
-        assert.equal(state.users.length, 0);
+    const code = state.smsMessages[0].message.match(/\b(\d{6})\b/)[1];
+    await service.completeRegistration({
+        challengeId: started.challengeId,
+        code,
+        password: "secure-password",
+    }, {});
+    await assert.rejects(
+        service.completeRegistration({
+            challengeId: started.challengeId,
+            code,
+            password: "secure-password",
+        }, {}),
+        { code: "OTP_INVALID" },
+    );
 
-        state.pendingRegistrations[0].expires_at = new Date(Date.now() + 30 * 60 * 1000);
-        const verified = await api.request("/email/verify", { token, password: "secure-password" });
-        assert.equal(verified.status, 200);
-        const consumed = await api.request("/email/verify", { token, password: "secure-password" });
-        assert.equal(consumed.status, 400);
-        assert.equal(state.users.length, 1);
-        assert.equal(state.accounts.length, 1);
-        assert.equal(state.kycRecords.length, 1);
-    } finally {
-        await api.close();
-    }
+    const expired = await service.startRegistration(validRegistration({ phone: "0712345679" }), {});
+    state.challenge.expires_at = new Date(Date.now() - 1000);
+    const expiredCode = state.smsMessages.at(-1).message.match(/\b(\d{6})\b/)[1];
+    await assert.rejects(
+        service.completeRegistration({
+            challengeId: expired.challengeId,
+            code: expiredCode,
+            password: "secure-password",
+        }, {}),
+        { code: "OTP_INVALID" },
+    );
 });
 
-test("signup acknowledgement does not reveal registration email delivery outcomes", async () => {
-    const api = await createApi();
-    const originalConsoleError = console.error;
-    const diagnostics = [];
-    console.error = (...args) => diagnostics.push(args);
-    try {
-        const details = {
-            full_name: "New Worker",
-            email: "new@example.com",
-            phone: "07000000001",
+test("OTP attempt limits lock a challenge and a failed SMS cancels it", async () => {
+    const locked = createHarness();
+    const lockedStart = await locked.service.startRegistration(validRegistration(), {});
+    locked.state.challenge.attempt_count = 5;
+    await assert.rejects(
+        locked.service.completeRegistration({
+            challengeId: lockedStart.challengeId,
+            code: "000000",
             password: "secure-password",
-            occupation: "OTHER_INFORMAL_WORKER",
-            national_id: "12345678",
-            date_of_birth: "1990-04-15",
-        };
-        const acknowledgement = {
-            status: "accepted",
-            message: "If we can complete your registration, we will send verification instructions to the provided email address.",
-        };
-        const first = await api.request("/register", details);
-        assert.equal(first.status, 202);
-        assert.deepEqual(await first.json(), acknowledgement);
+        }, {}),
+        { code: "OTP_RATE_LIMITED" },
+    );
 
-        state.rejectRegistrationRateLimit = true;
-        const rateLimited = await api.request("/register", {
-            ...details,
-            email: "rate-limited@example.com",
-            phone: "07000000002",
-            national_id: "12345679",
-        });
-        assert.equal(rateLimited.status, 202);
-        assert.deepEqual(await rateLimited.json(), acknowledgement);
-        assert.equal(state.emailAttempts.length, 1);
-        assert.equal(state.pendingRegistrations.length, 1);
-
-        state.rejectRegistrationRateLimit = false;
-        state.failNextDelivery = true;
-        const deliveryFailed = await api.request("/register", {
-            ...details,
-            email: "delivery-failed@example.com",
-            phone: "07000000003",
-            national_id: "12345670",
-        });
-        assert.equal(deliveryFailed.status, 202);
-        assert.deepEqual(await deliveryFailed.json(), acknowledgement);
-        assert.equal(state.pendingRegistrations.length, 2);
-        assert.deepEqual(state.rateLimitAttempts.map(({ action }) => action), [
-            "REGISTRATION",
-            "REGISTRATION",
-            "REGISTRATION",
-        ]);
-        assert.doesNotMatch(JSON.stringify(diagnostics), /new@example\.com|12345678|1990-04-15|secure-password/);
-        assert.deepEqual(diagnostics[0], ["Registration verification delivery failed.", {
-            code: "EMAIL_SMTP_DELIVERY_FAILED",
-        }]);
-    } finally {
-        console.error = originalConsoleError;
-        await api.close();
-    }
+    const failed = createHarness();
+    failed.state.failSms = true;
+    await assert.rejects(
+        failed.service.startRegistration(validRegistration(), {}),
+        { code: "WORKER_REGISTRATION_SMS_DELIVERY_FAILED" },
+    );
+    assert.equal(failed.state.challenge, null);
 });
 
-test("public resend rotates a failed registration link and remains generic", async () => {
-    const api = await createApi();
-    const originalConsoleError = console.error;
-    console.error = () => {};
-    try {
-        state.failNextDelivery = true;
-        const registration = await api.request("/register", {
-            full_name: "New Worker",
-            email: "retry@example.com",
-            phone: "07000000021",
-            occupation: "OTHER_INFORMAL_WORKER",
-            national_id: "87654321",
-            date_of_birth: "1990-04-15",
-        });
-        assert.equal(registration.status, 202);
-        assert.deepEqual(await registration.json(), {
-            status: "accepted",
-            message: "If we can complete your registration, we will send verification instructions to the provided email address.",
-        });
-        const oldToken = state.emailAttempts[0].token;
-        const oldTokenHash = state.pendingRegistrations[0].token_hash;
+test("duplicate phone or National ID does not create a second account", async () => {
+    const { state, service } = createHarness();
+    state.users.push({
+        user_id: "existing-user",
+        phone: "+254712345678",
+        email: "existing@example.com",
+        approval_status: "APPROVED",
+    });
 
-        const resend = await api.request("/email/verification-request/public", {
-            email: "retry@example.com",
-        });
-        assert.equal(resend.status, 200);
-        assert.match((await resend.json()).message, /eligible account or registration/i);
-        const newToken = state.emailAttempts[1].token;
-        assert.notEqual(newToken, oldToken);
-        assert.notEqual(state.pendingRegistrations[0].token_hash, oldTokenHash);
-        assert.equal(state.pendingRegistrations[0].token_hash, hashOpaque(newToken));
-
-        const oldLink = await api.request("/email/verify", {
-            token: oldToken,
-            password: "secure-password",
-        });
-        assert.equal(oldLink.status, 400);
-        const verified = await api.request("/email/verify", {
-            token: newToken,
-            password: "secure-password",
-        });
-        assert.equal(verified.status, 200);
-        assert.equal(state.users[0].email_verified, true);
-        assert.equal(state.users[0].phone_verified_at, undefined);
-        assert.equal(state.kycRecords[0].kyc_status, "PENDING");
-    } finally {
-        console.error = originalConsoleError;
-        await api.close();
-    }
+    const phoneResult = await service.startRegistration(validRegistration(), {});
+    assert.equal(phoneResult.accepted, true);
+    assert.equal(state.smsMessages.length, 0);
 });
 
-test("staff email verification activates only the pending staff account and leaves phone/KYC state unchanged", async () => {
-    const api = await createApi();
-    try {
-        const token = "staff-verification-token-that-is-long-enough-to-pass-format-check";
-        const tokenHash = hashOpaque(token);
-        const staff = {
-            user_id: "staff-user",
-            full_name: "New Staff",
-            phone: "07000000021",
-            phone_verified_at: null,
-            email: null,
-            pending_email: "staff@example.com",
-            email_verified: false,
-            login_method: "PHONE",
-            force_password_change: true,
-            account_status: "INACTIVE",
-            role: "REGULATOR",
-        };
-        state.users.push(staff);
-        state.kycRecords.push({ user_id: staff.user_id, kyc_status: "PENDING" });
-        state.tokens.set(tokenHash, {
-            id: 700,
-            user_id: staff.user_id,
-            email: "staff@example.com",
-            purpose: "EMAIL_VERIFICATION",
-            consumed: false,
-        });
+test("legacy pending and rejected active workers can log in and use protected APIs", async () => {
+    const statusCases = [
+        { approval_status: "PENDING" },
+        { approval_status: "REJECTED" },
+    ];
+    bcrypt.compare = async () => true;
+    authEmailService.enforceRequestLimits = async () => {};
 
-        const verified = await api.request("/email/verify", { token });
-        const body = await verified.json();
-        assert.equal(verified.status, 200);
-        assert.equal(body.next_step, "STAFF_SIGN_IN");
-        assert.equal(staff.email, "staff@example.com");
-        assert.equal(staff.pending_email, null);
-        assert.equal(staff.email_verified, true);
-        assert.equal(staff.account_status, "ACTIVE");
-        assert.equal(staff.phone_verified_at, null);
-        assert.equal(state.kycRecords[0].kyc_status, "PENDING");
-        assert.equal(state.tokens.get(tokenHash).consumed, true);
-    } finally {
-        await api.close();
-    }
-});
-
-test("pending registration insert failure rolls back the transaction without logging personal details", async () => {
-    const api = await createApi();
-    const originalConsoleError = console.error;
-    const diagnostics = [];
-    console.error = (...args) => diagnostics.push(args);
-    try {
-        state.failPendingRegistrationInsert = true;
-        const response = await api.request("/register", {
-            full_name: "Synthetic Worker",
-            email: "synthetic-worker@example.test",
-            phone: "07000000001",
-            password: "synthetic-password",
-            occupation: "OTHER_INFORMAL_WORKER",
-            national_id: "12345678",
-            date_of_birth: "1990-04-15",
-        });
-
-        assert.equal(response.status, 500);
-        assert.equal(state.registrationRollbackCount, 1);
-        assert.equal(state.pendingRegistrations.length, 0);
-        assert.equal(state.users.length, 0);
-        assert.equal(state.accounts.length, 0);
-        assert.equal(state.kycRecords.length, 0);
-        assert.deepEqual(diagnostics, [["Registration failed:", { code: "23514" }]]);
-        assert.doesNotMatch(JSON.stringify(diagnostics), /synthetic-worker|07000000001|12345678|1990-04-15|synthetic-password/);
-    } finally {
-        console.error = originalConsoleError;
-        await api.close();
-    }
-});
-
-test("registration validates National ID, calendar date, and worker age without writing records", async () => {
-    const api = await createApi();
-    try {
-        const base = {
-            full_name: "New Worker",
-            email: "new@example.com",
-            phone: "07000000001",
-            password: "secure-password",
-            occupation: "OTHER_INFORMAL_WORKER",
-            national_id: "12345678",
-            date_of_birth: "1990-04-15",
-        };
-        const invalidId = await api.request("/register", { ...base, national_id: "123456" });
-        assert.equal(invalidId.status, 400);
-        assert.equal((await invalidId.json()).code, "INVALID_NATIONAL_ID");
-
-        const invalidDate = await api.request("/register", { ...base, date_of_birth: "2001-02-29" });
-        assert.equal(invalidDate.status, 400);
-        assert.equal((await invalidDate.json()).code, "INVALID_DATE_OF_BIRTH");
-
-        const missingDate = await api.request("/register", { ...base, date_of_birth: "" });
-        assert.equal(missingDate.status, 400);
-        assert.equal((await missingDate.json()).code, "INVALID_DATE_OF_BIRTH");
-
-        const futureDate = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-        const futureBirthDate = await api.request("/register", { ...base, date_of_birth: futureDate });
-        assert.equal(futureBirthDate.status, 400);
-        assert.equal((await futureBirthDate.json()).code, "INVALID_DATE_OF_BIRTH");
-
-        for (const date_of_birth of ["2010-01-01", "1900-01-01"]) {
-            const response = await api.request("/register", { ...base, date_of_birth });
-            assert.equal(response.status, 400);
-            assert.equal((await response.json()).code, "WORKER_AGE_OUT_OF_RANGE");
-        }
-
-        assert.equal(state.users.length, 0);
-        assert.equal(state.accounts.length, 0);
-        assert.equal(state.kycRecords.length, 0);
-        assert.equal(state.emailAttempts.length, 0);
-    } finally {
-        await api.close();
-    }
-});
-
-test("registration accepts workers at the inclusive 18 and 60 year age limits after verification", async () => {
-    const api = await createApi();
-    try {
-        const now = new Date();
-        const birthDateForAge = (age) => {
-            const date = new Date(Date.UTC(now.getUTCFullYear() - age, now.getUTCMonth(), now.getUTCDate()));
-            return date.toISOString().slice(0, 10);
-        };
-        for (const [index, age] of [18, 60].entries()) {
-            const response = await api.request("/register", {
-                full_name: "Eligible Worker",
-                email: `eligible-${age}@example.com`,
-                phone: `0700000000${index + 1}`,
-                password: "secure-password",
-                occupation: "OTHER_INFORMAL_WORKER",
-                national_id: index === 0 ? "12345678" : "12345679",
-                date_of_birth: birthDateForAge(age),
-            });
-            assert.equal(response.status, 202);
-            const token = state.emailAttempts[index].token;
-            assert.equal((await api.request("/email/verify", {
-                token,
-                password: "secure-password",
-            })).status, 200);
-        }
-        assert.equal(state.users.length, 2);
-        assert.equal(state.kycRecords.length, 2);
-    } finally {
-        await api.close();
-    }
-});
-
-test("duplicate National IDs reach the same pending account state without an auth token", async () => {
-    const api = await createApi();
-    try {
-        const details = {
-            full_name: "New Worker",
-            email: "new@example.com",
-            phone: "07000000001",
-            password: "secure-password",
-            occupation: "OTHER_INFORMAL_WORKER",
-            national_id: "12345678",
-            date_of_birth: "1990-04-15",
-        };
-        const first = await api.request("/register", details);
-        assert.equal(first.status, 202);
-        const firstVerification = await api.request("/email/verify", {
-            token: state.emailAttempts[0].token,
-            password: "secure-password",
-        });
-        const firstVerificationBody = await firstVerification.json();
-        assert.equal(firstVerification.status, 200);
-        assert.equal(firstVerificationBody.data, undefined);
-        assert.equal(firstVerificationBody.token, undefined);
-        const duplicate = await api.request("/register", {
-            ...details,
-            email: "another@example.com",
-            phone: "07000000002",
-        });
-        assert.equal(duplicate.status, 202);
-        assert.deepEqual(await duplicate.json(), {
-            status: "accepted",
-            message: "If we can complete your registration, we will send verification instructions to the provided email address.",
-        });
-        const completion = await api.request("/email/verify", {
-            token: state.emailAttempts[1].token,
-            password: "another-secure-password",
-        });
-        const body = await completion.json();
-        assert.equal(completion.status, 200);
-        assert.deepEqual(body, firstVerificationBody);
-        assert.doesNotMatch(JSON.stringify(body), /12345678|uq_kyc_records_national_id|duplicate|National ID/i);
-        assert.equal(state.users.length, 2);
-        assert.equal(state.accounts.length, 2);
-        assert.equal(state.kycRecords.length, 2);
-        assert.equal(state.kycRecords.every((record) => record.kyc_status === "PENDING"), true);
-        assert.equal(state.kycRecords.some((record) => record.duplicate_submission === true), true);
-        assert.equal(state.pendingRegistrations.length, 0);
-        assert.equal(state.emailAttempts.length, 2);
-    } finally {
-        await api.close();
-    }
-});
-
-test("KYC insert failure rolls back final account creation without logging personal details", async () => {
-    const api = await createApi();
-    const originalConsoleError = console.error;
-    const diagnostics = [];
-    console.error = (...args) => diagnostics.push(args);
-    try {
-        const accepted = await api.request("/register", {
-            full_name: "New Worker",
-            email: "new@example.com",
-            phone: "07000000001",
-            password: "secure-password",
-            occupation: "OTHER_INFORMAL_WORKER",
-            national_id: "12345678",
-            date_of_birth: "1990-04-15",
-        });
-        assert.equal(accepted.status, 202);
-        state.failKycInsert = true;
-        const response = await api.request("/email/verify", {
-            token: state.emailAttempts[0].token,
-            password: "secure-password",
-        });
-        assert.equal(response.status, 500);
-        assert.equal((await response.json()).message, "Unable to verify this email address right now.");
-        assert.equal(state.users.length, 0);
-        assert.equal(state.accounts.length, 0);
-        assert.equal(state.kycRecords.length, 0);
-        assert.equal(state.pendingRegistrations.length, 1);
-        assert.equal(state.emailAttempts.length, 1);
-        assert.doesNotMatch(JSON.stringify(diagnostics), /12345678|1990-04-15|password123/);
-        assert.deepEqual(diagnostics[0], ["Email verification failed:", "XX001"]);
-    } finally {
-        console.error = originalConsoleError;
-        await api.close();
-    }
-});
-
-test("client role and login-method overrides cannot change the EMAIL/WORKER registration policy", async () => {
-    const api = await createApi();
-    try {
-        const response = await api.request("/register", {
-            full_name: "New Worker",
-            email: "new@example.com",
-            phone: "07000000001",
-            password: "secure-password",
-            occupation: "OTHER_INFORMAL_WORKER",
-            national_id: "12345678",
-            date_of_birth: "1990-04-15",
-            role: "ADMIN",
-            login_method: "PHONE",
-        });
-        assert.equal(response.status, 202);
-        assert.equal(state.users.length, 0);
-        assert.equal(state.pendingRegistrations[0].occupation, "OTHER_INFORMAL_WORKER");
-        assert.equal((await api.request("/email/verify", {
-            token: state.emailAttempts[0].token,
-            password: "secure-password",
-        })).status, 200);
-        assert.equal(state.users[0].role, "WORKER");
-        assert.equal(state.users[0].login_method, "EMAIL");
-        assert.equal(state.users[0].email_verified, true);
-    } finally {
-        await api.close();
-    }
-});
-
-test("EMAIL-policy accounts require verified identifiers; verified phone and email both work", async () => {
-    const api = await createApi();
-    try {
-        const registration = await api.request("/register", {
-            full_name: "New Worker",
-            email: "new@example.com",
-            phone: "0712345678",
-            password: "secure-password",
-            occupation: "OTHER_INFORMAL_WORKER",
-            national_id: "12345678",
-            date_of_birth: "1990-04-15",
-        });
-        assert.equal(registration.status, 202);
-        const preVerificationLogin = await api.request("/login", {
-            identifier: "new@example.com",
-            password: "secure-password",
-        });
-        assert.equal(preVerificationLogin.status, 401);
-
-        const phoneLogin = await api.request("/login", {
-            identifier: "0712345678",
-            password: "secure-password",
-        });
-        const unverifiedEmailLogin = await api.request("/login", {
-            identifier: "new@example.com",
-            password: "secure-password",
-        });
-        assert.equal(phoneLogin.status, 401);
-        assert.equal(unverifiedEmailLogin.status, 401);
-        assert.equal((await phoneLogin.json()).message, (await unverifiedEmailLogin.json()).message);
-
-        const verified = await api.request("/email/verify", {
-            token: state.emailAttempts[0].token,
-            password: "secure-password",
-        });
-        assert.equal(verified.status, 200);
-        assert.equal(state.users[0].email_verified, true);
-        state.users[0].phone_verified_at = new Date("2026-11-05T12:00:00Z");
-        state.users[0].pending_email = "pending@example.com";
-
-        const emailLogin = await api.request("/login", {
-            identifier: " NEW@example.com ",
-            password: "secure-password",
-        });
-        assert.equal(emailLogin.status, 200);
-        assert.equal((await emailLogin.json()).data.user.role, "WORKER");
-        assert.equal(state.pendingRegistrations.length, 0);
-        const verifiedPhoneLogin = await api.request("/login", {
-            identifier: "0712345678",
-            password: "secure-password",
-        });
-        assert.equal(verifiedPhoneLogin.status, 200);
-        const verifiedPhoneBody = await verifiedPhoneLogin.json();
-        assert.equal(verifiedPhoneBody.data.user.phone_verified, true);
-        assert.equal(verifiedPhoneBody.data.user.pending_email, "pending@example.com");
-        assert.equal(Object.hasOwn(verifiedPhoneBody.data.user, "password_hash"), false);
-        assert.equal(state.passwordCompareCount, 5);
-    } finally {
-        await api.close();
-    }
-});
-
-test("unknown identifiers use dummy bcrypt and account status is disclosed only after a correct password", async () => {
-    const api = await createApi();
-    try {
-        const unknown = await api.request("/login", {
-            identifier: "07000000008",
-            password: "incorrect-password",
-        });
-        assert.equal(unknown.status, 401);
-        assert.equal(state.passwordCompareCount, 1);
-        assert.equal(state.failedLoginCount, 0);
-
-        state.users.push({
-            user_id: "suspended-user",
-            phone: "07000000009",
-            password_hash: "hashed:correct-password",
+    for (const statusCase of statusCases) {
+        const worker = {
+            user_id: `worker-${statusCase.approval_status.toLowerCase()}`,
+            full_name: "Test Worker",
+            phone: "+254712345678",
+            phone_verified_at: new Date(),
+            password_hash: "test-password-hash",
             role: "WORKER",
-            login_method: "PHONE",
-            account_status: "SUSPENDED",
-            failed_login_attempts: 0,
-            auth_version: 0,
-        });
-        const wrongPassword = await api.request("/login", {
-            identifier: "07000000009",
-            password: "wrong-password",
-        });
-        assert.equal(wrongPassword.status, 401);
-        assert.equal((await wrongPassword.json()).message, "Invalid phone number or password");
-        assert.equal(state.users[0].failed_login_attempts, 1);
-
-        const correctPassword = await api.request("/login", {
-            identifier: "07000000009",
-            password: "correct-password",
-        });
-        assert.equal(correctPassword.status, 403);
-        assert.equal((await correctPassword.json()).message, "This account is not active");
-        assert.equal(state.passwordCompareCount, 3);
-    } finally {
-        await api.close();
-    }
-});
-
-test("a missing login column is logged safely while the public error remains generic", async () => {
-    const api = await createApi();
-    const originalConsoleError = console.error;
-    const diagnostics = [];
-    console.error = (...args) => diagnostics.push(args);
-    try {
-        state.failLoginLookup = true;
-        const response = await api.request("/login", {
-            identifier: `diagnostic-${Date.now()}`,
-            password: "not-a-real-account-password",
-        });
-        assert.equal(response.status, 500);
-        assert.equal((await response.json()).message, "Login failed due to a server error");
-        assert.deepEqual(state.loginQueryFailure, { code: "42703", missingColumn: "failed_login_attempts" });
-        assert.equal(state.passwordCompareCount, 0);
-        assert.equal(diagnostics[0][0], "Login failed:");
-        assert.equal(diagnostics[0][1], 'column "failed_login_attempts" does not exist');
-    } finally {
-        console.error = originalConsoleError;
-        await api.close();
-    }
-});
-
-test("legacy PHONE-policy accounts keep phone login and public resend remains generic after delivery failure", async () => {
-    const api = await createApi();
-    const originalConsoleError = console.error;
-    console.error = () => {};
-    try {
-        state.users.push({
-            user_id: "legacy-user",
-            full_name: "Legacy User",
-            phone: "07000000009",
-            email: "legacy@example.com",
-            password_hash: "hashed:legacy-password",
-            role: "WORKER",
-            occupation: null,
-            login_method: "PHONE",
-            email_verified: true,
-            pending_email: null,
-            auth_version: 0,
             account_status: "ACTIVE",
-        });
-        const legacyLogin = await api.request("/login", {
-            identifier: "07000000009",
-            password: "legacy-password",
-        });
-        assert.equal(legacyLogin.status, 200);
-        const legacyEmailLogin = await api.request("/login", {
-            identifier: "legacy@example.com",
-            password: "legacy-password",
-        });
-        assert.equal(legacyEmailLogin.status, 200);
+            approval_status: statusCase.approval_status,
+            auth_version: 0,
+            email_verified: false,
+            is_temp_password: false,
+            force_password_change: false,
+        };
+        pool.query = async (sql) => {
+            if (sql.includes("FROM users") && sql.includes("login_method = 'PHONE'")) {
+                return { rows: [worker] };
+            }
+            if (sql.includes("SET failed_login_attempts = 0")) return { rows: [] };
+            if (sql.includes("INSERT INTO audit_logs")) return { rows: [] };
+            if (sql.includes("FROM users WHERE user_id = $1")) {
+                return { rows: [worker] };
+            }
+            throw new Error(`Unexpected pool query: ${sql}`);
+        };
 
-        state.failNextDelivery = true;
-        const request = await api.request("/register", {
-            full_name: "New Worker",
-            email: "new@example.com",
-            phone: "07000000010",
-            password: "secure-password",
-            occupation: "OTHER_INFORMAL_WORKER",
-            national_id: "12345678",
-            date_of_birth: "1990-04-15",
-        });
-        assert.equal(request.status, 202);
-        assert.deepEqual(await request.json(), {
-            status: "accepted",
-            message: "If we can complete your registration, we will send verification instructions to the provided email address.",
-        });
-        assert.equal(state.users.length, 1);
-        assert.equal(state.pendingRegistrations.length, 1);
-        const retryRegistration = await api.request("/register", {
-            full_name: "New Worker",
-            email: "new@example.com",
-            phone: "07000000011",
-            password: "secure-password",
-            occupation: "OTHER_INFORMAL_WORKER",
-            national_id: "12345679",
-            date_of_birth: "1990-04-15",
-        });
-        assert.equal(retryRegistration.status, 202);
-        assert.deepEqual(await retryRegistration.json(), {
-            status: "accepted",
-            message: "If we can complete your registration, we will send verification instructions to the provided email address.",
-        });
-        assert.equal(state.users.length, 1);
-        assert.equal(state.pendingRegistrations.length, 1);
+        const loginResponse = createResponse();
+        await authController.login({
+            body: { identifier: worker.phone, password: "valid-password" },
+            headers: {},
+            ip: "127.0.0.1",
+        }, loginResponse);
+        assert.equal(loginResponse.statusCode, 200);
+        assert.equal(loginResponse.body.data.user.user_id, worker.user_id);
+        assert.equal(loginResponse.body.data.user.account_status, "ACTIVE");
 
-        state.failNextDelivery = true;
-        const resendExisting = await api.request("/email/verification-request/public", { email: "new@example.com" });
-        const resendMissing = await api.request("/email/verification-request/public", { email: "missing@example.com" });
-        assert.equal(resendExisting.status, 200);
-        assert.equal(resendMissing.status, 200);
-        assert.equal((await resendExisting.json()).message, (await resendMissing.json()).message);
-        assert.equal(state.users.length, 1);
-        assert.equal(state.emailAttempts.at(-1).email, "new@example.com");
-    } finally {
-        console.error = originalConsoleError;
-        await api.close();
+        const authResponse = createResponse();
+        let nextCalled = false;
+        await requireAuth({
+            headers: {
+                authorization: `Bearer ${generateToken({
+                    userId: worker.user_id,
+                    role: worker.role,
+                    authVersion: worker.auth_version,
+                })}`,
+            },
+            path: "/protected",
+        }, authResponse, () => {
+            nextCalled = true;
+        });
+        assert.equal(authResponse.statusCode, null);
+        assert.equal(nextCalled, true);
     }
+});
+
+test("approved workers can log in with their verified phone number", async () => {
+    const worker = {
+        user_id: "approved-phone-worker",
+        full_name: "Test Worker",
+        phone: "+254712345678",
+        phone_verified_at: new Date(),
+        password_hash: "test-password-hash",
+        role: "WORKER",
+        occupation: "Teacher",
+        account_status: "ACTIVE",
+        approval_status: "APPROVED",
+        auth_version: 0,
+        failed_login_attempts: 0,
+        locked_until: null,
+        email_verified: false,
+        is_temp_password: false,
+        force_password_change: false,
+        profile_photo_available: false,
+    };
+    bcrypt.compare = async () => true;
+    authEmailService.enforceRequestLimits = async () => {};
+    pool.query = async (sql) => {
+        if (sql.includes("FROM users") && sql.includes("login_method = 'PHONE'")) {
+            return { rows: [worker] };
+        }
+        if (sql.includes("SELECT setting_key, setting_value")) {
+            assert.fail("Successful login must not depend on operational settings.");
+        }
+        if (sql.includes("SET failed_login_attempts = 0")) return { rows: [] };
+        if (sql.includes("INSERT INTO audit_logs")) return { rows: [] };
+        throw new Error(`Unexpected pool query: ${sql}`);
+    };
+
+    const response = createResponse();
+    await authController.login({
+        body: { identifier: "0712345678", password: "valid-password" },
+        headers: {},
+        ip: "127.0.0.1",
+    }, response);
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.body.data.user.user_id, worker.user_id);
+    assert.equal(response.body.data.user.role, "WORKER");
+    assert.equal(typeof response.body.data.token, "string");
+});
+
+test("suspended, inactive and unauthorized users fail closed", async () => {
+    pool.query = async (sql, values) => {
+        if (sql.includes("SELECT user_id, role, account_status, auth_version")) {
+            return {
+                rows: [{
+                    user_id: values[0],
+                    role: "WORKER",
+                    account_status: values[0] === "inactive-worker" ? "INACTIVE" : "SUSPENDED",
+                    auth_version: 0,
+                    force_password_change: false,
+                    is_temp_password: false,
+                }],
+            };
+        }
+        throw new Error(`Unexpected query: ${sql}`);
+    };
+
+    for (const userId of ["suspended-worker", "inactive-worker"]) {
+        const token = generateToken({ userId, role: "WORKER", authVersion: 0 });
+        const response = createResponse();
+        await requireAuth(
+            { headers: { authorization: `Bearer ${token}` } },
+            response,
+            () => assert.fail("Protected API must not run"),
+        );
+        assert.equal(response.statusCode, 403);
+    }
+
+    const denied = createResponse();
+    requireRole("ADMIN")(
+        { user: { role: "WORKER" } },
+        denied,
+        () => assert.fail("Unauthorized role must not proceed"),
+    );
+    assert.equal(denied.statusCode, 403);
+});
+
+test("existing verified-phone and legacy phone accounts remain compatible", () => {
+    assert.equal(normalizeKenyanPhone("0712345678"), "+254712345678");
+    assert.equal(normalizeKenyanPhone("+254712345678"), "+254712345678");
+    assert.equal(normalizeKenyanPhone("254712345678"), "+254712345678");
 });

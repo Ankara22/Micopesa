@@ -8,6 +8,8 @@ const excludedTests = new Set([
     "regression.test.js",
     "withdrawalPostgres.integration.test.js",
     "kycUniquenessPostgres.integration.test.js",
+    "nationalIdRoleSecurity.integration.test.js",
+    "nationalIdContractPostgres.integration.test.js",
 ]);
 
 const testFiles = fs.readdirSync(apiTestsDirectory)

@@ -222,10 +222,18 @@ function ComplianceReportsPanel({ title, subtitle }) {
 
             <Modal
                 open={editorOpen}
+                className="compliance-report-editor-modal"
                 title={editingId ? "Edit compliance report" : isSyntheticDemo(form.report_content) ? "Create synthetic demo report draft" : "Create compliance report draft"}
                 onClose={() => !saving && setEditorOpen(false)}
+                footer={(
+                    <div className="compliance-report-editor-actions">
+                        <Button type="button" variant="secondary" disabled={saving} onClick={() => setEditorOpen(false)}>Close</Button>
+                        <Button type="submit" form="compliance-report-editor-form" variant="secondary" loading={saving}>Save draft</Button>
+                        <Button type="button" variant="primary" loading={saving} onClick={handleSubmit}>Submit to regulator</Button>
+                    </div>
+                )}
             >
-                <form className="form-grid" onSubmit={handleSave}>
+                <form id="compliance-report-editor-form" className="form-grid compliance-report-editor-form" onSubmit={handleSave}>
                     {editingId && (
                         <p className="compliance-evidence-note">
                             Existing report ID: <strong>{editingId}</strong>. Saving or submitting updates this report.
@@ -294,16 +302,12 @@ function ComplianceReportsPanel({ title, subtitle }) {
                             maxLength={10000}
                         />
                     ))}
-                    <div className="form-actions">
-                        <Button type="button" variant="secondary" disabled={saving} onClick={() => setEditorOpen(false)}>Close</Button>
-                        <Button type="submit" variant="secondary" loading={saving}>Save draft</Button>
-                        <Button type="button" variant="primary" loading={saving} onClick={handleSubmit}>Submit to regulator</Button>
-                    </div>
                 </form>
             </Modal>
 
             <Modal
                 open={Boolean(viewingReport)}
+                size="review"
                 title="Compliance report history"
                 onClose={() => {
                     setViewingReport(null);

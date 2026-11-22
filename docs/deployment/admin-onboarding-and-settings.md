@@ -413,7 +413,118 @@ year-by-year estimate with its plan. Monthly contributions are modeled at
 month-end. Projection estimates are illustrative, are not guaranteed returns,
 and do not initiate or settle payments.
 
-The withdrawal OTP setting is persisted and audited for the future payout
-dispatch flow. The current application does not dispatch M-Pesa payouts, so
-enabling this setting does not create or imply a live verification or payout
-operation.
+The withdrawal OTP setting is enforced for the approved-claim authorization
+workflow. A payout officer can request or resend an OTP to the worker's
+currently verified phone; the worker must verify it against their own approved
+withdrawal. Codes expire after five minutes, allow five attempts, and are
+limited to three SMS sends per withdrawal per hour with a 60-second cooldown.
+OTP settings or SMS configuration failures block authorization rather than
+bypassing verification.
+
+### Withdrawal payout OTP migration deployment and recovery
+
+The repository has no central migration-version table or migration runner.
+Use the database owner's deployment records together with the target database
+schema; a filename or this source tree alone does not establish whether a
+migration has run.
+
+**Fresh installation:** initialize a new, empty database using
+`database/schema.sql` only. It already contains the `PAYOUT_OFFICER` role,
+OTP authorization and delivery-event tables, supporting indexes, checks,
+foreign keys, and invalidation triggers. Do not also apply
+`database/migration_withdrawal_payout_otp_authorization_forward.sql`.
+`schema.sql` drops existing objects and is never an upgrade script.
+
+**Existing installation:** take and verify a restorable backup, rehearse on an
+isolated clone, and confirm the database's migration history before selecting
+this path. Apply
+`database/migration_withdrawal_payout_otp_authorization_forward.sql` exactly
+once, only after the finalized base schema is present and before deploying API
+code that uses these tables. It accepts only the supported pre-feature state:
+the required public tables/columns, the validated four-role `users_role_check`
+(`WORKER`, `FUND_MANAGER`, `REGULATOR`, `ADMIN`), and no OTP feature objects.
+It stops before DDL if the role check is different, `PAYOUT_OFFICER` is already
+allowed, or OTP objects are present. Do not work around a failed preflight;
+identify the actual schema revision and obtain a reviewed migration for that
+state.
+
+If the approved existing-database path also includes
+`database/migration_pension_account_ledger.sql`, apply that ledger migration
+first. It already supplies unique keys for
+`pension_accounts(account_id, user_id)` and
+`withdrawal_claims(claim_id, account_id)`. The OTP migration detects and reuses
+valid equivalent unique indexes/constraints; it creates a supporting index
+only when no equivalent exists. On a fresh canonical installation, the ledger
+migration similarly adopts the canonical OTP indexes as its unique
+constraints. This avoids redundant indexes without weakening either
+composite foreign key. Keep the separately documented ledger/M-Pesa guard
+migrations in their approved order. The OTP migration does not replace or
+disable those protections.
+
+Run the migration in the controlled deployment window with the standard
+stop-on-error setting (for example, `psql -v ON_ERROR_STOP=1`). It is
+transactional and serializes concurrent attempts with a transaction-scoped
+advisory lock. Record the successful filename/revision in the deployment's
+external migration ledger. If it errors, stop immediately: PostgreSQL will
+roll back the transaction; if the session remains open in an aborted
+transaction, issue `ROLLBACK` or close the session before inspecting state.
+Do not rerun until the database owner confirms the preflight state again.
+
+After commit, deploy the API separately and verify the resulting schema with
+read-only catalog queries. At minimum, verify:
+
+```sql
+SELECT to_regclass('public.withdrawal_payout_otp_authorizations'),
+       to_regclass('public.withdrawal_payout_otp_delivery_events');
+
+SELECT conname, pg_get_constraintdef(oid)
+FROM pg_constraint
+WHERE conrelid = 'public.users'::regclass
+  AND conname = 'users_role_check';
+
+SELECT indexrelid::regclass AS index_name,
+       indrelid::regclass AS table_name,
+       indisunique, indisvalid, indisready,
+       pg_get_indexdef(indexrelid)
+FROM pg_index
+WHERE indrelid IN (
+    'public.withdrawal_claims'::regclass,
+    'public.pension_accounts'::regclass,
+    'public.withdrawal_payout_otp_authorizations'::regclass,
+    'public.withdrawal_payout_otp_delivery_events'::regclass
+);
+
+SELECT tgrelid::regclass AS table_name, tgname, tgenabled
+FROM pg_trigger
+WHERE NOT tgisinternal
+  AND tgname IN (
+      'trg_withdrawal_claims_invalidate_payout_otp',
+      'trg_users_invalidate_payout_otp',
+      'trg_pension_accounts_invalidate_payout_otp',
+      'trg_00_disable_payout_attempts',
+      'trg_00_disable_payout_verifications',
+      'trg_mpesa_attempt_requires_active_ledger',
+      'trg_pension_ledger_block_unsettled_mpesa_attempts'
+  )
+ORDER BY tgname;
+```
+
+Compare the catalog output, key financial row counts, and the ledger/M-Pesa
+guard state to the recorded pre-deployment baseline. A missing payout guard
+because its prerequisite migration was never installed is not evidence that
+this OTP migration enabled or disabled it; stop and follow the relevant
+ledger runbook.
+
+The migration is forward-only. If application deployment fails after the
+database commit, keep the schema and authorization/delivery history, and use
+an application rollback only if that application version tolerates the
+additive schema. Otherwise keep the feature unavailable and prepare a reviewed
+forward repair. Dropping OTP tables is not a routine rollback: once records
+exist, it destroys authorization, delivery-rate-limit, and audit evidence;
+it can also invalidate outstanding references and hinder incident recovery.
+Never delete or rewrite historical withdrawal, payment, pension-ledger, or
+audit records as part of this deployment.
+
+This workflow records authorization only. The application still has no payout
+executor: successful OTP verification does not create a transaction, change a
+claim to paid, or initiate M-Pesa.

@@ -12,6 +12,8 @@ const mocks = vi.hoisted(() => ({
     toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
     updateUserStatus: vi.fn(),
     useAuth: vi.fn(),
+    targetIsDeleted: false,
+    userStatus: "ACTIVE",
 }));
 
 vi.mock("../../services/adminService", () => ({
@@ -26,14 +28,15 @@ vi.mock("../../components/ui/ToastContext", () => ({ useToast: () => mocks.toast
 vi.mock("../../hooks/useApi", () => ({
     default: () => ({
         data: [{
-            user_id: "TARGET-USER-123456789012",
-            full_name: "Test User",
-            phone: "07000000002",
-            role: "WORKER",
-            account_status: "ACTIVE",
-            email_verified: false,
-            phone_verified_at: null,
-        }],
+                user_id: "TARGET-USER-123456789012",
+                full_name: "Test User",
+                phone: "07000000002",
+                role: "WORKER",
+                account_status: mocks.userStatus,
+                is_deleted: mocks.targetIsDeleted,
+                email_verified: false,
+                phone_verified_at: null,
+            }],
         error: null,
         loading: false,
         refreshing: false,
@@ -42,13 +45,22 @@ vi.mock("../../hooks/useApi", () => ({
     }),
 }));
 
-describe("UserManagement deletion confirmation", () => {
+describe("UserManagement account actions", () => {
     afterEach(cleanup);
 
     beforeEach(() => {
         vi.clearAllMocks();
+        mocks.userStatus = "ACTIVE";
+        mocks.targetIsDeleted = false;
         mocks.useAuth.mockReturnValue({ user: { user_id: "ADMIN-USER-123456789012" } });
-        mocks.deleteUser.mockResolvedValue({ message: "User deleted permanently" });
+        mocks.deleteUser.mockResolvedValue({
+            message: "Historical records are protected. The account was anonymized.",
+        });
+        mocks.updateUserStatus.mockResolvedValue({
+            user_id: "TARGET-USER-123456789012",
+            full_name: "Test User",
+            account_status: "SUSPENDED",
+        });
         mocks.createStaffAccount.mockResolvedValue({
             status: "success",
             message: "Messages accepted; the account remains inactive until email verification.",
@@ -110,14 +122,74 @@ describe("UserManagement deletion confirmation", () => {
         expect(mocks.toast.info).not.toHaveBeenCalled();
     });
 
-    it("requires typing DELETE and refreshes the list only after successful deletion", async () => {
+    it("keeps one status toggle and one Delete action", async () => {
+        render(<UserManagement />);
+
+        expect(screen.getByRole("button", { name: "Suspend" })).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Delete" })).toBeInTheDocument();
+        expect(screen.getAllByRole("button", { name: "Delete" })).toHaveLength(1);
+        expect(screen.queryByRole("button", { name: "Deactivate" })).not.toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "Reactivate" })).not.toBeInTheDocument();
+        fireEvent.click(screen.getByRole("button", { name: "Suspend" }));
+
+        await waitFor(() => {
+            expect(mocks.updateUserStatus).toHaveBeenCalledWith(
+                "TARGET-USER-123456789012",
+                "SUSPENDED",
+            );
+        });
+    });
+
+    it("uses a single Activate action for a non-active account", async () => {
+        mocks.userStatus = "SUSPENDED";
+        mocks.updateUserStatus.mockResolvedValueOnce({
+            user_id: "TARGET-USER-123456789012",
+            full_name: "Test User",
+            account_status: "ACTIVE",
+        });
+        render(<UserManagement />);
+
+        expect(screen.getByRole("button", { name: "Activate" })).toBeInTheDocument();
+        expect(screen.getAllByRole("button", { name: "Delete" })).toHaveLength(1);
+        expect(screen.queryByRole("button", { name: "Reactivate" })).not.toBeInTheDocument();
+        fireEvent.click(screen.getByRole("button", { name: "Activate" }));
+
+        await waitFor(() => {
+            expect(mocks.updateUserStatus).toHaveBeenCalledWith(
+                "TARGET-USER-123456789012",
+                "ACTIVE",
+            );
+        });
+    });
+
+    it("keeps anonymized historical accounts visible but prevents reactivation or deletion", () => {
+        mocks.targetIsDeleted = true;
+        mocks.userStatus = "SUSPENDED";
+        render(<UserManagement />);
+
+        expect(screen.getByText("DELETED")).toBeInTheDocument();
+        expect(screen.getByText("History retained")).toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "Activate" })).not.toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "Delete" })).not.toBeInTheDocument();
+    });
+
+    it("does not show worker applications or account approval controls", () => {
+        render(<UserManagement />);
+
+        expect(screen.queryByText("Worker applications")).not.toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "Approve application" })).not.toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "Reject application" })).not.toBeInTheDocument();
+    });
+
+    it("requires typing DELETE and refreshes after account deletion", async () => {
         render(<UserManagement />);
 
         fireEvent.click(screen.getByRole("button", { name: "Delete" }));
-        expect(screen.getByRole("dialog", { name: "Permanently delete user" })).toHaveTextContent("Test User");
-        expect(screen.getByText(/This cannot be undone/)).toBeInTheDocument();
+        expect(screen.getByRole("dialog", { name: "Delete user account" })).toHaveTextContent("Test User");
+        expect(screen.getByText(/accounts without protected history are permanently deleted/i)).toBeInTheDocument();
+        expect(screen.getByText(/a later signup creates a separate account with no inherited financial or KYC records/i)).toBeInTheDocument();
 
-        const confirmButton = screen.getByRole("button", { name: "Delete permanently" });
+        const confirmButton = screen.getByRole("button", { name: "Delete account" });
         expect(confirmButton).toBeDisabled();
         expect(mocks.refetch).not.toHaveBeenCalled();
 
@@ -129,16 +201,18 @@ describe("UserManagement deletion confirmation", () => {
             expect(mocks.deleteUser).toHaveBeenCalledWith("TARGET-USER-123456789012");
             expect(mocks.refetch).toHaveBeenCalledTimes(1);
         });
-        expect(mocks.toast.success).toHaveBeenCalledWith("Test User was permanently deleted.");
+        expect(mocks.toast.success).toHaveBeenCalledWith(
+            "Historical records are protected. The account was anonymized."
+        );
     });
 
-    it("does not refresh the list after an unsuccessful deletion", async () => {
+    it("does not refresh the list after deletion fails", async () => {
         mocks.deleteUser.mockRejectedValue(new Error("Deletion blocked"));
         render(<UserManagement />);
 
         fireEvent.click(screen.getByRole("button", { name: "Delete" }));
         fireEvent.change(screen.getByLabelText("Type DELETE to confirm"), { target: { value: "DELETE" } });
-        fireEvent.click(screen.getByRole("button", { name: "Delete permanently" }));
+        fireEvent.click(screen.getByRole("button", { name: "Delete account" }));
 
         await waitFor(() => expect(mocks.toast.error).toHaveBeenCalledWith("Deletion blocked"));
         expect(mocks.refetch).not.toHaveBeenCalled();
@@ -153,7 +227,7 @@ describe("UserManagement deletion confirmation", () => {
 
         fireEvent.click(screen.getByRole("button", { name: "Delete" }));
         fireEvent.change(screen.getByLabelText("Type DELETE to confirm"), { target: { value: "DELETE" } });
-        const confirmButton = screen.getByRole("button", { name: "Delete permanently" });
+        const confirmButton = screen.getByRole("button", { name: "Delete account" });
         fireEvent.click(confirmButton);
 
         await waitFor(() => expect(mocks.deleteUser).toHaveBeenCalledTimes(1));
@@ -161,7 +235,7 @@ describe("UserManagement deletion confirmation", () => {
         fireEvent.click(confirmButton);
         expect(mocks.deleteUser).toHaveBeenCalledTimes(1);
 
-        resolveDeletion({ message: "User deleted permanently" });
+        resolveDeletion({ message: "Account deleted." });
         await waitFor(() => expect(mocks.refetch).toHaveBeenCalledTimes(1));
     });
 });
